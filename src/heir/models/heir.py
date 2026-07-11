@@ -1,0 +1,648 @@
+"""Hierarchical, sample-prototype-informed HEIR model."""
+
+import math
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+
+import torch
+from torch import Tensor, nn
+from torch.autograd import Function
+
+from .graph import GraphContextConfig, GraphContextEncoder
+from .rna import RNAVAE, RNADecoder, RNAVAEConfig
+
+
+def _positive_dims(values: Sequence[int], name: str) -> Tuple[int, ...]:
+    dims = tuple(int(value) for value in values)
+    if not dims or any(value <= 0 for value in dims):
+        raise ValueError("%s must contain positive widths" % name)
+    return dims
+
+
+def _hidden_stack(input_dim: int, widths: Sequence[int], dropout: float) -> nn.Sequential:
+    layers = []
+    previous = input_dim
+    for width in widths:
+        layers.extend(
+            [
+                nn.Linear(previous, width),
+                nn.LayerNorm(width),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ]
+        )
+        previous = width
+    return nn.Sequential(*layers)
+
+
+class _GradientReverse(Function):
+    @staticmethod
+    def forward(ctx: Any, value: Tensor, scale: float) -> Tensor:
+        ctx.scale = float(scale)
+        return value.view_as(value)
+
+    @staticmethod
+    def backward(ctx: Any, gradient: Tensor) -> Tuple[Tensor, None]:
+        return -ctx.scale * gradient, None
+
+
+@dataclass(frozen=True)
+class HEIRConfig:
+    """Checkpoint-safe architecture and routing configuration."""
+
+    morphology_dim: int
+    num_cell_types: int
+    expression_dim: int
+    latent_dim: int = 32
+    graph_hidden_dim: int = 128
+    graph_output_dim: int = 128
+    graph_layers: int = 2
+    trunk_hidden_dims: Tuple[int, ...] = (256, 128)
+    decoder_hidden_dims: Tuple[int, ...] = (128, 256)
+    dropout: float = 0.1
+    normalize_messages: bool = True
+    graph_residual: bool = True
+    fine_to_parent: Optional[Tuple[int, ...]] = None
+    num_parent_types: int = 0
+    prototype_temperature: float = 0.5
+    prototype_match_level: str = "fine"
+    hard_type_routing: bool = True
+    unknown_logit_bias: float = 0.0
+    abstain_threshold: float = 0.6
+    logvar_min: float = -12.0
+    logvar_max: float = 8.0
+    nonnegative_expression: bool = False
+    num_domains: int = 0
+    domain_gradient_scale: float = 1.0
+    prototype_type_cost_weight: float = 1.0
+    scgpt_embedding_dim: int = 0
+
+    def __post_init__(self) -> None:
+        dimensions = (
+            self.morphology_dim,
+            self.expression_dim,
+            self.latent_dim,
+            self.graph_hidden_dim,
+            self.graph_output_dim,
+            self.graph_layers,
+        )
+        if any(value <= 0 for value in dimensions):
+            raise ValueError("feature dimensions and graph_layers must be positive")
+        if self.num_cell_types < 2:
+            raise ValueError("num_cell_types must be at least two")
+        if self.num_domains < 0 or self.num_domains == 1:
+            raise ValueError("num_domains must be zero or at least two")
+        if self.domain_gradient_scale < 0:
+            raise ValueError("domain_gradient_scale must be non-negative")
+        if self.prototype_type_cost_weight < 0:
+            raise ValueError("prototype_type_cost_weight must be non-negative")
+        if self.scgpt_embedding_dim < 0:
+            raise ValueError("scgpt_embedding_dim must be non-negative")
+        object.__setattr__(
+            self,
+            "trunk_hidden_dims",
+            _positive_dims(self.trunk_hidden_dims, "trunk_hidden_dims"),
+        )
+        object.__setattr__(
+            self,
+            "decoder_hidden_dims",
+            _positive_dims(self.decoder_hidden_dims, "decoder_hidden_dims"),
+        )
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if self.prototype_temperature <= 0:
+            raise ValueError("prototype_temperature must be positive")
+        if self.prototype_match_level not in {"fine", "parent"}:
+            raise ValueError("prototype_match_level must be fine or parent")
+        if not 0.0 < self.abstain_threshold <= 1.0:
+            raise ValueError("abstain_threshold must be in (0, 1]")
+        if self.logvar_min >= self.logvar_max:
+            raise ValueError("logvar_min must be smaller than logvar_max")
+
+        if self.fine_to_parent is None:
+            if self.num_parent_types != 0:
+                raise ValueError("num_parent_types requires fine_to_parent")
+            if self.prototype_match_level == "parent":
+                raise ValueError("parent prototype matching requires fine_to_parent")
+        else:
+            mapping = tuple(int(value) for value in self.fine_to_parent)
+            if len(mapping) != self.num_cell_types or any(value < 0 for value in mapping):
+                raise ValueError("fine_to_parent must contain one nonnegative parent per fine type")
+            inferred = max(mapping) + 1
+            if self.num_parent_types not in (0, inferred):
+                raise ValueError("num_parent_types does not agree with fine_to_parent")
+            object.__setattr__(self, "fine_to_parent", mapping)
+            object.__setattr__(self, "num_parent_types", inferred)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return standard-type checkpoint metadata."""
+
+        result = asdict(self)
+        result["trunk_hidden_dims"] = list(self.trunk_hidden_dims)
+        result["decoder_hidden_dims"] = list(self.decoder_hidden_dims)
+        if self.fine_to_parent is not None:
+            result["fine_to_parent"] = list(self.fine_to_parent)
+        return result
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> "HEIRConfig":
+        """Reconstruct a config from metadata."""
+
+        data = dict(values)
+        for name in ("trunk_hidden_dims", "decoder_hidden_dims", "fine_to_parent"):
+            if data.get(name) is not None:
+                data[name] = tuple(data[name])
+        return cls(**data)
+
+
+@dataclass
+class HEIROutput:
+    """All per-cell predictions and prototype-routing diagnostics."""
+
+    type_logits: Tensor
+    type_probabilities: Tensor
+    fine_type_logits: Tensor
+    fine_type_probabilities: Tensor
+    parent_type_logits: Optional[Tensor]
+    parent_type_probabilities: Optional[Tensor]
+    hierarchy_parent_probabilities: Optional[Tensor]
+    prototype_query: Tensor
+    prototype_cost: Tensor
+    prototype_logits: Tensor
+    prototype_probabilities: Tensor
+    prototype_types: Tensor
+    prototype_weights: Tensor
+    prototype_mask: Tensor
+    prototype_latent: Tensor
+    residual_mu: Tensor
+    residual_logvar: Tensor
+    residual: Tensor
+    latent_mu: Tensor
+    latent: Tensor
+    expression: Tensor
+    type_entropy: Tensor
+    prototype_entropy: Tensor
+    residual_uncertainty: Tensor
+    unknown_probability: Tensor
+    abstain_score: Tensor
+    abstain: Tensor
+    cell_embedding: Tensor
+    scgpt_embedding: Optional[Tensor]
+    domain_logits: Optional[Tensor]
+
+    @property
+    def decoded_expression(self) -> Tensor:
+        """Alias for decoder output."""
+
+        return self.expression
+
+    @property
+    def unknown_signal(self) -> Tensor:
+        """Alias for explicit unassigned prototype probability."""
+
+        return self.unknown_probability
+
+    def as_dict(self) -> Dict[str, Optional[Tensor]]:
+        """Return a generic mapping for training and export code."""
+
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+class HEIRModel(nn.Module):
+    """Infer a type-compatible molecular prototype plus morphology residual."""
+
+    def __init__(self, config: HEIRConfig) -> None:
+        super().__init__()
+        self.config = config
+        graph_config = GraphContextConfig(
+            input_dim=config.morphology_dim,
+            hidden_dim=config.graph_hidden_dim,
+            output_dim=config.graph_output_dim,
+            num_layers=config.graph_layers,
+            dropout=config.dropout,
+            normalize_messages=config.normalize_messages,
+            residual=config.graph_residual,
+        )
+        self.graph_encoder = GraphContextEncoder(graph_config)
+        self.trunk = _hidden_stack(
+            config.morphology_dim + config.graph_output_dim,
+            config.trunk_hidden_dims,
+            config.dropout,
+        )
+        hidden_dim = config.trunk_hidden_dims[-1]
+        self.fine_type_head = nn.Linear(hidden_dim, config.num_cell_types)
+        self.parent_type_head: Optional[nn.Linear]
+        if config.fine_to_parent is None:
+            self.parent_type_head = None
+            mapping = torch.empty(0, dtype=torch.long)
+        else:
+            self.parent_type_head = nn.Linear(hidden_dim, config.num_parent_types)
+            mapping = torch.tensor(config.fine_to_parent, dtype=torch.long)
+        self.register_buffer("fine_to_parent_index", mapping, persistent=True)
+
+        self.prototype_query_head = nn.Linear(hidden_dim, config.latent_dim)
+        self.residual_mu_head = nn.Linear(hidden_dim, config.latent_dim)
+        self.residual_logvar_head = nn.Linear(hidden_dim, config.latent_dim)
+        self.unknown_head = nn.Linear(hidden_dim, 1)
+        self.scgpt_head = (
+            nn.Linear(hidden_dim, config.scgpt_embedding_dim)
+            if config.scgpt_embedding_dim > 0
+            else None
+        )
+        self.domain_head = (
+            nn.Linear(hidden_dim, config.num_domains) if config.num_domains >= 2 else None
+        )
+
+        decoder_config = RNAVAEConfig(
+            input_dim=config.expression_dim,
+            latent_dim=config.latent_dim,
+            hidden_dims=tuple(reversed(config.decoder_hidden_dims)),
+            decoder_hidden_dims=config.decoder_hidden_dims,
+            dropout=config.dropout,
+            logvar_min=config.logvar_min,
+            logvar_max=config.logvar_max,
+            nonnegative_output=config.nonnegative_expression,
+        )
+        self.expression_decoder = RNADecoder(decoder_config)
+
+    def _hierarchical_types(
+        self,
+        embedding: Tensor,
+    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor], Optional[Tensor]]:
+        fine_logits = self.fine_type_head(embedding)
+        fine_probabilities = torch.softmax(fine_logits, dim=-1)
+        if self.parent_type_head is None:
+            return fine_logits, fine_probabilities, None, None, None
+        parent_logits = self.parent_type_head(embedding)
+        parent_probabilities = torch.softmax(parent_logits, dim=-1)
+        parent_log_prior = parent_probabilities.clamp_min(1e-12).log()
+        hierarchical_logits = fine_logits + parent_log_prior.index_select(
+            1,
+            self.fine_to_parent_index,
+        )
+        probabilities = torch.softmax(hierarchical_logits, dim=-1)
+        aggregate = probabilities.new_zeros((probabilities.shape[0], self.config.num_parent_types))
+        aggregate = aggregate.index_add(1, self.fine_to_parent_index, probabilities)
+        return hierarchical_logits, probabilities, fine_logits, parent_logits, aggregate
+
+    def _prepare_prototypes(
+        self,
+        num_cells: int,
+        reference: Tensor,
+        prototype_means: Optional[Tensor],
+        prototype_types: Optional[Tensor],
+        prototype_weights: Optional[Tensor],
+        prototype_mask: Optional[Tensor],
+        sample_index: Optional[Tensor],
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        if prototype_means is None:
+            empty_means = reference.new_empty((num_cells, 0, self.config.latent_dim))
+            empty_types = torch.empty((num_cells, 0), dtype=torch.long, device=reference.device)
+            empty_weights = reference.new_empty((num_cells, 0))
+            empty_mask = torch.empty((num_cells, 0), dtype=torch.bool, device=reference.device)
+            return empty_means, empty_types, empty_weights, empty_mask
+        if prototype_means.device != reference.device or not torch.is_floating_point(
+            prototype_means
+        ):
+            raise ValueError("prototype_means must be floating point on the morphology device")
+        if prototype_means.shape[-1] != self.config.latent_dim:
+            raise ValueError("prototype_means has the wrong latent dimension")
+        if not torch.isfinite(prototype_means).all():
+            raise ValueError("prototype_means must be finite")
+
+        if prototype_means.ndim == 2:
+            samples = 1
+            prototypes = prototype_means.shape[0]
+            means = prototype_means.unsqueeze(0).expand(num_cells, -1, -1)
+            expected_meta_shape = (prototypes,)
+        elif prototype_means.ndim == 3:
+            samples, prototypes = prototype_means.shape[:2]
+            if sample_index is None:
+                if samples != 1:
+                    raise ValueError("sample_index is required for multiple prototype banks")
+                cell_samples = torch.zeros(num_cells, dtype=torch.long, device=reference.device)
+            else:
+                if sample_index.shape != (num_cells,) or sample_index.dtype != torch.long:
+                    raise ValueError("sample_index must be long with one value per cell")
+                if sample_index.device != reference.device:
+                    raise ValueError("sample_index and morphology must share a device")
+                if sample_index.numel() and (
+                    bool((sample_index < 0).any()) or int(sample_index.max()) >= samples
+                ):
+                    raise ValueError("sample_index references an unavailable prototype bank")
+                cell_samples = sample_index
+            means = prototype_means.index_select(0, cell_samples)
+            expected_meta_shape = (samples, prototypes)
+        else:
+            raise ValueError("prototype_means must have shape (P, L) or (S, P, L)")
+
+        def metadata(value: Optional[Tensor], name: str, default: Tensor) -> Tensor:
+            if value is None:
+                value = default
+            if value.device != reference.device:
+                raise ValueError("%s and morphology must share a device" % name)
+            if prototype_means.ndim == 2:
+                if value.shape != expected_meta_shape:
+                    raise ValueError("%s has the wrong shape" % name)
+                return value.unsqueeze(0).expand(num_cells, -1)
+            if value.shape != expected_meta_shape:
+                raise ValueError("%s has the wrong shape" % name)
+            return value.index_select(0, cell_samples)
+
+        default_types = torch.full(
+            expected_meta_shape,
+            -1,
+            dtype=torch.long,
+            device=reference.device,
+        )
+        default_weights = reference.new_ones(expected_meta_shape)
+        default_mask = torch.ones(expected_meta_shape, dtype=torch.bool, device=reference.device)
+        types = metadata(prototype_types, "prototype_types", default_types)
+        weights = metadata(prototype_weights, "prototype_weights", default_weights)
+        mask = metadata(prototype_mask, "prototype_mask", default_mask)
+        if types.dtype != torch.long:
+            raise TypeError("prototype_types must have dtype torch.long")
+        if types.numel() and (
+            bool((types < -1).any()) or bool((types >= self.config.num_cell_types).any())
+        ):
+            raise ValueError("prototype_types must be -1 or a valid fine type")
+        if not torch.is_floating_point(weights):
+            raise TypeError("prototype_weights must be floating point")
+        if not torch.isfinite(weights).all() or bool((weights < 0).any()):
+            raise ValueError("prototype_weights must be finite and nonnegative")
+        if mask.dtype != torch.bool:
+            raise TypeError("prototype_mask must have dtype torch.bool")
+        return means, types, weights.to(reference.dtype), mask & (weights > 0)
+
+    def _prototype_compatibility(
+        self,
+        type_probabilities: Tensor,
+        hierarchy_parent_probabilities: Optional[Tensor],
+        prototype_types: Tensor,
+        base_mask: Tensor,
+        cell_type_constraints: Optional[Tensor],
+    ) -> Tuple[Tensor, Tensor]:
+        typed = prototype_types >= 0
+        gathered_types = prototype_types.clamp_min(0)
+        if self.config.prototype_match_level == "parent":
+            assert hierarchy_parent_probabilities is not None
+            prototype_level = self.fine_to_parent_index.index_select(
+                0,
+                gathered_types.reshape(-1),
+            ).reshape_as(gathered_types)
+            probabilities = hierarchy_parent_probabilities.gather(1, prototype_level)
+        else:
+            prototype_level = gathered_types
+            probabilities = type_probabilities.gather(1, prototype_level)
+        compatibility = torch.where(typed, probabilities, torch.ones_like(probabilities))
+        valid = base_mask
+
+        if cell_type_constraints is not None:
+            if cell_type_constraints.device != type_probabilities.device:
+                raise ValueError("cell_type_constraints and morphology must share a device")
+            if cell_type_constraints.ndim == 1:
+                if cell_type_constraints.shape[0] != type_probabilities.shape[0]:
+                    raise ValueError("cell_type_constraints must contain one value per cell")
+                if cell_type_constraints.dtype != torch.long:
+                    raise TypeError("hard cell_type_constraints must be long")
+                constrained = cell_type_constraints >= 0
+                if bool((cell_type_constraints >= self.config.num_cell_types).any()):
+                    raise ValueError("cell_type_constraints contains an invalid type")
+                required = cell_type_constraints.clamp_min(0)
+                if self.config.prototype_match_level == "parent":
+                    required = self.fine_to_parent_index.index_select(0, required)
+                allowed = prototype_level == required.unsqueeze(1)
+                allowed = allowed | ~typed | ~constrained.unsqueeze(1)
+                valid = valid & allowed
+                compatibility = torch.where(allowed, torch.ones_like(compatibility), compatibility)
+            elif cell_type_constraints.ndim == 2:
+                if cell_type_constraints.shape != type_probabilities.shape:
+                    raise ValueError("soft constraints must have shape (cells, fine types)")
+                allowed_fine = cell_type_constraints.to(dtype=type_probabilities.dtype)
+                if bool((allowed_fine < 0).any()) or not torch.isfinite(allowed_fine).all():
+                    raise ValueError("soft constraints must be finite and nonnegative")
+                allowed = allowed_fine.gather(1, gathered_types)
+                allowed = torch.where(typed, allowed, torch.ones_like(allowed))
+                compatibility = compatibility * allowed
+                valid = valid & (allowed > 0)
+            else:
+                raise ValueError("cell_type_constraints must have one or two dimensions")
+        elif self.config.hard_type_routing:
+            routed = type_probabilities.argmax(dim=-1)
+            if self.config.prototype_match_level == "parent":
+                routed = self.fine_to_parent_index.index_select(0, routed)
+            allowed = (prototype_level == routed.unsqueeze(1)) | ~typed
+            valid = valid & allowed
+            compatibility = torch.where(allowed, torch.ones_like(compatibility), compatibility)
+        return compatibility, valid
+
+    @staticmethod
+    def _masked_prototype_softmax(
+        known_logits: Tensor,
+        known_mask: Tensor,
+        unknown_logits: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        masked = known_logits.masked_fill(~known_mask, -torch.inf)
+        if masked.shape[1]:
+            maximum = torch.maximum(masked.max(dim=1).values, unknown_logits)
+        else:
+            maximum = unknown_logits
+        known_exp = torch.exp(masked - maximum.unsqueeze(1))
+        known_exp = torch.where(known_mask, known_exp, torch.zeros_like(known_exp))
+        unknown_exp = torch.exp(unknown_logits - maximum)
+        denominator = known_exp.sum(dim=1) + unknown_exp
+        return known_exp / denominator.unsqueeze(1), unknown_exp / denominator
+
+    def forward(
+        self,
+        morphology: Tensor,
+        edge_index: Optional[Tensor] = None,
+        edge_weight: Optional[Tensor] = None,
+        *,
+        prototype_means: Optional[Tensor] = None,
+        prototype_types: Optional[Tensor] = None,
+        prototype_weights: Optional[Tensor] = None,
+        prototype_mask: Optional[Tensor] = None,
+        sample_index: Optional[Tensor] = None,
+        cell_type_constraints: Optional[Tensor] = None,
+        sample_latent: Optional[bool] = None,
+    ) -> HEIROutput:
+        """Predict cell types and molecular states for a bag of nuclei."""
+
+        if morphology.ndim != 2 or morphology.shape[1] != self.config.morphology_dim:
+            raise ValueError("morphology has the wrong shape")
+        if not torch.is_floating_point(morphology):
+            raise TypeError("morphology must be floating point")
+        if edge_index is None:
+            edge_index = torch.empty((2, 0), dtype=torch.long, device=morphology.device)
+        context = self.graph_encoder(morphology, edge_index, edge_weight)
+        embedding = self.trunk(torch.cat((morphology, context), dim=-1))
+        type_logits, type_probabilities, raw_fine_logits, parent_logits, hierarchy_parent = (
+            self._hierarchical_types(embedding)
+        )
+        fine_logits = type_logits if raw_fine_logits is None else raw_fine_logits
+        fine_probabilities = torch.softmax(fine_logits, dim=-1)
+        parent_probabilities = (
+            None if parent_logits is None else torch.softmax(parent_logits, dim=-1)
+        )
+
+        means, types, weights, mask = self._prepare_prototypes(
+            morphology.shape[0],
+            morphology,
+            prototype_means,
+            prototype_types,
+            prototype_weights,
+            prototype_mask,
+            sample_index,
+        )
+        query = self.prototype_query_head(embedding)
+        cost = (query.unsqueeze(1) - means).square().mean(dim=-1)
+        compatibility, compatible_mask = self._prototype_compatibility(
+            type_probabilities,
+            hierarchy_parent,
+            types,
+            mask,
+            cell_type_constraints,
+        )
+        known_logits = -cost / self.config.prototype_temperature
+        known_logits = known_logits + weights.clamp_min(1e-12).log()
+        known_logits = known_logits + compatibility.clamp_min(1e-12).log()
+        unknown_logits = self.unknown_head(embedding).squeeze(-1)
+        unknown_logits = unknown_logits + self.config.unknown_logit_bias
+        prototype_probabilities, unknown_probability = self._masked_prototype_softmax(
+            known_logits,
+            compatible_mask,
+            unknown_logits,
+        )
+        # Export the real-prototype cost, including the hierarchical type
+        # term. HEIRTrainer applies the paired Bernoulli real/dustbin gate at
+        # the UOT boundary so both mutually exclusive outcomes stay coherent.
+        transport_cost = (
+            cost - self.config.prototype_type_cost_weight * compatibility.clamp_min(1e-12).log()
+        )
+        prototype_latent = (prototype_probabilities.unsqueeze(-1) * means).sum(dim=1)
+
+        residual_mu = self.residual_mu_head(embedding)
+        residual_logvar = self.residual_logvar_head(embedding).clamp(
+            min=self.config.logvar_min,
+            max=self.config.logvar_max,
+        )
+        should_sample = self.training if sample_latent is None else sample_latent
+        if should_sample:
+            residual = residual_mu + torch.randn_like(residual_mu) * torch.exp(
+                0.5 * residual_logvar
+            )
+        else:
+            residual = residual_mu
+        latent_mu = prototype_latent + residual_mu
+        latent = prototype_latent + residual
+        expression = self.expression_decoder(latent)
+
+        eps = torch.finfo(type_probabilities.dtype).tiny
+        type_entropy = -(type_probabilities * type_probabilities.clamp_min(eps).log()).sum(
+            dim=-1
+        ) / math.log(self.config.num_cell_types)
+        all_prototypes = torch.cat(
+            (prototype_probabilities, unknown_probability.unsqueeze(1)),
+            dim=1,
+        )
+        if all_prototypes.shape[1] > 1:
+            prototype_entropy = -(all_prototypes * all_prototypes.clamp_min(eps).log()).sum(
+                dim=-1
+            ) / math.log(all_prototypes.shape[1])
+        else:
+            prototype_entropy = unknown_probability.new_zeros(unknown_probability.shape)
+        residual_variance = residual_logvar.exp().mean(dim=-1)
+        residual_uncertainty = -torch.expm1(-residual_variance)
+        certainty = (
+            (1.0 - unknown_probability)
+            * (1.0 - type_entropy)
+            * (1.0 - prototype_entropy)
+            * (1.0 - residual_uncertainty)
+        )
+        abstain_score = (1.0 - certainty).clamp(0.0, 1.0)
+        domain_logits = None
+        scgpt_embedding = None if self.scgpt_head is None else self.scgpt_head(embedding)
+        if self.domain_head is not None:
+            reversed_embedding = _GradientReverse.apply(
+                embedding,
+                self.config.domain_gradient_scale,
+            )
+            domain_logits = self.domain_head(reversed_embedding)
+
+        return HEIROutput(
+            type_logits=type_logits,
+            type_probabilities=type_probabilities,
+            fine_type_logits=fine_logits,
+            fine_type_probabilities=fine_probabilities,
+            parent_type_logits=parent_logits,
+            parent_type_probabilities=parent_probabilities,
+            hierarchy_parent_probabilities=hierarchy_parent,
+            prototype_query=query,
+            prototype_cost=transport_cost,
+            prototype_logits=known_logits,
+            prototype_probabilities=prototype_probabilities,
+            prototype_types=types,
+            prototype_weights=weights,
+            prototype_mask=compatible_mask,
+            prototype_latent=prototype_latent,
+            residual_mu=residual_mu,
+            residual_logvar=residual_logvar,
+            residual=residual,
+            latent_mu=latent_mu,
+            latent=latent,
+            expression=expression,
+            type_entropy=type_entropy,
+            prototype_entropy=prototype_entropy,
+            residual_uncertainty=residual_uncertainty,
+            unknown_probability=unknown_probability,
+            abstain_score=abstain_score,
+            abstain=abstain_score >= self.config.abstain_threshold,
+            cell_embedding=embedding,
+            scgpt_embedding=scgpt_embedding,
+            domain_logits=domain_logits,
+        )
+
+    def load_rna_decoder(self, rna_vae: RNAVAE, freeze: bool = True) -> None:
+        """Transfer a topology-compatible RNA decoder and optionally freeze it."""
+
+        if rna_vae.config.latent_dim != self.config.latent_dim:
+            raise ValueError("RNA VAE latent_dim does not match HEIR")
+        if rna_vae.config.input_dim != self.config.expression_dim:
+            raise ValueError("RNA VAE input_dim does not match HEIR")
+        try:
+            self.expression_decoder.load_state_dict(rna_vae.decoder.state_dict(), strict=True)
+        except RuntimeError as error:
+            raise ValueError("RNA VAE decoder topology does not match HEIR") from error
+        self.freeze_expression_decoder(freeze)
+
+    def freeze_expression_decoder(self, freeze: bool = True) -> None:
+        """Freeze or unfreeze the expression decoder."""
+
+        for parameter in self.expression_decoder.parameters():
+            parameter.requires_grad_(not freeze)
+
+    def checkpoint(self) -> Dict[str, Any]:
+        """Create a self-describing checkpoint."""
+
+        return {"config": self.config.to_dict(), "state_dict": self.state_dict()}
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint: Mapping[str, Any],
+        strict: bool = True,
+    ) -> "HEIRModel":
+        """Reconstruct a model from :meth:`checkpoint` output."""
+
+        if "config" not in checkpoint or "state_dict" not in checkpoint:
+            raise KeyError("checkpoint must contain config and state_dict")
+        model = cls(HEIRConfig.from_dict(checkpoint["config"]))
+        model.load_state_dict(checkpoint["state_dict"], strict=strict)
+        return model
+
+
+HEIR = HEIRModel
+
+
+__all__ = ["HEIRConfig", "HEIROutput", "HEIRModel", "HEIR"]

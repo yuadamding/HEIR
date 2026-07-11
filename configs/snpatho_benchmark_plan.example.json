@@ -1,0 +1,45 @@
+{
+  "schema_version": "heir.snpatho_benchmark_plan.v1",
+  "checkpoint_sha256": "",
+  "gene_panel": "../artifacts/snpatho/gene_panel.tsv",
+  "gene_panel_sha256": "REPLACE_WITH_FROZEN_GENE_PANEL_SHA256",
+  "frozen_model_version": "heir.trained_model.v1",
+  "cases": [
+    {
+      "section_id": "4066",
+      "checkpoint_sha256": "REPLACE_WITH_4066_CHECKPOINT_SHA256",
+      "predictions": "../artifacts/4066/predictions.npz",
+      "predictions_sha256": "REPLACE_WITH_4066_PREDICTIONS_SHA256",
+      "truth": "../artifacts/4066/spatial_truth.locked.npz",
+      "truth_sha256": "REPLACE_WITH_4066_TRUTH_SHA256",
+      "matched_reference": "../artifacts/4066/reference.npz",
+      "matched_reference_sha256": "REPLACE_WITH_4066_REFERENCE_SHA256",
+      "telemetry": "../artifacts/4066/prediction.telemetry.json",
+      "telemetry_sha256": "REPLACE_WITH_4066_TELEMETRY_SHA256"
+    },
+    {
+      "section_id": "4399",
+      "checkpoint_sha256": "REPLACE_WITH_4399_CHECKPOINT_SHA256",
+      "predictions": "../artifacts/4399/predictions.npz",
+      "predictions_sha256": "REPLACE_WITH_4399_PREDICTIONS_SHA256",
+      "truth": "../artifacts/4399/spatial_truth.locked.npz",
+      "truth_sha256": "REPLACE_WITH_4399_TRUTH_SHA256",
+      "matched_reference": "../artifacts/4399/reference.npz",
+      "matched_reference_sha256": "REPLACE_WITH_4399_REFERENCE_SHA256",
+      "telemetry": "../artifacts/4399/prediction.telemetry.json",
+      "telemetry_sha256": "REPLACE_WITH_4399_TELEMETRY_SHA256"
+    },
+    {
+      "section_id": "4411",
+      "checkpoint_sha256": "REPLACE_WITH_4411_CHECKPOINT_SHA256",
+      "predictions": "../artifacts/4411/predictions.npz",
+      "predictions_sha256": "REPLACE_WITH_4411_PREDICTIONS_SHA256",
+      "truth": "../artifacts/4411/spatial_truth.locked.npz",
+      "truth_sha256": "REPLACE_WITH_4411_TRUTH_SHA256",
+      "matched_reference": "../artifacts/4411/reference.npz",
+      "matched_reference_sha256": "REPLACE_WITH_4411_REFERENCE_SHA256",
+      "telemetry": "../artifacts/4411/prediction.telemetry.json",
+      "telemetry_sha256": "REPLACE_WITH_4411_TELEMETRY_SHA256"
+    }
+  ]
+}

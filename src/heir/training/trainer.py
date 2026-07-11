@@ -1,0 +1,591 @@
+"""Finite, auditable training loop for generic or personalized HEIR stages."""
+
+import math
+from dataclasses import dataclass, fields, replace
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import torch
+from torch import Tensor
+from torch.nn import functional as F
+
+from ..config import LossWeightConfig, OptimizationConfig
+from ..expression import EXPRESSION_MAX, EXPRESSION_SPACE_ID
+from ..losses import HEIRCompositeLoss, HEIRLossConfig
+from ..models.heir import HEIRModel, HEIROutput
+from ..models.rna import RNAVAE
+from ..utils import resolve_device, set_seed
+from .batch import HEIRTrainingBatch
+from .stages import TrainingStage
+
+
+@dataclass(frozen=True)
+class HEIRTrainingResult:
+    best_epoch: int
+    best_validation_loss: float
+    history: Tuple[Dict[str, float], ...]
+
+
+def aggregate_to_spots(
+    expression: Tensor,
+    assignment: Tensor,
+    eps: float = 1e-8,
+    expression_space_id: str = EXPRESSION_SPACE_ID,
+) -> Tensor:
+    """Aggregate cell log1p-CPM in linear space and return spot log1p-CPM."""
+
+    if expression.ndim != 2 or assignment.ndim != 2 or assignment.shape[1] != expression.shape[0]:
+        raise ValueError("expression or spot assignment has the wrong shape")
+    if bool((assignment < 0).any()) or not torch.isfinite(assignment).all():
+        raise ValueError("spot assignment must be finite and non-negative")
+    if expression_space_id != EXPRESSION_SPACE_ID:
+        raise ValueError("unsupported expression space for spot aggregation")
+    if not torch.isfinite(expression).all() or bool((expression < 0).any()):
+        raise ValueError("log1p-CPM expression must be finite and non-negative")
+    mass = assignment.sum(dim=1, keepdim=True)
+    linear = torch.expm1(expression.clamp_max(EXPRESSION_MAX))
+    spot_linear = assignment.matmul(linear) / mass.clamp_min(eps)
+    return torch.log1p(spot_linear)
+
+
+class HEIRTrainer:
+    """Train one coherent graph bag at a time to preserve neighborhoods."""
+
+    @staticmethod
+    def _bernoulli_uot_costs(
+        prototype_cost: Tensor,
+        unknown_probability: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Apply the two-outcome unknown gate to real and dustbin UOT costs."""
+
+        if prototype_cost.ndim != 2:
+            raise ValueError("prototype_cost must have shape (cells, prototypes)")
+        if unknown_probability.shape != (prototype_cost.shape[0],):
+            raise ValueError("unknown_probability must have one value per cell")
+        probability = unknown_probability.to(dtype=torch.float32)
+        epsilon = torch.finfo(torch.float32).eps
+        probability = probability.clamp(min=epsilon, max=1.0 - epsilon)
+        real_gate = -torch.log1p(-probability)
+        dustbin_gate = -torch.log(probability)
+        return prototype_cost + real_gate.unsqueeze(-1), dustbin_gate
+
+    def __init__(
+        self,
+        model: HEIRModel,
+        stage: TrainingStage,
+        optimization: OptimizationConfig,
+        loss_weights: LossWeightConfig,
+        rna_encoder: Optional[RNAVAE] = None,
+        uot_epsilon: float = 0.1,
+        uot_relaxation: float = 1.0,
+        uot_unknown_mass: float = 0.05,
+        seed: int = 17,
+        device: str = "auto",
+        allow_split_overlap: bool = False,
+    ) -> None:
+        if stage not in {
+            TrainingStage.GENERIC_SPATIAL_PRETRAINING,
+            TrainingStage.PERSONALIZED,
+            TrainingStage.REFINEMENT,
+        }:
+            raise ValueError("HEIRTrainer supports pretraining, personalized, or refinement stages")
+        optimization.validate()
+        loss_weights.validate()
+        self.model = model
+        self.stage = stage
+        self.optimization = optimization
+        self.weights = loss_weights
+        self.rna_encoder = rna_encoder
+        self.uot_epsilon = uot_epsilon
+        self.uot_relaxation = uot_relaxation
+        self.uot_unknown_mass = uot_unknown_mass
+        self.criterion = HEIRCompositeLoss(
+            HEIRLossConfig.from_experiment_weights(
+                loss_weights,
+                marker_weight=loss_weights.marker,
+                uot_epsilon=uot_epsilon,
+                uot_marginal_relaxation=uot_relaxation,
+                uot_unknown_mass=uot_unknown_mass,
+                pseudobulk_metric="smooth_l1",
+                program_metric="smooth_l1",
+                marker_metric="smooth_l1",
+                pseudobulk_log1p_expression=self.model.config.nonnegative_expression,
+            )
+        )
+        self.seed = seed
+        self.device = resolve_device(device)
+        self.allow_split_overlap = allow_split_overlap
+
+    def _forward_output(self, batch: HEIRTrainingBatch) -> HEIROutput:
+        return self.model(
+            batch.morphology,
+            batch.edge_index,
+            batch.edge_weight,
+            prototype_means=batch.prototype_means,
+            prototype_types=batch.prototype_types,
+            prototype_weights=batch.prototype_weights,
+            prototype_mask=batch.prototype_mask,
+        )
+
+    def _output_loss(
+        self,
+        output: HEIROutput,
+        batch: HEIRTrainingBatch,
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
+        cycle_latent = None
+        if self.rna_encoder is not None:
+            cycle_latent, _ = self.rna_encoder.encode(output.expression)
+        uot_cost, uot_unknown_cost = self._bernoulli_uot_costs(
+            output.prototype_cost,
+            output.unknown_probability,
+        )
+        total, terms = self.criterion(
+            output,
+            cell_weights=batch.cell_weights,
+            target_composition=batch.target_composition,
+            uot_cost=uot_cost,
+            uot_source_mass=batch.cell_weights,
+            uot_target_mass=batch.prototype_weights,
+            uot_target_mask=batch.prototype_mask,
+            uot_pair_mask=output.prototype_mask,
+            uot_unknown_cost=uot_unknown_cost,
+            target_pseudobulk=batch.target_pseudobulk,
+            program_matrix=batch.program_matrix,
+            target_program_scores=batch.target_program_scores,
+            marker_centroids=batch.marker_centroids,
+            marker_mask=batch.marker_mask,
+            residual_precision=batch.prototype_variances.reciprocal(),
+            residual_assignments=output.prototype_probabilities,
+            cycle_latent=cycle_latent,
+            edge_index=batch.edge_index,
+            edge_weight=batch.edge_weight,
+            anchor_labels=batch.anchor_labels,
+            anchor_weights=batch.anchor_weights,
+            parent_anchor_labels=getattr(batch, "parent_anchor_labels", None),
+            parent_anchor_weights=getattr(batch, "parent_anchor_weights", None),
+            fine_to_parent=self.model.config.fine_to_parent,
+            unknown_targets=batch.unknown_targets,
+            scgpt_type_prototypes=batch.scgpt_type_prototypes,
+            scgpt_type_variances=batch.scgpt_type_variances,
+        )
+        domain = output.expression.sum() * 0.0
+        if batch.domain_labels is not None:
+            if output.domain_logits is None:
+                raise ValueError("domain_labels require HEIRConfig.num_domains >= 2")
+            valid_domain = batch.domain_labels >= 0
+            if bool(valid_domain.any()):
+                domain = F.cross_entropy(
+                    output.domain_logits[valid_domain],
+                    batch.domain_labels[valid_domain],
+                )
+        terms["domain"] = domain
+        terms["weighted/domain"] = self.weights.domain * domain
+        total = total + terms["weighted/domain"]
+        if batch.target_spatial_expression is not None and batch.spot_assignment is not None:
+            spot_prediction = aggregate_to_spots(
+                output.expression,
+                batch.spot_assignment,
+                expression_space_id=batch.expression_space_id,
+            )
+            finite = torch.isfinite(batch.target_spatial_expression)
+            terms["spatial"] = (
+                F.huber_loss(
+                    spot_prediction[finite],
+                    batch.target_spatial_expression[finite],
+                )
+                if bool(finite.any())
+                else spot_prediction.sum() * 0.0
+            )
+        else:
+            terms["spatial"] = output.expression.sum() * 0.0
+        total = total + terms["spatial"]
+        # Domain CE trains the adversarial classifier, but lower validation CE
+        # means domains are *more* predictable.  It must not select the encoder
+        # checkpoint used for early stopping.
+        terms["selection_total"] = total - terms["weighted/domain"]
+        terms["total"] = total
+        return total, terms
+
+    def _forward_loss(self, batch: HEIRTrainingBatch) -> Tuple[Tensor, Dict[str, Tensor]]:
+        return self._output_loss(self._forward_output(batch), batch)
+
+    @staticmethod
+    def _concatenate_outputs(outputs: Sequence[HEIROutput]) -> HEIROutput:
+        values = {}
+        for item in fields(HEIROutput):
+            tensors = [getattr(output, item.name) for output in outputs]
+            if all(value is None for value in tensors):
+                values[item.name] = None
+            elif any(value is None for value in tensors):
+                raise ValueError("model output %s is inconsistent across sample bags" % item.name)
+            else:
+                values[item.name] = torch.cat(tensors, dim=0)
+        return HEIROutput(**values)
+
+    @staticmethod
+    def _merge_sample_batches(batches: Sequence[HEIRTrainingBatch]) -> HEIRTrainingBatch:
+        """Merge graph patches for one sample before sample-level objectives."""
+
+        if len(batches) == 1:
+            return batches[0]
+        first = batches[0]
+        if any(not batch.nucleus_ids for batch in batches):
+            raise ValueError("multi-patch samples require nucleus_ids for overlap accounting")
+        for batch in batches[1:]:
+            if (
+                batch.sample_id != first.sample_id
+                or batch.donor_id != first.donor_id
+                or batch.block_id != first.block_id
+                or batch.analysis_role != first.analysis_role
+                or batch.latent_space_id != first.latent_space_id
+                or batch.feature_space_id != first.feature_space_id
+                or batch.expression_space_id != first.expression_space_id
+                or batch.scgpt_space_id != first.scgpt_space_id
+                or batch.type_names != first.type_names
+                or batch.gene_names != first.gene_names
+                or batch.prototype_ids != first.prototype_ids
+                or batch.molecular_training_donors != first.molecular_training_donors
+            ):
+                raise ValueError("sample bags have inconsistent provenance or ontology")
+            for name in (
+                "prototype_means",
+                "prototype_variances",
+                "prototype_types",
+                "prototype_weights",
+                "target_composition",
+                "target_pseudobulk",
+                "prototype_mask",
+                "marker_centroids",
+                "marker_mask",
+                "program_matrix",
+                "target_program_scores",
+                "scgpt_type_prototypes",
+                "scgpt_type_variances",
+            ):
+                if name == "target_pseudobulk" and first.spot_assignment is not None:
+                    continue
+                left = getattr(first, name)
+                right = getattr(batch, name)
+                if (left is None) != (right is None):
+                    raise ValueError("sample bags disagree on %s" % name)
+                if left is not None and not torch.equal(left, right):
+                    raise ValueError("sample bags must share identical %s" % name)
+
+        offsets = []
+        offset = 0
+        for batch in batches:
+            offsets.append(batch.edge_index + offset)
+            offset += len(batch.morphology)
+        edge_index = torch.cat(offsets, dim=1)
+        edge_weights = [
+            batch.edge_weight
+            if batch.edge_weight is not None
+            else batch.morphology.new_ones(batch.edge_index.shape[1])
+            for batch in batches
+        ]
+
+        def concatenate_optional(
+            name: str,
+            fill_value: float,
+            dtype: Optional[torch.dtype] = None,
+        ) -> Optional[Tensor]:
+            raw = [getattr(batch, name) for batch in batches]
+            if all(value is None for value in raw):
+                return None
+            result = []
+            for batch, value in zip(batches, raw):
+                if value is None:
+                    result.append(
+                        torch.full(
+                            (len(batch.morphology),),
+                            fill_value,
+                            dtype=dtype or batch.morphology.dtype,
+                            device=batch.morphology.device,
+                        )
+                    )
+                else:
+                    result.append(value)
+            return torch.cat(result)
+
+        unknown_values = [batch.unknown_targets for batch in batches]
+        if any(value is None for value in unknown_values) and not all(
+            value is None for value in unknown_values
+        ):
+            raise ValueError("unknown calibration targets must cover every sample bag")
+        unknown_targets = (
+            None
+            if all(value is None for value in unknown_values)
+            else torch.cat([value for value in unknown_values if value is not None])
+        )
+
+        spot_values = [batch.spot_assignment for batch in batches]
+        if any(value is None for value in spot_values) and not all(
+            value is None for value in spot_values
+        ):
+            raise ValueError("spatial targets must cover every sample bag")
+        spot_assignment = None
+        target_spatial_expression = None
+        target_pseudobulk = first.target_pseudobulk
+        if all(value is not None for value in spot_values):
+            ordered_spots: List[str] = []
+            targets_by_spot: Dict[str, Tensor] = {}
+            for batch in batches:
+                assert batch.target_spatial_expression is not None
+                for spot_id, target in zip(batch.spot_ids, batch.target_spatial_expression):
+                    if spot_id in targets_by_spot:
+                        if not torch.allclose(
+                            targets_by_spot[spot_id], target, rtol=1.0e-5, atol=1.0e-6
+                        ):
+                            raise ValueError(
+                                "sample patches disagree on spatial target for %s" % spot_id
+                            )
+                    else:
+                        ordered_spots.append(spot_id)
+                        targets_by_spot[spot_id] = target
+            spot_lookup = {value: index for index, value in enumerate(ordered_spots)}
+            rows = len(ordered_spots)
+            columns = sum(len(batch.morphology) for batch in batches)
+            spot_assignment = first.morphology.new_zeros((rows, columns))
+            column_offset = 0
+            for batch in batches:
+                assert batch.spot_assignment is not None
+                for local_row, spot_id in enumerate(batch.spot_ids):
+                    spot_assignment[
+                        spot_lookup[spot_id],
+                        column_offset : column_offset + len(batch.morphology),
+                    ] = batch.spot_assignment[local_row]
+                column_offset += len(batch.morphology)
+            target_spatial_expression = torch.stack(
+                [targets_by_spot[value] for value in ordered_spots]
+            )
+            spot_mass = spot_assignment.sum(dim=1)
+            target_pseudobulk = torch.log1p(
+                (
+                    torch.expm1(target_spatial_expression.clamp_max(EXPRESSION_MAX))
+                    * spot_mass.unsqueeze(1)
+                ).sum(dim=0)
+                / spot_mass.sum().clamp_min(1.0e-8)
+            )
+
+        source_pairs = {
+            (path, digest)
+            for batch in batches
+            for path, digest in zip(batch.source_artifacts, batch.source_sha256)
+        }
+        nucleus_ids = tuple(value for batch in batches for value in batch.nucleus_ids)
+        if spot_assignment is not None and len(set(nucleus_ids)) != len(nucleus_ids):
+            raise ValueError("spatial-pretraining patches must partition nuclei without overlap")
+        if len(set(nucleus_ids)) != len(nucleus_ids):
+            mass_by_id: Dict[str, float] = {}
+            for batch in batches:
+                weights = (
+                    torch.ones(len(batch.morphology), device=batch.morphology.device)
+                    if batch.cell_weights is None
+                    else batch.cell_weights
+                )
+                for nucleus_id, weight in zip(batch.nucleus_ids, weights.detach().cpu().tolist()):
+                    mass_by_id[nucleus_id] = mass_by_id.get(nucleus_id, 0.0) + float(weight)
+            excessive = sorted(key for key, value in mass_by_id.items() if value > 1.0 + 1.0e-6)
+            if excessive:
+                raise ValueError(
+                    "overlapping patch nuclei need central/margin weights summing to <=1: %s"
+                    % ", ".join(excessive[:5])
+                )
+        return replace(
+            first,
+            morphology=torch.cat([batch.morphology for batch in batches]),
+            edge_index=edge_index,
+            edge_weight=torch.cat(edge_weights),
+            cell_weights=concatenate_optional("cell_weights", 1.0),
+            anchor_labels=concatenate_optional("anchor_labels", -100, dtype=torch.long),
+            anchor_weights=concatenate_optional("anchor_weights", 0.0),
+            parent_anchor_labels=concatenate_optional(
+                "parent_anchor_labels", -100, dtype=torch.long
+            ),
+            parent_anchor_weights=concatenate_optional("parent_anchor_weights", 0.0),
+            unknown_targets=unknown_targets,
+            domain_labels=concatenate_optional("domain_labels", -100, dtype=torch.long),
+            segmentation_confidence=concatenate_optional("segmentation_confidence", 1.0),
+            ood_mask=concatenate_optional("ood_mask", 0, dtype=torch.bool),
+            spot_assignment=spot_assignment,
+            target_spatial_expression=target_spatial_expression,
+            target_pseudobulk=target_pseudobulk,
+            spot_ids=(() if spot_assignment is None else tuple(ordered_spots)),
+            bag_id="__sample_aggregate__",
+            nucleus_ids=nucleus_ids,
+            source_artifacts=tuple(path for path, _ in sorted(source_pairs)),
+            source_sha256=tuple(digest for _, digest in sorted(source_pairs)),
+        )
+
+    def _epoch(
+        self,
+        batches: Sequence[HEIRTrainingBatch],
+        optimizer: Optional[torch.optim.Optimizer],
+        scaler: Optional[torch.amp.GradScaler] = None,
+    ) -> Dict[str, float]:
+        training = optimizer is not None
+        self.model.train(training)
+        totals: Dict[str, float] = {}
+        grouped: Dict[Tuple[str, str], List[HEIRTrainingBatch]] = {}
+        for original in batches:
+            grouped.setdefault((original.donor_id, original.sample_id), []).append(original)
+        for originals in grouped.values():
+            sample_cells = sum(len(batch.morphology) for batch in originals)
+            if sample_cells > self.optimization.maximum_sample_cells:
+                raise ValueError(
+                    "sample exceeds optimization.maximum_sample_cells; use a prespecified "
+                    "donor-balanced tissue-region sample instead of retaining an entire WSI graph"
+                )
+            device_batches = []
+            for original in originals:
+                original.validate(self.stage)
+                if original.morphology.shape[0] > self.optimization.bag_size:
+                    raise ValueError(
+                        "graph bag exceeds optimization.bag_size; create a coherent graph patch"
+                    )
+                if original.prototype_means.shape[0] > self.optimization.reference_batch_size:
+                    raise ValueError("prototype bank exceeds optimization.reference_batch_size")
+                device_batches.append(original.to(self.device))
+            if optimizer is not None:
+                optimizer.zero_grad(set_to_none=True)
+            amp_enabled = bool(self.optimization.mixed_precision and self.device.type == "cuda")
+            with (
+                torch.set_grad_enabled(training),
+                torch.autocast(
+                    device_type=self.device.type,
+                    dtype=torch.float16 if self.device.type == "cuda" else torch.bfloat16,
+                    enabled=amp_enabled,
+                ),
+            ):
+                outputs = [self._forward_output(batch) for batch in device_batches]
+                merged_batch = self._merge_sample_batches(device_batches)
+                merged_output = self._concatenate_outputs(outputs)
+                loss, terms = self._output_loss(merged_output, merged_batch)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("non-finite HEIR loss for %s" % merged_batch.sample_id)
+                if optimizer is not None:
+                    assert scaler is not None
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.optimization.gradient_clip_norm
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
+            for name, value in terms.items():
+                if value.ndim == 0:
+                    totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+        return {name: value / len(grouped) for name, value in totals.items()}
+
+    def fit(
+        self,
+        training_batches: Sequence[HEIRTrainingBatch],
+        validation_batches: Sequence[HEIRTrainingBatch],
+    ) -> HEIRTrainingResult:
+        if not training_batches or not validation_batches:
+            raise ValueError("training and weak-validation batches cannot be empty")
+        if not self.allow_split_overlap:
+            missing = [
+                "%s/%s/%s" % (batch.donor_id, batch.sample_id, batch.bag_id)
+                for batch in tuple(training_batches) + tuple(validation_batches)
+                if not batch.donor_id.strip() or not batch.block_id.strip()
+            ]
+            if missing:
+                raise ValueError(
+                    "non-synthetic training requires explicit donor_id and block_id: %s"
+                    % ", ".join(missing[:5])
+                )
+        keys = [
+            (partition, batch.donor_id, batch.sample_id, batch.bag_id)
+            for partition, batches in (
+                ("train", training_batches),
+                ("validation", validation_batches),
+            )
+            for batch in batches
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("bag_id must be unique within each sample and split")
+        training_donors = {batch.donor_id for batch in training_batches}
+        validation_donors = {batch.donor_id for batch in validation_batches}
+        training_blocks = {batch.block_id for batch in training_batches if batch.block_id}
+        validation_blocks = {batch.block_id for batch in validation_batches if batch.block_id}
+        if not self.allow_split_overlap:
+            donor_overlap = sorted(training_donors & validation_donors)
+            block_overlap = sorted(training_blocks & validation_blocks)
+            if donor_overlap or block_overlap:
+                raise ValueError(
+                    "training/validation provenance overlaps donors=%s blocks=%s"
+                    % (donor_overlap, block_overlap)
+                )
+        set_seed(self.seed)
+        self.model.to(self.device)
+        if self.rna_encoder is not None:
+            self.rna_encoder.to(self.device).eval()
+            for parameter in self.rna_encoder.parameters():
+                parameter.requires_grad_(False)
+        adapter_parameters = []
+        head_parameters = []
+        for name, parameter in self.model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if name.startswith("expression_decoder"):
+                adapter_parameters.append(parameter)
+            else:
+                head_parameters.append(parameter)
+        parameter_groups = [{"params": head_parameters, "lr": self.optimization.learning_rate}]
+        if adapter_parameters:
+            parameter_groups.append(
+                {"params": adapter_parameters, "lr": self.optimization.adapter_learning_rate}
+            )
+        optimizer = torch.optim.AdamW(
+            parameter_groups,
+            weight_decay=self.optimization.weight_decay,
+        )
+        warmup_epochs = int(round(self.optimization.epochs * self.optimization.warmup_fraction))
+
+        def learning_rate_factor(epoch: int) -> float:
+            if warmup_epochs and epoch < warmup_epochs:
+                return float(epoch + 1) / float(warmup_epochs)
+            progress = (epoch - warmup_epochs) / max(1, self.optimization.epochs - warmup_epochs)
+            return 0.5 * (1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0)))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, learning_rate_factor)
+        scaler = torch.amp.GradScaler(
+            "cuda", enabled=self.optimization.mixed_precision and self.device.type == "cuda"
+        )
+        best_loss = float("inf")
+        best_epoch = -1
+        best_state = None
+        stale = 0
+        history: List[Dict[str, float]] = []
+        for epoch in range(self.optimization.epochs):
+            scale_before = float(scaler.get_scale())
+            train_metrics = self._epoch(training_batches, optimizer, scaler)
+            optimizer_step_skipped = bool(
+                scaler.is_enabled() and float(scaler.get_scale()) < scale_before
+            )
+            with torch.no_grad():
+                validation_metrics = self._epoch(validation_batches, None)
+            row = {"epoch": float(epoch)}
+            row.update({"train/%s" % key: value for key, value in train_metrics.items()})
+            row.update({"validation/%s" % key: value for key, value in validation_metrics.items()})
+            row["learning_rate"] = float(optimizer.param_groups[0]["lr"])
+            row["optimizer_step_skipped"] = float(optimizer_step_skipped)
+            history.append(row)
+            if not optimizer_step_skipped:
+                scheduler.step()
+            validation_loss = validation_metrics["selection_total"]
+            if validation_loss < best_loss - 1.0e-8:
+                best_loss = validation_loss
+                best_epoch = epoch
+                best_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in self.model.state_dict().items()
+                }
+                stale = 0
+            else:
+                stale += 1
+            if stale >= self.optimization.early_stopping_patience:
+                break
+        assert best_state is not None
+        self.model.load_state_dict(best_state)
+        return HEIRTrainingResult(best_epoch, best_loss, tuple(history))

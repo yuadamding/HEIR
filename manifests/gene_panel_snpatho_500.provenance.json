@@ -1,0 +1,3184 @@
+{
+  "algorithm": {
+    "candidate_availability": "rank in the personalized-reference universe, then gate on the intersection of all personalized-reference and locked-Visium gene inventories",
+    "expression_space_id": "log1p-cpm-10000-v1",
+    "hvg_score": "mean-binned z-score of log1p(variance/mean)",
+    "marker_score": "(mean_in_type - mean_outside_type) * sqrt(detection_in_type)",
+    "markers_per_level1_type": 40,
+    "minimum_detection": 0.01,
+    "minimum_type_detection": 0.05,
+    "name": "balanced-level1-markers-plus-hvg-v2",
+    "panel_size": 500,
+    "selection_order": [
+      "curated",
+      "round_robin_level1_markers",
+      "hvg"
+    ],
+    "target_metadata_affects_ranking": false,
+    "tie_breaker": "ascending HGNC symbol"
+  },
+  "availability_sources": [
+    {
+      "access_scope": "gene_names_only",
+      "cohort_role": "personalized_reference_availability",
+      "expression_matrix_accessed": false,
+      "format": "h5ad_var_metadata",
+      "gene_count": 36591,
+      "gene_key": "feature_name",
+      "gene_names_sha256": "073b725f546346b5ada5db4f78959f497a574f12780430168274b05dcf581ed0",
+      "metadata_field": "var/feature_name",
+      "observation_metadata_accessed": false,
+      "path": "/storage/HE_GPT/HEIR/artifacts/snpatho/4066/reference.h5ad",
+      "whole_file_sha256_computed": false
+    },
+    {
+      "access_scope": "gene_names_only",
+      "cohort_role": "personalized_reference_availability",
+      "expression_matrix_accessed": false,
+      "format": "h5ad_var_metadata",
+      "gene_count": 36591,
+      "gene_key": "feature_name",
+      "gene_names_sha256": "073b725f546346b5ada5db4f78959f497a574f12780430168274b05dcf581ed0",
+      "metadata_field": "var/feature_name",
+      "observation_metadata_accessed": false,
+      "path": "/storage/HE_GPT/HEIR/artifacts/snpatho/4399/reference.h5ad",
+      "whole_file_sha256_computed": false
+    },
+    {
+      "access_scope": "gene_names_only",
+      "cohort_role": "personalized_reference_availability",
+      "expression_matrix_accessed": false,
+      "format": "h5ad_var_metadata",
+      "gene_count": 36591,
+      "gene_key": "feature_name",
+      "gene_names_sha256": "073b725f546346b5ada5db4f78959f497a574f12780430168274b05dcf581ed0",
+      "metadata_field": "var/feature_name",
+      "observation_metadata_accessed": false,
+      "path": "/storage/HE_GPT/HEIR/artifacts/snpatho/4411/reference.h5ad",
+      "whole_file_sha256_computed": false
+    },
+    {
+      "access_scope": "gene_names_only",
+      "cohort_role": "locked_visium_gene_availability",
+      "expression_matrix_accessed": false,
+      "format": "h5ad_var_metadata",
+      "gene_count": 18050,
+      "gene_key": "feature_name",
+      "gene_names_sha256": "9485637ed6a281a9b402768c7a2277653ea6bf7df2a1deabe2a99f84975a7dce",
+      "metadata_field": "var/feature_name",
+      "observation_metadata_accessed": false,
+      "path": "/storage/HE_GPT/HEIR/artifacts/snpatho/4066/visium_truth.h5ad",
+      "whole_file_sha256_computed": false
+    },
+    {
+      "access_scope": "gene_names_only",
+      "cohort_role": "locked_visium_gene_availability",
+      "expression_matrix_accessed": false,
+      "format": "h5ad_var_metadata",
+      "gene_count": 18054,
+      "gene_key": "feature_name",
+      "gene_names_sha256": "0984299bd4d5a358bbf360d57eaf36c5ad5c9b581aa23b8cee67cf857a0205c6",
+      "metadata_field": "var/feature_name",
+      "observation_metadata_accessed": false,
+      "path": "/storage/HE_GPT/HEIR/artifacts/snpatho/4399/visium_truth.h5ad",
+      "whole_file_sha256_computed": false
+    },
+    {
+      "access_scope": "gene_names_only",
+      "cohort_role": "locked_visium_gene_availability",
+      "expression_matrix_accessed": false,
+      "format": "h5ad_var_metadata",
+      "gene_count": 18056,
+      "gene_key": "feature_name",
+      "gene_names_sha256": "94a8c22c54ba68aae2f54bc7826fc645cb040c723b1080dd7788ececebfc9574",
+      "metadata_field": "var/feature_name",
+      "observation_metadata_accessed": false,
+      "path": "/storage/HE_GPT/HEIR/artifacts/snpatho/4411/visium_truth.h5ad",
+      "whole_file_sha256_computed": false
+    }
+  ],
+  "balanced_marker_counts": {
+    "B": 40,
+    "Granulocyte": 40,
+    "Myeloid": 40,
+    "Stroma": 40,
+    "T_NK": 40,
+    "Tumor_Breast": 40
+  },
+  "counts": {
+    "availability_gene_intersection": 18034,
+    "availability_intersection": 17578,
+    "availability_source_count": 6,
+    "below_minimum_detection": 5372,
+    "clean_and_detected": 12193,
+    "curated": 70,
+    "development_genes": 18063,
+    "hvg": 190,
+    "level1_markers": 240,
+    "noise_excluded": 13,
+    "noise_mitochondrial": 11,
+    "noise_obvious_pseudogene": 2,
+    "panel_genes": 500,
+    "ranking_clean_and_detected": 12195,
+    "ranking_intersection": 17622,
+    "reference_availability_source_count": 3,
+    "reference_gene_intersection": 36591,
+    "visium_availability_source_count": 3,
+    "visium_gene_intersection": 18037
+  },
+  "curated_source": {
+    "path": "/storage/HE_GPT/HEIR/manifests/gene_panel_example.tsv",
+    "requested_count": 70,
+    "retained_count": 70,
+    "sha256": "52568b30af41830cb62e99a54f10665e0ef19af33b2b2e11e373edb26f6df0a0"
+  },
+  "development_source": {
+    "analysis_role": "development",
+    "block_id": "B1",
+    "cell_type_key": "Level1",
+    "cohort_id": "mosaic_natcommun_2025",
+    "count_matrix_path": "/mnt/seagate/HnE/NatCommun_2025_s41467_025_59005_9/cellxgene/Breast_cancer_4_patients_archival_FFPE_samples_profiling_with_Chromium_FLEX__f04ec2aa-2272-48df-b2d6-9864078c9892.h5ad",
+    "count_matrix_sha256": "1167802aa7810f405d46d8fac1bdd7d8f8c09ecd220abd6ea179f1eb98d46fb5",
+    "donor_id": "B1",
+    "full_library_gene_count": 18063,
+    "gene_key": "feature_name",
+    "level1_counts": {
+      "B": 714,
+      "Granulocyte": 100,
+      "Myeloid": 247,
+      "Stroma": 958,
+      "T_NK": 974,
+      "Tumor_Breast": 944
+    },
+    "manifest_path": "/storage/HE_GPT/HEIR/manifests/natcommun.tsv",
+    "manifest_sha256": "c072daaa6f783bd888910d3dce796b45b5980f86b05ecb2c6847c1c0f7843a63",
+    "observation_filters": {
+      "donor_id": [
+        "7"
+      ],
+      "sample_id": [
+        "6"
+      ]
+    },
+    "record_id": "mosaic_natcommun_2025::B1_4::histology+snrna::H&E brightfield + 10x Chromium Flex",
+    "section_id": "B1_4",
+    "selected_cell_count": 3937,
+    "specimen_id": "B1"
+  },
+  "leakage_policy": {
+    "development_expression_accessed": true,
+    "snpatho_availability_access": "gene_names_only",
+    "snpatho_expression_accessed": false,
+    "target_visium_expression_accessed": false,
+    "target_visium_gene_metadata_accessed": true,
+    "target_visium_observation_metadata_accessed": false
+  },
+  "panel": {
+    "gene_names_sha256": "08eddf135a31a20d5cc12e6c77b5ec8e16ce9dd81621e0f48878141a9b752cc8",
+    "path": "/storage/HE_GPT/HEIR/manifests/gene_panel_snpatho_500.tsv",
+    "sha256": "22ddb91188b3b124d5cf3ec0f7ae81017399d141e39647b0dce80675119fe927"
+  },
+  "schema_version": 2,
+  "selection": [
+    {
+      "cell_type": "",
+      "gene": "EPCAM",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "KRT8",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "KRT19",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "KRT14",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "KRT5",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MSLN",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MUC1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MUCL1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "ERBB2",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "ESR1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "PGR",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MKI67",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "TOP2A",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "PCNA",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "COL1A1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "COL1A2",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "COL3A1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "DCN",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "LUM",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "COL6A1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "ACTA2",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "TAGLN",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MYH11",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "RGS5",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CSPG4",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "PECAM1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "VWF",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "EMCN",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "KDR",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "ENG",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD3D",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD3E",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "TRBC1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD4",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD8A",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "NKG7",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "GNLY",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "GZMB",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MS4A1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD79A",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD37",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD74",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MZB1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "JCHAIN",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD68",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD14",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "LYZ",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "C1QA",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "C1QB",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "C1QC",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "FCGR3A",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "S100A8",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "S100A9",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "KIT",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "B2M",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "STAT1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "ISG15",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "IFIT1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "IFIT3",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "MX1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CXCL10",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "VEGFA",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CA9",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "HIF1A",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "TGFB1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "FN1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "SPARC",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "VIM",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "CDH1",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "",
+      "gene": "ACTB",
+      "score": null,
+      "selection_category": "curated"
+    },
+    {
+      "cell_type": "B",
+      "gene": "IGKC",
+      "score": 4.454744289785487,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "CPA3",
+      "score": 4.285528995669825,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CTSB",
+      "score": 2.6665377257244662,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL6A2",
+      "score": 3.0743332788314395,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CXCR4",
+      "score": 1.6864788158558848,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "AZGP1",
+      "score": 3.241732210476361,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "IGHG1",
+      "score": 4.247603724918389,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "IL1RL1",
+      "score": 2.811341659226902,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "APOE",
+      "score": 2.2672078712967756,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL6A3",
+      "score": 2.7158222185284715,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "IL7R",
+      "score": 1.5818047826083015,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "APOD",
+      "score": 3.153383919945719,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "TXNDC5",
+      "score": 1.9152579580754074,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "SLC18A2",
+      "score": 2.6761091264756827,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "SAT1",
+      "score": 2.1356280611212175,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "POSTN",
+      "score": 2.3671394368547114,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ARHGEF1",
+      "score": 1.564086334462367,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "FASN",
+      "score": 3.084459725293184,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "DERL3",
+      "score": 1.809098103591329,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "VWA5A",
+      "score": 2.561099613644257,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "MS4A6A",
+      "score": 1.9757748035373306,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "CCN2",
+      "score": 2.360484860300652,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "AKNA",
+      "score": 1.5159392613932996,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "KRT7",
+      "score": 2.4923985468684555,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "XBP1",
+      "score": 1.7442389789985036,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "ALOX5",
+      "score": 2.379727931362184,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "MS4A7",
+      "score": 1.8880626304028698,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "AEBP1",
+      "score": 2.3300756002674627,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "BTG1",
+      "score": 1.429860712791304,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "FABP7",
+      "score": 2.491729275159381,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "ITM2C",
+      "score": 1.602354547807905,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "GATA2",
+      "score": 2.206866419793987,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CD163",
+      "score": 1.8511911385982485,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "THBS2",
+      "score": 2.2692303979947446,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "IKZF1",
+      "score": 1.4240704813434975,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ALDH3B2",
+      "score": 2.293613861554196,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "TENT5C",
+      "score": 1.5314530118674503,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "RGS1",
+      "score": 2.118986625055243,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CTSZ",
+      "score": 1.6863809312116969,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL5A1",
+      "score": 2.007626267637003,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CD96",
+      "score": 1.384148149719843,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ALCAM",
+      "score": 2.09593078947765,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "TP53INP1",
+      "score": 1.5185002640882517,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "SRGN",
+      "score": 1.8135645805074931,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CIITA",
+      "score": 1.6761690848893096,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL5A2",
+      "score": 1.873336874009942,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ETS1",
+      "score": 1.233890329015901,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ANKRD30A",
+      "score": 1.9573454705239248,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "PIM2",
+      "score": 1.4087798715866333,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "ZFP36",
+      "score": 1.797268072422477,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FTL",
+      "score": 1.626091601358474,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "VCAN",
+      "score": 1.8618991991748448,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "TMC8",
+      "score": 1.2108899722147464,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "LTF",
+      "score": 1.8907164109501668,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "TXNIP",
+      "score": 1.3850185805444166,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "RHEX",
+      "score": 1.7635693065315874,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "STAB1",
+      "score": 1.6255045478745618,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "BGN",
+      "score": 1.7844610034776314,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "TRAC",
+      "score": 1.1378905033979452,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ALOX15B",
+      "score": 1.7900214866666422,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "HERPUD1",
+      "score": 1.3709739151150733,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "CD44",
+      "score": 1.745844540300504,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FTH1",
+      "score": 1.5784527160189472,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "CALD1",
+      "score": 1.702250904756205,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "TRBC2",
+      "score": 1.0556765942587203,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "NAMPT",
+      "score": 1.788213910920575,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "SSR4",
+      "score": 1.2618725252567937,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "CD69",
+      "score": 1.7278345313039851,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "SLCO2B1",
+      "score": 1.5183897178369696,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "CCN1",
+      "score": 1.6594585842261245,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CD2",
+      "score": 0.9787513625883864,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "SCP2",
+      "score": 1.7813206858160318,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "PDK1",
+      "score": 1.2457629066710456,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "ATP6V0A2",
+      "score": 1.698315887467567,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "IFI30",
+      "score": 1.478382463601482,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "MMP2",
+      "score": 1.6462364700412058,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "RESF1",
+      "score": 0.9501205369634205,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "MLPH",
+      "score": 1.7683753894977001,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "BTG2",
+      "score": 1.1848695560602158,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "PTGS1",
+      "score": 1.6948667010807184,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CSF1R",
+      "score": 1.434598022432184,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "CTHRC1",
+      "score": 1.5711985242346362,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CYTIP",
+      "score": 0.9455227641209627,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "FKBP5",
+      "score": 1.7488129465978015,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "TSC22D3",
+      "score": 1.184440463840241,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "RGS2",
+      "score": 1.572093556167879,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "SPI1",
+      "score": 1.4243543328119002,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "TIMP2",
+      "score": 1.5676646885490726,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CELF2",
+      "score": 0.9252427951993026,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "SELENOP",
+      "score": 1.6256441970490394,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "FBXW7",
+      "score": 1.1638385128012925,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "SOCS1",
+      "score": 1.5280401717035612,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "MFSD1",
+      "score": 1.3953663851444928,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "FBN1",
+      "score": 1.5169749424517105,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "EVL",
+      "score": 0.9221285940700678,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ABCC11",
+      "score": 1.6048617614194327,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "POU2AF1",
+      "score": 1.1367664343498332,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "ARHGEF6",
+      "score": 1.448139658319649,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CSF2RA",
+      "score": 1.3322513476387232,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL12A1",
+      "score": 1.408618684696942,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "TMSB4X",
+      "score": 0.8663953550352718,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "APLP2",
+      "score": 1.5444338565540214,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "SEL1L3",
+      "score": 1.0604064467142953,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "TPSG1",
+      "score": 1.44193364695558,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "LAPTM5",
+      "score": 1.316839671551218,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "CCDC80",
+      "score": 1.4061805122809492,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "SEPTIN1",
+      "score": 0.8305381430349972,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ACSM1",
+      "score": 1.49349538862308,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "IGHA1",
+      "score": 1.0326747814501342,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "FOXP1",
+      "score": 1.3738997494373593,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "GLUL",
+      "score": 1.2679042178042657,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "SFRP2",
+      "score": 1.3973903481985583,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ACAP1",
+      "score": 0.8231581096735714,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "STAC2",
+      "score": 1.4867845274282832,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "CYBA",
+      "score": 0.984532295595463,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "TNIK",
+      "score": 1.3279537884570387,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "PSAP",
+      "score": 1.25541012909384,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "VMP1",
+      "score": 1.2957344119816907,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CLEC2D",
+      "score": 0.8178319627473484,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "AACS",
+      "score": 1.475978063710621,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "CREB3L2",
+      "score": 0.912759905184581,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "P2RX1",
+      "score": 1.2955994008120841,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CEBPD",
+      "score": 1.2504057063182938,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "HTRA1",
+      "score": 1.2916472527934073,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ARHGAP4",
+      "score": 0.7952601836526839,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "KYNU",
+      "score": 1.4623491155140644,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "PRDM1",
+      "score": 0.9048086735790107,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "TPSD1",
+      "score": 1.2221234750684982,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "RASSF4",
+      "score": 1.2205768075996044,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "LAMB1",
+      "score": 1.250734733275191,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "FYB1",
+      "score": 0.7935809887636639,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "NUPR1",
+      "score": 1.4501860000818156,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "IGHM",
+      "score": 0.8917005964846929,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "SLC45A3",
+      "score": 1.2179272156459804,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "ITGAX",
+      "score": 1.219752280838252,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "MMP14",
+      "score": 1.2385462914761265,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "TNFAIP3",
+      "score": 0.7784817140337306,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "AR",
+      "score": 1.4326647966508437,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "THEMIS2",
+      "score": 0.8855600730219122,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "ADCYAP1",
+      "score": 1.2110116976771683,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CTSD",
+      "score": 1.2157880764364504,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL11A1",
+      "score": 1.197100422355491,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CORO1A",
+      "score": 0.7642633801526645,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "FXYD3",
+      "score": 1.4273764293876685,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "UBE2J1",
+      "score": 0.8369555816357583,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "CLU",
+      "score": 1.2059546137517219,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FOS",
+      "score": 1.2114353123998345,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "NBL1",
+      "score": 1.1956999717952426,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "SYNE2",
+      "score": 0.7533975157449937,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ECHDC2",
+      "score": 1.4088557417820755,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "ST6GAL1",
+      "score": 0.8364736976114266,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "HPGDS",
+      "score": 1.1818361766060808,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FCGRT",
+      "score": 1.189889270959278,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "CDH11",
+      "score": 1.1926091317724605,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CCL5",
+      "score": 0.7461281815162112,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "MYBPC1",
+      "score": 1.396865518404323,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "FKBP11",
+      "score": 0.8164965712055728,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "RGS13",
+      "score": 1.1336153337655732,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "TLR2",
+      "score": 1.1787587855664463,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL18A1",
+      "score": 1.1847305382453175,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "SLA",
+      "score": 0.7456891671325445,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "SLC38A1",
+      "score": 1.3477047280054082,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "SEC11C",
+      "score": 0.796790131530313,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "HDC",
+      "score": 1.1043966224198194,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CST3",
+      "score": 1.1697152563994455,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "FSTL1",
+      "score": 1.175731215870943,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "PIK3IP1",
+      "score": 0.7213670273948528,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "HPGD",
+      "score": 1.3398297541429118,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "KLHL6",
+      "score": 0.7747584164088431,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "KIAA1549",
+      "score": 1.0971154646454182,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "TNFAIP2",
+      "score": 1.1657928241426208,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "MMP11",
+      "score": 1.1735020642616414,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "WIPF1",
+      "score": 0.687070229047236,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "RHOB",
+      "score": 1.3361653204356527,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "SEL1L",
+      "score": 0.7712498678611206,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "SLC26A2",
+      "score": 1.0903497159896514,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "GRN",
+      "score": 1.1601407239181432,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "C1S",
+      "score": 1.1342635825399932,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ITGAL",
+      "score": 0.6703829370318891,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "SGK1",
+      "score": 1.2297174456734217,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "CLPTM1L",
+      "score": 0.74078881113167,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "CAPG",
+      "score": 1.0105176370290256,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "MSR1",
+      "score": 1.0868193496230973,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL16A1",
+      "score": 1.1139507784294176,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ZFP36L2",
+      "score": 0.6577254933179651,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ATP13A4",
+      "score": 1.2085435448963162,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "ERN1",
+      "score": 0.7404504057098484,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "FER",
+      "score": 1.00763477217734,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "CYBB",
+      "score": 1.0526851654060054,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "TPM1",
+      "score": 1.1038446842569265,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CD53",
+      "score": 0.6528832995576871,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "MPV17L",
+      "score": 1.2066349633943498,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "FCRL5",
+      "score": 0.7270892206346906,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "EGR1",
+      "score": 1.0051531826687388,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FGD2",
+      "score": 1.0406928690014976,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "ASPN",
+      "score": 1.1034088094945886,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "SPOCK2",
+      "score": 0.6482939736434877,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ASPH",
+      "score": 1.2037699352089328,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "IGHG3",
+      "score": 0.7192211131627548,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "STX3",
+      "score": 0.9749656670493961,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "KCTD12",
+      "score": 1.029400638401257,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "ITGA11",
+      "score": 1.0140609636307452,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ARHGAP15",
+      "score": 0.6200353757747867,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "KYAT1",
+      "score": 1.1925649616748975,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "FNDC3B",
+      "score": 0.6397718069267884,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "IFITM10",
+      "score": 0.9614884685940203,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FMN1",
+      "score": 1.0226682049914997,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "MYL9",
+      "score": 0.9907887249291116,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "FYN",
+      "score": 0.6090875993454171,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "ARHGEF38",
+      "score": 1.1760818734688245,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "CD38",
+      "score": 0.6313528964270793,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "CDK15",
+      "score": 0.9064964392052235,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "DAB2",
+      "score": 1.0082970889928435,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "THBS1",
+      "score": 0.9607887076594227,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "NLRC5",
+      "score": 0.6086016241447497,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "PTPRF",
+      "score": 1.1743730851836245,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "HSH2D",
+      "score": 0.629749765181237,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "AHNAK",
+      "score": 0.905357796895731,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "TTYH3",
+      "score": 1.0013666296740145,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "ANTXR1",
+      "score": 0.9524716988494707,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "CD6",
+      "score": 0.5672854723305009,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "EFHD1",
+      "score": 1.1577170849365912,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "ELL2",
+      "score": 0.622946920428146,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "LIF",
+      "score": 0.8990178353116305,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "FCGR2A",
+      "score": 0.9975544792227704,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "COL14A1",
+      "score": 0.9471020940100506,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "DEF6",
+      "score": 0.5454945066410796,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "PON2",
+      "score": 1.1528296802715998,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "IGLC1",
+      "score": 0.5574233085619225,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "SIGLEC6",
+      "score": 0.8986663832006355,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "TYROBP",
+      "score": 0.9909571627614371,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "PDLIM7",
+      "score": 0.9465129576693668,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "ZAP70",
+      "score": 0.5421409189584772,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "TFAP2B",
+      "score": 1.135620052845511,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "B",
+      "gene": "ISG20",
+      "score": 0.5562177234646193,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Granulocyte",
+      "gene": "MYO15B",
+      "score": 0.8846968210526754,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Myeloid",
+      "gene": "LGMN",
+      "score": 0.9861481297651695,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Stroma",
+      "gene": "INHBA",
+      "score": 0.9274459204261104,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "T_NK",
+      "gene": "PARP8",
+      "score": 0.5280673472115853,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "Tumor_Breast",
+      "gene": "IRX3",
+      "score": 1.1181925488713405,
+      "selection_category": "level1_marker"
+    },
+    {
+      "cell_type": "",
+      "gene": "SPP1",
+      "score": 8.25002064672978,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CTLA4",
+      "score": 5.277386861823827,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRG1",
+      "score": 5.1773220176829815,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "COL4A2",
+      "score": 5.09306591795453,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "AQP1",
+      "score": 4.97462215787382,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRD1",
+      "score": 4.961758042720844,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRK1",
+      "score": 4.821881287008632,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "COL4A1",
+      "score": 4.800532247827882,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "LTB",
+      "score": 4.765749102991374,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "COMP",
+      "score": 4.745294203113498,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCL4",
+      "score": 4.648559096300739,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TIGIT",
+      "score": 4.64813949520877,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRC3",
+      "score": 4.633898648570638,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRC4",
+      "score": 4.589511630939698,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "DUSP2",
+      "score": 4.491152288760378,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "DTHD1",
+      "score": 4.426249867063344,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RNASE1",
+      "score": 4.415116494354515,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FCGBP",
+      "score": 4.367733261323174,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRC1",
+      "score": 4.34263071042863,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CST7",
+      "score": 4.284961975626263,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD28",
+      "score": 4.230563857032935,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FOXP3",
+      "score": 4.227600256043689,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SERPINE1",
+      "score": 4.139628588811843,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCDC141",
+      "score": 4.128545064983052,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FCMR",
+      "score": 4.100195252059614,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PRF1",
+      "score": 4.093191615746104,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FLT1",
+      "score": 4.059074497584088,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RTKN2",
+      "score": 4.0510134654147265,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PLVAP",
+      "score": 4.049890727555699,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "THEMIS",
+      "score": 4.033076647882703,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "NELL2",
+      "score": 4.026101090230399,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "C3",
+      "score": 4.025087465059212,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ITK",
+      "score": 3.990776687626513,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PODXL",
+      "score": 3.9098281196726887,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "BCL11B",
+      "score": 3.9083853851814614,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD7",
+      "score": 3.9063254781663255,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GZMA",
+      "score": 3.8719900458688157,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CXCL13",
+      "score": 3.8711626326174216,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "MRC1",
+      "score": 3.8707935407137155,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD5",
+      "score": 3.8554330654220803,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCR4",
+      "score": 3.840182084262793,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GPR171",
+      "score": 3.838141485976431,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "LCK",
+      "score": 3.808118173736963,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IL2RA",
+      "score": 3.78640790202522,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SCML4",
+      "score": 3.7802910451882386,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IPCEF1",
+      "score": 3.7799896539821662,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GZMK",
+      "score": 3.7706487463196203,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PTGDR",
+      "score": 3.7595507359809424,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GRAP2",
+      "score": 3.731422703493479,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IL2RB",
+      "score": 3.7291034085019636,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "EOMES",
+      "score": 3.724672203801771,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SH2D1A",
+      "score": 3.6818424362806477,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SIRPG",
+      "score": 3.6610223757167453,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "HS3ST3B1",
+      "score": 3.638511126596531,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "MATK",
+      "score": 3.6292830640965072,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RASGRP2",
+      "score": 3.6125080539373835,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SKAP1",
+      "score": 3.6070384867751324,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "AOAH",
+      "score": 3.6002408357340348,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CHIT1",
+      "score": 3.5997448662528835,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IL9R",
+      "score": 3.590375625070488,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TESPA1",
+      "score": 3.5763062154395233,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CILP",
+      "score": 3.5721961500372816,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FCRL3",
+      "score": 3.571779885175704,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SELL",
+      "score": 3.5243137835290543,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FOSB",
+      "score": 3.5241671733574824,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "JAML",
+      "score": 3.5230353133065204,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SFRP4",
+      "score": 3.518985162770202,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CXCR6",
+      "score": 3.515989050273899,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SH2D2A",
+      "score": 3.5124927592674196,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TNFRSF4",
+      "score": 3.507976332543627,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TRAT1",
+      "score": 3.501065585467474,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCR5",
+      "score": 3.495064982232904,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ZNF683",
+      "score": 3.488929047405535,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ICOS",
+      "score": 3.4619996240764532,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RUNX3",
+      "score": 3.4437048654169033,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CLNK",
+      "score": 3.429977779400509,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ZC3H12D",
+      "score": 3.4268387873927613,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD3G",
+      "score": 3.4072590270368837,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCL19",
+      "score": 3.398032929273806,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "THBS4",
+      "score": 3.394625027995165,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TXK",
+      "score": 3.388625014365225,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCR7",
+      "score": 3.3789514892905363,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TNFRSF18",
+      "score": 3.378694245076482,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "KLRB1",
+      "score": 3.3480209810506643,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TTN",
+      "score": 3.3441751580881216,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PYHIN1",
+      "score": 3.3438569297341822,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RIPOR2",
+      "score": 3.318991962651412,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD84",
+      "score": 3.311608103440828,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "NLRC3",
+      "score": 3.294050246472009,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "NTNG2",
+      "score": 3.2868583462428522,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PDK4",
+      "score": 3.283259193906453,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FGD3",
+      "score": 3.2789036088491055,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SLC11A1",
+      "score": 3.278111831105371,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CAMK4",
+      "score": 3.2717283527507717,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SAMD3",
+      "score": 3.267960799451122,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "STAT4",
+      "score": 3.2662020549499537,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CARMIL2",
+      "score": 3.2588658540614164,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SULT1C3",
+      "score": 3.2475887611448373,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "NR4A1",
+      "score": 3.2364206635938384,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GIMAP4",
+      "score": 3.235571869559341,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "OLR1",
+      "score": 3.2355016066914253,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "LINC02694",
+      "score": 3.234890356705442,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PTPN22",
+      "score": 3.224068841883574,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PSTPIP1",
+      "score": 3.2209676202591537,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "MMP9",
+      "score": 3.2146859132981254,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SLAMF1",
+      "score": 3.205515116739914,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD52",
+      "score": 3.189540188021555,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCR8",
+      "score": 3.188122545961724,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GEM",
+      "score": 3.187007299425252,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PIK3CD",
+      "score": 3.1667701996515727,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GIMAP2",
+      "score": 3.157243896679237,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GPR15",
+      "score": 3.156648910175127,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TNFRSF1B",
+      "score": 3.1511363080160115,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CALCRL",
+      "score": 3.1508364858093363,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SLAMF6",
+      "score": 3.129563971310127,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "AREG",
+      "score": 3.128527775218766,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CTSW",
+      "score": 3.1141526917873636,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TRGC2",
+      "score": 3.102935046717991,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SPN",
+      "score": 3.093824450503528,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PLCH2",
+      "score": 3.0879688328919697,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TSPAN32",
+      "score": 3.0649207140389376,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ADAMTS1",
+      "score": 3.0648648253274184,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "HECW2",
+      "score": 3.045145434351805,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TRDC",
+      "score": 3.04445038698074,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GPR174",
+      "score": 3.032178324555134,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RASGRP1",
+      "score": 3.026245258693202,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IL18RAP",
+      "score": 3.014097238902763,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "UBASH3A",
+      "score": 3.0079676021808974,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PATL2",
+      "score": 3.006065176180323,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GIMAP5",
+      "score": 3.0008777752620373,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PARP15",
+      "score": 2.9988522225155254,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CDH5",
+      "score": 2.9976012729961257,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IL12RB1",
+      "score": 2.996479102866239,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CCL3",
+      "score": 2.996219970613998,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IL18R1",
+      "score": 2.986625776059037,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SLFN12L",
+      "score": 2.9802886893389813,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD226",
+      "score": 2.9774162500500014,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "OBSCN",
+      "score": 2.9758707968767655,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RASAL3",
+      "score": 2.9753022920184384,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "NCR1",
+      "score": 2.9732202573478,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PDE3B",
+      "score": 2.9615713648651654,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "HTRA3",
+      "score": 2.9603028885688274,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PBX4",
+      "score": 2.958052802610882,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "MYO1G",
+      "score": 2.9543175979809044,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TBX21",
+      "score": 2.9527099172016014,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "F13A1",
+      "score": 2.945414308981306,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PRDM8",
+      "score": 2.9412523007303837,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PNMA3",
+      "score": 2.928312544472153,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CRTAM",
+      "score": 2.9174795269407614,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "IRF8",
+      "score": 2.9140736128698217,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ALOX5AP",
+      "score": 2.91152063204035,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CARD16",
+      "score": 2.9087109481552633,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "APBA2",
+      "score": 2.907934221715326,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD247",
+      "score": 2.9038473999272596,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SYTL3",
+      "score": 2.9017449903064874,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "EMB",
+      "score": 2.9011949017978047,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD40LG",
+      "score": 2.8966770002808655,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TIMP3",
+      "score": 2.8921923433870185,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "LAT",
+      "score": 2.8902365287183587,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PDCD1",
+      "score": 2.8820029835644645,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "DUSP4",
+      "score": 2.8815317685044364,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PRKCQ",
+      "score": 2.879786167851618,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SUSD3",
+      "score": 2.8723752036504058,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ZNF831",
+      "score": 2.871740364449265,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "NLRP3",
+      "score": 2.8677648214505793,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GZMH",
+      "score": 2.8626036355130293,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TCF7",
+      "score": 2.845876155938039,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SLA2",
+      "score": 2.844028323465789,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GPR183",
+      "score": 2.8305674327785155,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SARDH",
+      "score": 2.825566541352103,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "ARRDC5",
+      "score": 2.823875770870917,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "MAL",
+      "score": 2.8237178409567205,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "FCRL6",
+      "score": 2.8183990879184604,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CPNE7",
+      "score": 2.8172092594621163,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "RIC3",
+      "score": 2.804575612833658,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "APOC1",
+      "score": 2.783758763712402,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GPR65",
+      "score": 2.7817997180637763,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "MYO1F",
+      "score": 2.7788700730053013,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PTPRC",
+      "score": 2.777709665040412,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TNFRSF9",
+      "score": 2.7738850698524766,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "DENND1C",
+      "score": 2.772688193179526,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CYFIP2",
+      "score": 2.7612253694454747,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PRKCB",
+      "score": 2.758816611415308,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CAVIN2",
+      "score": 2.757419230332198,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "PTPN7",
+      "score": 2.751362035575715,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CD48",
+      "score": 2.7505762803230884,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "CARD11",
+      "score": 2.7499458196909785,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "GPRIN3",
+      "score": 2.7467490314085947,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "SIT1",
+      "score": 2.7393121803748475,
+      "selection_category": "hvg"
+    },
+    {
+      "cell_type": "",
+      "gene": "TNC",
+      "score": 2.7340690412002537,
+      "selection_category": "hvg"
+    }
+  ]
+}

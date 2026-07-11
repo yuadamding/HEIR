@@ -1,0 +1,16 @@
+# Model fragment documenting the blueprint defaults. Experiment YAML embeds it.
+morphology_dim: 1024
+num_cell_types: 6
+expression_dim: 500
+latent_dim: 32
+graph_hidden_dim: 256
+graph_output_dim: 256
+graph_layers: 3
+trunk_hidden_dims: [512, 256]
+decoder_hidden_dims: [256, 256]
+dropout: 0.10
+prototype_temperature: 0.5
+hard_type_routing: false
+abstain_threshold: 0.60
+nonnegative_expression: true
+scgpt_embedding_dim: 512
