@@ -1,0 +1,141 @@
+{
+  "schema": "heir.snpatho_r1_reference_manifest.v1",
+  "condition": "R1_FFPE_snPATHO_only",
+  "status": "materialized_local_reference_not_yet_independently_reannotated_or_scANVI_encoded",
+  "filter": {
+    "column": "processing_method",
+    "accepted_values": ["FFPE_snPATHO"],
+    "matching": "exact"
+  },
+  "counts_layer": "RNA.counts",
+  "cell_type_annotation": {
+    "column": "major_annotation",
+    "provenance": "published integrated-workflow annotation",
+    "primary_clean_reannotation_status": "not_complete",
+    "allowed_role": "reference-isolation and annotation-sensitivity development"
+  },
+  "gene_panel": {
+    "path": "manifests/gene_panel_snpatho_500.tsv",
+    "genes": 500,
+    "sha256": "22ddb91188b3b124d5cf3ec0f7ae81017399d141e39647b0dce80675119fe927"
+  },
+  "normalization_contract": {
+    "panel_counts": "raw sparse counts",
+    "library_sizes": "full-transcriptome count sum before panel selection",
+    "expression_space": "log1p-cpm-10000-v1"
+  },
+  "development_prototype_adapter": {
+    "status": "materialized_svd_fallback_not_primary_scANVI",
+    "latent_transform": "artifacts/snpatho/prior500/shared_svd.npz",
+    "latent_transform_sha256": "ca5a7c3736726baad6d8e316cfdbdefd3217e34e0b9985535cf9aa57aefa7a18",
+    "latent_transform_training_donors": ["B1"],
+    "maximum_prototypes_per_type": 10,
+    "minimum_cells_per_type": 50,
+    "rare_types": "omitted_from_prototype_bank_and_reserved_for_unknown"
+  },
+  "specimens": {
+    "4066": {
+      "source_rds": "4066_integrated_seuarat_object.rds",
+      "source_rds_sha256": "3c39865d0a5613f06f86fddf90b24bcfa35f7e86db9227c3f56096af9b741751",
+      "source_observations": 20472,
+      "selected_observations": 6620,
+      "h5ad": "artifacts/snpatho/r1_ffpe/4066/reference.h5ad",
+      "h5ad_sha256": "86aa9b0312362758a1e91fb981ea45dd6ca801157c81ceeb41df423c7a374020",
+      "conversion_provenance": "artifacts/snpatho/r1_ffpe/4066/reference.h5ad.provenance.json",
+      "conversion_provenance_sha256": "53fad271bede753bf9c6a02ce50f9420e7620c6624a066ae5988ef26582dff32",
+      "panel_reference": "artifacts/snpatho/r1_ffpe/4066/reference500.npz",
+      "panel_reference_sha256": "1088a50b091b7d740ba1ef9ac6c942a76ae6889f68963fd9b7bf9123395e3cd0",
+      "latent_reference": "artifacts/snpatho/r1_ffpe/4066/reference500_latent.npz",
+      "latent_reference_sha256": "ec56b9a152028917a5ab1298411a26a1bd6ed96cccf9420c2f7342c8a6b45138",
+      "prototypes": "artifacts/snpatho/r1_ffpe/4066/prototypes.npz",
+      "prototypes_sha256": "db114bfe11644a5b7a6f785ae8dab7e8452f3d1cbc9ec6f1fa1c410c8a587261",
+      "prototype_supported_types": [
+        "B_cells", "CAF", "DC", "Endothelial", "Epithelial_basal",
+        "Epithelial_cancer", "Macrophage", "Myoepithelial", "PVL", "T_cells"
+      ],
+      "prototype_omitted_rare_types": ["Epithelial_luminal", "MAST"],
+      "cell_type_counts": {
+        "B_cells": 50,
+        "CAF": 1274,
+        "DC": 58,
+        "Endothelial": 217,
+        "Epithelial_basal": 168,
+        "Epithelial_cancer": 3054,
+        "Epithelial_luminal": 41,
+        "Macrophage": 427,
+        "MAST": 34,
+        "Myoepithelial": 258,
+        "PVL": 110,
+        "T_cells": 929
+      }
+    },
+    "4399": {
+      "source_rds": "4399_integrated_seuarat_object.rds",
+      "source_rds_sha256": "8358aaed4529aec51771e54f77becc0ae7dca98d81c12e145d4522c0fb2802b4",
+      "source_observations": 23080,
+      "selected_observations": 4471,
+      "h5ad": "artifacts/snpatho/r1_ffpe/4399/reference.h5ad",
+      "h5ad_sha256": "6450961cd59b8a6eead4112b8f107dde48b9ff95b96196d1c9e5ff2ffc3179d3",
+      "conversion_provenance": "artifacts/snpatho/r1_ffpe/4399/reference.h5ad.provenance.json",
+      "conversion_provenance_sha256": "ef69aef18217817d003930f0b5e2aaa8c63c2adcc682d4bbba97586b59b8ca91",
+      "panel_reference": "artifacts/snpatho/r1_ffpe/4399/reference500.npz",
+      "panel_reference_sha256": "6e16ea3919e62acefca826e4022fc13ffa9c4d281fc546fcd1d779925cc29f26",
+      "latent_reference": "artifacts/snpatho/r1_ffpe/4399/reference500_latent.npz",
+      "latent_reference_sha256": "089f6dd7fac07596311716da0803e0215a492e2033e2a4497249783e2ffbdb40",
+      "prototypes": "artifacts/snpatho/r1_ffpe/4399/prototypes.npz",
+      "prototypes_sha256": "81ea264388da8beb4142e97f76caacb8c5fa419055ef04f7bcef562b9d7c1b8e",
+      "prototype_supported_types": [
+        "CAF", "Endothelial", "Epithelial_cancer", "Hepatocyte", "LSEC",
+        "Macrophage", "PVL"
+      ],
+      "prototype_omitted_rare_types": [
+        "Cholangiocyte", "Lymphatic_endothelial", "Mixed_lymphocytes", "RBCs"
+      ],
+      "cell_type_counts": {
+        "Hepatocyte": 477,
+        "Epithelial_cancer": 1980,
+        "Cholangiocyte": 46,
+        "CAF": 490,
+        "Endothelial": 742,
+        "Macrophage": 241,
+        "Lymphatic_endothelial": 16,
+        "PVL": 300,
+        "RBCs": 15,
+        "Mixed_lymphocytes": 42,
+        "LSEC": 122
+      }
+    },
+    "4411": {
+      "source_rds": "4411_integrated_seuarat_object.rds",
+      "source_rds_sha256": "13f55655006a875666d22fb372b1db748a8521126b435ec01894b2f4b7f97620",
+      "source_observations": 27311,
+      "selected_observations": 8444,
+      "h5ad": "artifacts/snpatho/r1_ffpe/4411/reference.h5ad",
+      "h5ad_sha256": "d157fdaec39d5c4519e204087db2568a8ae10d1d5050bb2992217ec8741b1341",
+      "conversion_provenance": "artifacts/snpatho/r1_ffpe/4411/reference.h5ad.provenance.json",
+      "conversion_provenance_sha256": "c5a14947d69ac8f5f98dd1e418da855d5de268fe2fd3552b3b83b0134407189e",
+      "panel_reference": "artifacts/snpatho/r1_ffpe/4411/reference500.npz",
+      "panel_reference_sha256": "eada9b86146bfdcaee0ebeb0f40410377524e5c108f8499fc0ad5f79d52154b6",
+      "latent_reference": "artifacts/snpatho/r1_ffpe/4411/reference500_latent.npz",
+      "latent_reference_sha256": "96b41a88534e7d38ba9bfb621d29383afb23a69c42fb73267257458c48a06972",
+      "prototypes": "artifacts/snpatho/r1_ffpe/4411/prototypes.npz",
+      "prototypes_sha256": "95cc159a38c79ff708e25473221905ced8646b43b6eab724ed99a6f027cf757f",
+      "prototype_supported_types": [
+        "CAF", "Endothelial", "Epithelial_cancer", "Hepatocyte", "LSEC",
+        "Macrophage", "Mixed_lymphocytes", "RBCs"
+      ],
+      "prototype_omitted_rare_types": ["Cholangiocyte"],
+      "cell_type_counts": {
+        "CAF": 249,
+        "Cholangiocyte": 28,
+        "Endothelial": 433,
+        "Epithelial_cancer": 4544,
+        "Hepatocyte": 2520,
+        "LSEC": 167,
+        "Macrophage": 285,
+        "Mixed_lymphocytes": 64,
+        "RBCs": 154
+      }
+    }
+  }
+}

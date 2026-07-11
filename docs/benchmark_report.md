@@ -1,6 +1,7 @@
 # HEIR/SIGHT benchmark on downloaded cohorts (NatCommun/MOSAIC + snPATHO)
 
-Date: 2026-07-10. Environment: `hne` conda env, RTX 3080 (10 GB), Space Ranger 4.1.0.
+Historical locked run: 2026-07-10. DeepBench refresh: 2026-07-11.
+Environment: `hne` conda env, RTX 3080 (10 GB), Space Ranger 4.1.0.
 Scope: (1) audit the method ("check HEIR"); (2) benchmark it on the local cohorts.
 
 ## TL;DR
@@ -17,7 +18,7 @@ Scope: (1) audit the method ("check HEIR"); (2) benchmark it on the local cohort
   (**0.1225 vs 0.1234**) and matched pseudobulk (**0.1465**), but not versus the
   matched type mean (**0.1092**). Location-level cosine was also below both
   molecular baselines.
-- The method was computationally efficient: mean CUDA inference was **18.7 s**
+- Historical v0.2 round-0 inference was computationally efficient: mean CUDA inference was **18.7 s**
   per slide, **1,907 nuclei/s**, and **2.33 GiB** peak allocation. Mean cell and
   spot coverage were **83.1%** and **92.2%**.
 - The earlier 13-specimen molecular falsification still supports the narrower
@@ -28,14 +29,18 @@ Scope: (1) audit the method ("check HEIR"); (2) benchmark it on the local cohort
 
 The full attached benchmark plan is now represented by a separate, fail-closed
 retrospective scorer. It preserves `snPATHO-Locked-v0.2`, applies the available
-expanded metrics and RNA-mass aggregation to all three cases, and reports
-unavailable tracks explicitly. The historical round-0 paired Spearman delta
-versus the historical integrated type-mean baseline is **-0.0259** (10,000
+expanded metrics and historical integrated-reference library-size weighting to
+all three cases, and reports
+unavailable tracks explicitly. The historical round-0 statistic is the
+equal-weight specimen mean of
+`median_g(rho_HEIR,dg - rho_historical-hard-type-mean,dg)`: **-0.0259** (10,000
 resamples: 95% interval **-0.0829 to 0.0081**), so the retrospective diagnostic
 is also negative.
 
 This is not the plan's requested primary result: the historical references pool
-FFPE snPATHO, frozen SNAP snPATHO/Flex, and frozen 3-prime nuclei; refined and
+FFPE snPATHO, frozen SNAP snPATHO/Flex, and frozen 3-prime nuclei. Hash-bound
+FFPE-only counts now provide hard/soft integrated-annotation type-mean
+sensitivities, but clean reannotation, primary scANVI, prototype-only, refined and
 five-seed predictions, composition-adjustment inputs, per-spot H&E tissue
 fraction, and the required image/graph shuffles are absent. Target-H&E-derived
 OOD calibration also prevents a Track A1/A2 compliance claim. See
@@ -71,7 +76,8 @@ capture-area filtering, but target Visium expression/counts remained locked.
 | Matched type mean | 0.0224 | 0.0207 | **0.1092** | 0.7813 |
 
 Against spatial shuffle, the donor-bootstrap mean Spearman difference was
--0.0080 (95% CI -0.0233 to 0.0052; probability better 0.14). HEIR's MSE
+-0.0080 (95% CI -0.0233 to 0.0052; bootstrap fraction with delta > 0 of 0.14).
+This fraction is descriptive, not a probability of truth or a p-value. HEIR's MSE
 improvement was 0.00087 (95% CI 0.00007 to 0.00235), so it captured a small
 amplitude advantage without robust gene-wise spatial rank correlation. A subset
 of genes did show signal—34/500 genes exceeded Spearman 0.2 in 4066, 22/500 in
@@ -167,13 +173,15 @@ Only triggers on real multi-char IDs, so the synthetic tests missed it.
 2. `src/heir/prior/prototypes.py` `build_sample_prototypes` — sample_ids.
 3. `src/heir/cli.py` refine — refined prototype sample_ids.
 
-Fixed to `dtype="U%d" % max(1, len(value))`. The current suite has 181 passing
-tests, including regression coverage for the completed locked pipeline and the
-development-only refinement redesign.
+Fixed to `dtype="U%d" % max(1, len(value))`. Regression coverage for the
+completed locked pipeline and development-only refinement redesign now runs in
+the committed GitHub Actions quality workflow as well as locally.
 
 ## 5. Method audit highlights (26-agent adversarial review)
 
-Sound & verified: prototype+residual `z=Σ p·μ+Δz`; `α=n/(n+κ)` shrinkage;
+Sound & verified: versioned prototype plus bounded, type-conditioned low-rank
+residual `z=Σ q·μ+Δz`, where `q` is conditional on a known state;
+`α=n/(n+κ)` prototype shrinkage;
 SHA-256-bound immutable latent space (rejects refitted same-width SVD); genuine
 log-domain unbalanced OT with a dustbin (does not force snRNA capture fractions);
 per-term ablatable losses; separate distilled student; four independent
@@ -185,7 +193,8 @@ supersedes that finding: the completed locked runner executes the type-mean
 baseline and donor bootstrap and reports the prespecified expression endpoint.
 The historical locked implementation had sticky refinement anchors and did not
 run refinement. The current development branch adds revocable anchors,
-transport-derived responsibilities, and immediate rollback, but those changes
+transport-derived responsibilities, a validated round-0 rollback target, fixed
+measured priors by default, and a restricted zero-initialized residual, but those changes
 remain unvalidated biologically and do not alter the locked result. Broader
 cautions remain around generic initialization, graph boundaries, residual
 identifiability, and independent cell-level truth.

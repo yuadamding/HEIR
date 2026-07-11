@@ -18,7 +18,8 @@ def test_checked_experiment_config_loads_relative_paths():
     assert config.mode == "personalized"
     assert config.spatial_validation_only
     assert config.manifest.endswith("/manifests/natcommun.tsv")
-    assert config.refinement.maximum_rounds == 3
+    assert config.refinement.maximum_rounds == 4
+    assert config.refinement.broad_refinement_rounds == 2
 
 
 def test_stage_gate_allows_public_pretraining_but_not_locked_spatial():

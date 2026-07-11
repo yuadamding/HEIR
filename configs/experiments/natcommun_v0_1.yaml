@@ -21,6 +21,9 @@ model:
   hard_type_routing: false
   abstain_threshold: 0.60
   nonnegative_expression: true
+  legacy_unrestricted_residual: false
+  residual_rank: 4
+  residual_max_norm: 0.5
 
 rna:
   preferred_model: scANVI
@@ -74,18 +77,20 @@ losses:
 
 refinement:
   enabled: true
-  maximum_rounds: 3
+  maximum_rounds: 4
   min_probability: 0.90
   max_normalized_entropy: 0.20
   teacher_ema: 0.99
-  prior_old_weight: 0.80
+  # Primary analysis keeps the measured sample molecular prior fixed. Values
+  # below 1.0 are reserved for prespecified prior-update sensitivities.
+  prior_old_weight: 1.0
   minimum_segmentation_confidence: 0.50
   require_view_agreement: true
   maximum_prior_total_variation: 0.10
   max_anchors_per_class: 10000
   stable_rounds_required: 1
   objective_stability_tolerance: 0.01
-  broad_refinement_rounds: 1
+  broad_refinement_rounds: 2
 
 uncertainty:
   unknown_probability_threshold: 0.60

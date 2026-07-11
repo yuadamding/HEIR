@@ -66,18 +66,22 @@ class LossWeightConfig:
 @dataclass(frozen=True)
 class RefinementConfig:
     enabled: bool = True
-    maximum_rounds: int = 3
+    maximum_rounds: int = 4
     min_probability: float = 0.90
     max_normalized_entropy: float = 0.20
     teacher_ema: float = 0.99
-    prior_old_weight: float = 0.80
+    # Keep the measured molecular prior fixed in the primary refinement path.
+    # Lower values remain an explicit prior-update sensitivity analysis.
+    prior_old_weight: float = 1.0
     minimum_segmentation_confidence: float = 0.50
     require_view_agreement: bool = True
     maximum_prior_total_variation: float = 0.10
     max_anchors_per_class: int = 10000
     stable_rounds_required: int = 1
     objective_stability_tolerance: float = 0.01
-    broad_refinement_rounds: int = 1
+    # Anchor lifecycle requires two agreeing rounds before an anchor becomes
+    # trusted, so a one-round broad phase cannot affect parent supervision.
+    broad_refinement_rounds: int = 2
 
     def validate(self) -> None:
         if self.maximum_rounds < 0 or self.maximum_rounds > 5:
@@ -100,6 +104,19 @@ class RefinementConfig:
             raise ValueError("objective_stability_tolerance must be non-negative")
         if self.broad_refinement_rounds < 0 or self.broad_refinement_rounds > self.maximum_rounds:
             raise ValueError("broad_refinement_rounds must lie within maximum_rounds")
+        if self.broad_refinement_rounds == 1:
+            raise ValueError(
+                "broad_refinement_rounds must be 0 for fine-only refinement or at least 2 "
+                "for two-round parent-anchor trust"
+            )
+        if (
+            self.broad_refinement_rounds > 0
+            and self.maximum_rounds - self.broad_refinement_rounds < 2
+        ):
+            raise ValueError(
+                "broad refinement must leave at least two subsequent fine rounds for "
+                "two-round fine-anchor trust"
+            )
 
     @property
     def prior_new_weight(self) -> float:

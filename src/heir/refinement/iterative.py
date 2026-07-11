@@ -48,6 +48,8 @@ class RefinementResult:
     rounds: Tuple[RefinementRound, ...]
     stopped_reason: str
     sample_prototype_weights: Mapping[str, np.ndarray]
+    round_zero_validation_loss: Optional[float] = None
+    selected_round: int = 0
 
 
 class IterativeRefiner:
@@ -77,6 +79,60 @@ class IterativeRefiner:
         values: Mapping[Tuple[str, str, str, str], AnchorLifecycle],
     ) -> Dict[Tuple[str, str, str, str], AnchorLifecycle]:
         return {key: value.copy() for key, value in values.items()}
+
+    @staticmethod
+    def _set_round_trainability(
+        model: torch.nn.Module,
+        original: Mapping[str, bool],
+        *,
+        parent_only: bool,
+    ) -> None:
+        """Restrict broad rounds to the parent head and restore fine rounds."""
+
+        resolved: Dict[str, bool] = {}
+        for name, parameter in model.named_parameters():
+            enabled = original[name]
+            if parent_only:
+                enabled = enabled and name.startswith("parent_type_head.")
+            resolved[name] = enabled
+        if parent_only and not any(resolved.values()):
+            raise ValueError("broad refinement requires a trainable parent type head")
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad_(resolved[name])
+
+    @staticmethod
+    def _objective_values(metrics: Mapping[str, float]) -> np.ndarray:
+        """Extract the trust-region objectives from one validation evaluation."""
+
+        return np.asarray(
+            [
+                metrics.get("uot", 0.0),
+                metrics.get("pseudobulk", 0.0),
+                metrics.get("dirichlet", metrics.get("composition", 0.0)),
+                metrics.get("calibration", 0.0),
+            ],
+            dtype=np.float64,
+        )
+
+    @classmethod
+    @torch.no_grad()
+    def _round_zero_validation(
+        cls,
+        trainer: HEIRTrainer,
+        validation_batches: Sequence[HEIRTrainingBatch],
+    ) -> Tuple[float, np.ndarray]:
+        """Evaluate the unrefined student before any candidate can be committed."""
+
+        if not validation_batches:
+            raise ValueError("refinement validation batches cannot be empty")
+        metrics = trainer._epoch(validation_batches, None)
+        if "selection_total" not in metrics:
+            raise ValueError("round-0 validation did not report selection_total")
+        validation_loss = float(metrics["selection_total"])
+        objectives = cls._objective_values(metrics)
+        if not np.isfinite(validation_loss) or not np.isfinite(objectives).all():
+            raise FloatingPointError("non-finite round-0 refinement validation objective")
+        return validation_loss, objectives
 
     @torch.no_grad()
     def _teacher_probabilities(
@@ -117,14 +173,21 @@ class IterativeRefiner:
         parent_probabilities: Optional[np.ndarray] = None,
         broad_level: bool = False,
     ) -> Tuple[np.ndarray, float, float, np.ndarray]:
-        """Run the molecular E-step and return detached UOT responsibilities."""
+        """Run the fine-prototype E-step and return detached UOT responsibilities.
+
+        In a broad round, parent probabilities gate compatible fine types. This
+        is deliberately named a gate rather than parent transport: the current
+        training-batch and loss contracts still require fine-prototype
+        responsibilities. A true parent-Gaussian E-step needs a versioned
+        parent-level molecular target contract.
+        """
 
         values = batch.to(self.device)
         constraints = trainer._anchor_constraints(values)
         if broad_level:
             mapping = teacher.model.config.fine_to_parent
             if mapping is None or parent_probabilities is None:
-                raise ValueError("broad molecular transport requires parent probabilities")
+                raise ValueError("parent-gated transport requires parent probabilities")
             parent_tensor = torch.from_numpy(np.asarray(parent_probabilities)).to(
                 device=self.device,
                 dtype=values.morphology.dtype,
@@ -179,7 +242,7 @@ class IterativeRefiner:
         view_probabilities: Optional[Mapping[str, np.ndarray]] = None,
     ) -> RefinementResult:
         if not self.config.enabled or self.config.maximum_rounds == 0:
-            return RefinementResult(tuple(), "disabled", {})
+            return RefinementResult(tuple(), "disabled", {}, selected_round=0)
         if any(batch.target_spatial_expression is not None for batch in training_batches):
             raise ValueError("target spatial expression cannot enter refinement")
         trainer = self.trainer_factory()
@@ -187,6 +250,15 @@ class IterativeRefiner:
         # Later low-rank decoder adapters must be an explicit, separately
         # tested model version rather than an accidental optimizer side effect.
         trainer.model.freeze_expression_decoder(True)
+        trainer.model.to(self.device)
+        if self.config.broad_refinement_rounds > 0 and trainer.model.config.fine_to_parent is None:
+            raise ValueError(
+                "broad refinement requires a hierarchical model; use "
+                "broad_refinement_rounds=0 for a fine-only ablation"
+            )
+        original_trainability = {
+            name: parameter.requires_grad for name, parameter in trainer.model.named_parameters()
+        }
         teacher = EMATeacher(trainer.model, self.config.teacher_ema)
         teacher.model.to(self.device)
         if self.config.require_view_agreement and view_probabilities is None:
@@ -198,12 +270,6 @@ class IterativeRefiner:
         stable_rounds = 0
         reason = "maximum_rounds"
         working_batches = list(training_batches)
-        global_best_loss = float("inf")
-        global_best_state = self._model_state(trainer.model)
-        global_best_teacher_state = self._teacher_state(teacher)
-        global_best_batches = list(working_batches)
-        global_best_anchors: Dict[Tuple[str, str, str, str], AnchorLifecycle] = {}
-        previous_objectives: Optional[np.ndarray] = None
         measured_priors: Dict[Tuple[str, str], np.ndarray] = {}
         for batch in training_batches:
             sample_key = (batch.donor_id, batch.sample_id)
@@ -214,8 +280,23 @@ class IterativeRefiner:
                 raise ValueError("all bags of a sample must share the measured RNA prior")
             measured_priors[sample_key] = values.copy()
         committed_priors = {"%s::%s" % key: value.copy() for key, value in measured_priors.items()}
+        # Round 0 is the complete rollback target: unrefined student, matching
+        # EMA teacher, measured priors, original batches, and no anchor state.
+        # Without its validation score, any finite first refinement candidate
+        # would be committed unconditionally against +infinity.
+        round_zero_validation_loss, previous_objectives = self._round_zero_validation(
+            trainer,
+            validation_batches,
+        )
+        global_best_loss = round_zero_validation_loss
+        global_best_round = 0
+        global_best_state = self._model_state(trainer.model)
+        global_best_teacher_state = self._teacher_state(teacher)
+        global_best_batches = list(working_batches)
+        global_best_anchors: Dict[Tuple[str, str, str, str], AnchorLifecycle] = {}
         global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
-        for round_id in range(self.config.maximum_rounds):
+        for round_id in range(1, self.config.maximum_rounds + 1):
+            parent_only_round = round_id <= self.config.broad_refinement_rounds
             refined_batches: List[HEIRTrainingBatch] = []
             candidate_anchor_states = dict(anchor_states)
             accepted_total = 0
@@ -233,7 +314,7 @@ class IterativeRefiner:
                 broad_transport = bool(
                     parent_probabilities is not None
                     and parent_probabilities.shape[1] >= 2
-                    and round_id < self.config.broad_refinement_rounds
+                    and round_id <= self.config.broad_refinement_rounds
                 )
                 (
                     responsibilities,
@@ -311,7 +392,13 @@ class IterativeRefiner:
             updated_priors: Dict[Tuple[str, str], np.ndarray] = {}
             for sample_key, summed in sample_prior_sums.items():
                 predicted_prior = summed
-                if predicted_prior.sum() <= 0:
+                if parent_only_round or self.config.prior_old_weight == 1.0:
+                    # The primary path is an exact fixed-prior analysis; do not
+                    # even renormalize an immutable measured artifact here.
+                    # Broad rounds also cannot update fine-prototype priors,
+                    # including in an opt-in prior-update sensitivity.
+                    updated_priors[sample_key] = sample_reference_priors[sample_key].copy()
+                elif predicted_prior.sum() <= 0:
                     updated_priors[sample_key] = sample_reference_priors[sample_key]
                 else:
                     updated_priors[sample_key] = update_measured_prior(
@@ -350,7 +437,7 @@ class IterativeRefiner:
                 broad_level = bool(
                     parent_probabilities is not None
                     and parent_probabilities.shape[1] >= 2
-                    and round_id < self.config.broad_refinement_rounds
+                    and round_id <= self.config.broad_refinement_rounds
                 )
                 anchor_probabilities = parent_probabilities if broad_level else probabilities
                 assert anchor_probabilities is not None
@@ -518,38 +605,38 @@ class IterativeRefiner:
                 trusted_total += int((lifecycle.status == AnchorStatus.TRUSTED).sum())
                 challenged_total += int((lifecycle.status == AnchorStatus.CHALLENGED).sum())
                 revoked_total += int((lifecycle.status == AnchorStatus.REVOKED).sum())
-            result: HEIRTrainingResult = trainer.fit(refined_batches, validation_batches)
+            self._set_round_trainability(
+                trainer.model,
+                original_trainability,
+                parent_only=parent_only_round,
+            )
+            try:
+                result: HEIRTrainingResult = trainer.fit(refined_batches, validation_batches)
+            finally:
+                self._set_round_trainability(
+                    trainer.model,
+                    original_trainability,
+                    parent_only=False,
+                )
             changed_fraction = changed_total / max(previous_total, 1)
             history_row = result.history[result.best_epoch] if result.history else {}
-            objective_values = np.asarray(
-                [
-                    history_row.get("validation/uot", 0.0),
-                    history_row.get("validation/pseudobulk", 0.0),
-                    history_row.get(
-                        "validation/dirichlet",
-                        history_row.get("validation/composition", 0.0),
-                    ),
-                    history_row.get("validation/calibration", 0.0),
-                ],
-                dtype=np.float64,
+            objective_values = self._objective_values(
+                {
+                    key.removeprefix("validation/"): value
+                    for key, value in history_row.items()
+                    if key.startswith("validation/")
+                }
             )
-            if previous_objectives is None:
-                objective_relative_change = float("inf")
-            else:
-                relative = np.abs(objective_values - previous_objectives) / np.maximum(
-                    np.abs(previous_objectives), 1.0e-8
-                )
-                objective_relative_change = float(relative.max(initial=0.0))
+            relative = np.abs(objective_values - previous_objectives) / np.maximum(
+                np.abs(previous_objectives), 1.0e-8
+            )
+            objective_relative_change = float(relative.max(initial=0.0))
             validation_loss = float(result.best_validation_loss)
             # Reuse the configured absolute objective tolerance as the
             # trust-region delta to preserve the public configuration API.
             round_committed = bool(
                 np.isfinite(validation_loss)
-                and (
-                    not np.isfinite(global_best_loss)
-                    or validation_loss
-                    <= global_best_loss + self.config.objective_stability_tolerance
-                )
+                and validation_loss <= global_best_loss + self.config.objective_stability_tolerance
             )
             audit.append(
                 RefinementRound(
@@ -592,6 +679,7 @@ class IterativeRefiner:
             committed_priors = {key: value.copy() for key, value in candidate_priors.items()}
             if validation_loss <= global_best_loss:
                 global_best_loss = validation_loss
+                global_best_round = round_id
                 global_best_state = self._model_state(trainer.model)
                 global_best_teacher_state = self._teacher_state(teacher)
                 global_best_batches = list(working_batches)
@@ -601,7 +689,14 @@ class IterativeRefiner:
             objectives_stable = (
                 objective_relative_change <= self.config.objective_stability_tolerance
             )
-            if previous_total and changed_fraction < 0.01 and objectives_stable:
+            # A stable parent phase is not terminal: at least one fine round
+            # must run after the configured broad schedule.
+            if (
+                not parent_only_round
+                and previous_total
+                and changed_fraction < 0.01
+                and objectives_stable
+            ):
                 stable_rounds += 1
             else:
                 stable_rounds = 0
@@ -609,4 +704,10 @@ class IterativeRefiner:
                 reason = "accepted_labels_stable"
                 break
         trainer.model.load_state_dict(global_best_state)
-        return RefinementResult(tuple(audit), reason, global_best_priors)
+        return RefinementResult(
+            tuple(audit),
+            reason,
+            global_best_priors,
+            round_zero_validation_loss,
+            global_best_round,
+        )

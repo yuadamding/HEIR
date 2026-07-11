@@ -6,12 +6,16 @@ The donor is the biological unit. Sections, cells, spots, and patches from one d
 
 1. H&E-only morphology/graph model.
 2. Generic tissue atlas.
-3. Matched snRNA, no refinement.
-4. Matched snRNA with constrained refinement.
-5. Matched cell-type mean expression.
-6. Wrong-donor snRNA.
+3. Wrong-donor snRNA.
+4. Matched hard type mean.
+5. Matched probability-weighted soft type mean.
+6. Matched prototype-only prediction with the residual fixed at zero.
+7. Matched prototype plus zero-initialized bounded low-rank residual.
+8. Matched snRNA, no refinement (round 0).
+9. Matched snRNA with constrained refinement.
 
-The expression claim survives only if HEIR beats the matched type-mean baseline on within-type residual programs.
+The expression claim survives only if HEIR beats both matched type-mean
+baselines and the prototype-only baseline on within-type residual programs.
 
 ## Mandatory negative controls
 
@@ -20,7 +24,10 @@ The expression claim survives only if HEIR beats the matched type-mean baseline 
 - shuffled graph coordinates;
 - composition-only prediction;
 - label-shuffled prototypes;
-- no-refinement and no-unknown variants.
+- repeated complete-record shuffles and within-predicted-type shuffles;
+- no-refinement, no-graph, and no-unknown variants;
+- fixed versus updated measured-prior sensitivities;
+- fixed, explicit-target, and model-estimated unknown-mass sensitivities.
 
 Correct matched RNA should outperform a generic atlas, which should outperform permuted/no RNA. Similar performance for correct and wrong donors falsifies the sample-personalization claim.
 
@@ -56,6 +63,6 @@ target Visium values.
 
 Methodology tests additionally exercise identifiable and non-identifiable
 transport, missing-reference-state dustbin routing, revocable wrong anchors,
-parent-to-fine constraints, scVI full-library scale equivalence, final-latent UOT
-consistency, and prototype-mixture uncertainty. These are necessary behavioral
+parent-gated fine-prototype constraints, scVI full-library scale equivalence,
+final-latent UOT consistency, and prototype-mixture uncertainty. These are necessary behavioral
 checks, not substitutes for independent cell-resolution biological validation.

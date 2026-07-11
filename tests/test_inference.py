@@ -53,9 +53,9 @@ def _bundle() -> PredictionBundle:
     )
 
 
-def test_prediction_bundle_v6_roundtrip_and_legacy_load(tmp_path):
+def test_prediction_bundle_v7_roundtrip_and_legacy_load(tmp_path):
     bundle = _bundle()
-    output = tmp_path / "prediction_v6.npz"
+    output = tmp_path / "prediction_v7.npz"
     bundle.to_npz(output)
     loaded = PredictionBundle.from_npz(output)
     assert loaded.sample_id == "sample1"
@@ -67,11 +67,13 @@ def test_prediction_bundle_v6_roundtrip_and_legacy_load(tmp_path):
     assert loaded.probability_threshold == pytest.approx(0.7)
     assert loaded.artifact_threshold == pytest.approx(0.4)
     assert loaded.expression_space_id == "log1p-cpm10k-v1"
+    assert loaded.expression_interval_semantics == PredictionBundle.CONDITIONAL_KNOWN_STATE
+    np.testing.assert_array_equal(loaded.expression_interval_available, [True, True])
     assert loaded.parent_type_names.tolist() == ["parent"]
     assert loaded.program_scores.shape == (2, 1)
     with np.load(output, allow_pickle=False) as archive:
         assert str(archive["__contract__"].item()) == PredictionBundle.CONTRACT
-        assert int(archive["__version__"].item()) == 6
+        assert int(archive["__version__"].item()) == 7
         legacy_payload = {
             name: np.array(archive[name], copy=True)
             for name in archive.files
@@ -93,6 +95,8 @@ def test_prediction_bundle_v6_roundtrip_and_legacy_load(tmp_path):
                 "probability_threshold",
                 "artifact_threshold",
                 "expression_space_id",
+                "expression_interval_semantics",
+                "expression_interval_available",
                 "parent_type_probabilities",
                 "parent_type_names",
                 "program_scores",
@@ -115,9 +119,62 @@ def test_prediction_bundle_v6_roundtrip_and_legacy_load(tmp_path):
     assert migrated.probability_threshold is None
     assert migrated.artifact_threshold is None
     assert migrated.expression_space_id == ""
+    assert migrated.expression_interval_semantics == PredictionBundle.LEGACY_CONDITIONAL_KNOWN_STATE
+    assert migrated.expression_interval_available is None
 
     with np.load(output, allow_pickle=False) as archive:
-        v5_payload = {name: np.array(archive[name], copy=True) for name in archive.files}
+        v6_payload = {name: np.array(archive[name], copy=True) for name in archive.files}
+    v6_payload["__version__"] = np.asarray(6, dtype=np.int64)
+    del v6_payload["expression_interval_semantics"]
+    del v6_payload["expression_interval_available"]
+    v6 = tmp_path / "prediction_v6_compat.npz"
+    np.savez_compressed(v6, **v6_payload)
+    loaded_v6 = PredictionBundle.from_npz(v6)
+    assert (
+        loaded_v6.expression_interval_semantics == PredictionBundle.LEGACY_CONDITIONAL_KNOWN_STATE
+    )
+    assert loaded_v6.expression_interval_available is None
+
+    abstained_v6_payload = dict(v6_payload)
+    abstained_v6_payload["abstain"] = np.asarray([False, True])
+    abstained_v6_payload["labels"] = np.asarray([0, -1], dtype=np.int64)
+    abstained_v6 = tmp_path / "prediction_v6_abstained.npz"
+    np.savez_compressed(abstained_v6, **abstained_v6_payload)
+    migrated_abstained = PredictionBundle.from_npz(abstained_v6)
+    assert migrated_abstained.expression_interval_available is None
+    np.testing.assert_array_equal(
+        migrated_abstained.expression_mean,
+        abstained_v6_payload["expression_mean"],
+    )
+    np.testing.assert_array_equal(
+        migrated_abstained.expression_lower,
+        abstained_v6_payload["expression_lower"],
+    )
+    np.testing.assert_array_equal(
+        migrated_abstained.expression_upper,
+        abstained_v6_payload["expression_upper"],
+    )
+    np.testing.assert_array_equal(
+        migrated_abstained.program_scores,
+        abstained_v6_payload["program_scores"],
+    )
+    upgraded_v7 = tmp_path / "prediction_v7_upgraded.npz"
+    migrated_abstained.to_npz(upgraded_v7)
+    upgraded = PredictionBundle.from_npz(upgraded_v7)
+    assert upgraded.expression_interval_semantics == PredictionBundle.CONDITIONAL_KNOWN_STATE
+    np.testing.assert_array_equal(upgraded.expression_interval_available, [True, False])
+    np.testing.assert_array_equal(
+        upgraded.expression_mean,
+        abstained_v6_payload["expression_mean"],
+    )
+    assert np.isnan(upgraded.expression_lower[1]).all()
+    assert np.isnan(upgraded.expression_upper[1]).all()
+    np.testing.assert_array_equal(
+        upgraded.program_scores,
+        abstained_v6_payload["program_scores"],
+    )
+
+    v5_payload = dict(v6_payload)
     v5_payload["__version__"] = np.asarray(5, dtype=np.int64)
     del v5_payload["expression_space_id"]
     v5 = tmp_path / "prediction_v5_compat.npz"
@@ -126,7 +183,7 @@ def test_prediction_bundle_v6_roundtrip_and_legacy_load(tmp_path):
     assert loaded_v5.expression_space_id == ""
     assert loaded_v5.inference_seed == 23
     with pytest.raises(ValueError, match="expression_space_id"):
-        loaded_v5.to_npz(tmp_path / "legacy_cannot_masquerade_as_v6.npz")
+        loaded_v5.to_npz(tmp_path / "legacy_cannot_masquerade_as_v7.npz")
 
     v4_payload = dict(v5_payload)
     v4_payload["__version__"] = np.asarray(4, dtype=np.int64)
@@ -211,6 +268,13 @@ def test_prediction_bundle_rejects_malformed_optional_outputs_and_provenance(tmp
         replace(bundle, artifact_threshold=1.1).validate()
     with pytest.raises(ValueError, match="expression_space_id"):
         replace(bundle, expression_space_id="").to_npz(tmp_path / "missing_expression_space.npz")
+    with pytest.raises(ValueError, match="cannot expose conditional expression"):
+        replace(
+            bundle,
+            abstain=np.asarray([False, True]),
+            expression_interval_available=np.asarray([True, True]),
+            expression_interval_semantics=PredictionBundle.CONDITIONAL_KNOWN_STATE,
+        ).validate()
 
     valid = tmp_path / "valid.npz"
     bundle.to_npz(valid)
@@ -321,13 +385,14 @@ def test_predict_cells_model_abstain_is_opt_in() -> None:
             decoder_hidden_dims=(4,),
             dropout=0.0,
             hard_type_routing=False,
+            abstain_threshold=0.1,
         )
     )
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.zero_()
         model.fine_type_head.bias.copy_(torch.tensor([20.0, -20.0]))
-        model.unknown_head.bias.fill_(-20.0)
+        model.unknown_head.bias.fill_(-1.5)
         model.residual_logvar_head.bias.fill_(8.0)
     prototypes = PrototypeSet(
         prototype_ids=np.asarray(["p0", "p1"]),
@@ -354,7 +419,7 @@ def test_predict_cells_model_abstain_is_opt_in() -> None:
     composite_gate = predict_cells(**arguments, use_model_abstain=True)
 
     assert explicit_gates.type_probabilities[0, 0] > 0.99
-    assert explicit_gates.unknown_probability[0] < 0.01
+    assert explicit_gates.unknown_probability[0] < 0.4
     assert explicit_gates.abstain_score[0] > model.config.abstain_threshold
     assert not explicit_gates.abstain[0]
     assert explicit_gates.labels[0] == 0

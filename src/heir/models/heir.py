@@ -11,7 +11,8 @@ from torch.autograd import Function
 from .graph import GraphContextConfig, GraphContextEncoder
 from .rna import RNAVAE, RNADecoder, RNAVAEConfig
 
-_HEIR_CHECKPOINT_SCHEMA = "heir.model.v2"
+_HEIR_CHECKPOINT_SCHEMA = "heir.model.v3"
+_LEGACY_TIED_CHECKPOINT_SCHEMA = "heir.model.v2"
 
 
 def _positive_dims(values: Sequence[int], name: str) -> Tuple[int, ...]:
@@ -81,6 +82,9 @@ class HEIRConfig:
     prototype_variance_floor: float = 1.0e-4
     covariance_aware_uot: bool = True
     legacy_independent_prototype_query: bool = False
+    legacy_unrestricted_residual: bool = False
+    residual_rank: int = 0
+    residual_max_norm: float = 0.5
     scgpt_embedding_dim: int = 0
 
     def __post_init__(self) -> None:
@@ -106,6 +110,18 @@ class HEIRConfig:
             raise ValueError("prototype_abundance_logit_weight must be non-negative")
         if self.prototype_variance_floor <= 0:
             raise ValueError("prototype_variance_floor must be positive")
+        if self.residual_rank < 0:
+            raise ValueError("residual_rank must be non-negative")
+        resolved_residual_rank = self.residual_rank or min(4, self.latent_dim)
+        if resolved_residual_rank > self.latent_dim:
+            raise ValueError("residual_rank cannot exceed latent_dim")
+        if not math.isfinite(self.residual_max_norm) or self.residual_max_norm <= 0:
+            raise ValueError("residual_max_norm must be finite and positive")
+        object.__setattr__(self, "residual_rank", resolved_residual_rank)
+        if self.legacy_independent_prototype_query:
+            # This flag only exists to reproduce the original, unrestricted
+            # v1 model. Keep it from creating a hybrid architecture.
+            object.__setattr__(self, "legacy_unrestricted_residual", True)
         if self.scgpt_embedding_dim < 0:
             raise ValueError("scgpt_embedding_dim must be non-negative")
         object.__setattr__(
@@ -186,6 +202,10 @@ class HEIROutput:
     prototype_variances: Tensor
     prototype_mask: Tensor
     prototype_latent: Tensor
+    residual_coefficients: Optional[Tensor]
+    residual_coefficient_logvar: Optional[Tensor]
+    residual_basis: Optional[Tensor]
+    residual_gate: Optional[Tensor]
     residual_mu: Tensor
     residual_logvar: Tensor
     residual: Tensor
@@ -253,8 +273,36 @@ class HEIRModel(nn.Module):
         self.register_buffer("fine_to_parent_index", mapping, persistent=True)
 
         self.prototype_query_head = nn.Linear(hidden_dim, config.latent_dim)
-        self.residual_mu_head = nn.Linear(hidden_dim, config.latent_dim)
-        self.residual_logvar_head = nn.Linear(hidden_dim, config.latent_dim)
+        self.residual_mu_head: Optional[nn.Linear]
+        self.residual_coefficient_head: Optional[nn.Linear]
+        self.residual_gate_head: Optional[nn.Linear]
+        self.residual_type_basis: Optional[nn.Parameter]
+        if config.legacy_unrestricted_residual:
+            self.residual_mu_head = nn.Linear(hidden_dim, config.latent_dim)
+            self.residual_logvar_head = nn.Linear(hidden_dim, config.latent_dim)
+            self.residual_coefficient_head = None
+            self.residual_gate_head = None
+            self.register_parameter("residual_type_basis", None)
+        else:
+            self.residual_mu_head = None
+            self.residual_coefficient_head = nn.Linear(hidden_dim, config.residual_rank)
+            self.residual_logvar_head = nn.Linear(hidden_dim, config.residual_rank)
+            self.residual_gate_head = nn.Linear(hidden_dim, 1)
+            basis = torch.empty(
+                config.num_cell_types,
+                config.latent_dim,
+                config.residual_rank,
+            )
+            for type_basis in basis:
+                nn.init.orthogonal_(type_basis)
+            self.residual_type_basis = nn.Parameter(basis)
+            # The low-rank coefficient mean is the actual residual head. Its
+            # exact zero initialization makes a fresh model inherit the routed
+            # RNA prototype before any image-supported correction is learned.
+            nn.init.zeros_(self.residual_coefficient_head.weight)
+            nn.init.zeros_(self.residual_coefficient_head.bias)
+            nn.init.zeros_(self.residual_gate_head.weight)
+            nn.init.constant_(self.residual_gate_head.bias, -2.0)
         self.unknown_head = nn.Linear(hidden_dim, 1)
         self.scgpt_head = (
             nn.Linear(hidden_dim, config.scgpt_embedding_dim)
@@ -510,6 +558,67 @@ class HEIRModel(nn.Module):
         )
         return unconditional, unknown, conditional
 
+    @staticmethod
+    def _bounded_low_rank_residual(
+        basis: Tensor,
+        coefficients: Tensor,
+        gate: Tensor,
+    ) -> Tensor:
+        """Map coefficient vectors into a smooth, gated latent unit ball."""
+
+        if basis.ndim != 3 or gate.ndim != 1 or basis.shape[0] != gate.shape[0]:
+            raise ValueError("residual basis/gate must contain one entry per cell")
+        if coefficients.ndim == 2:
+            if coefficients.shape != (basis.shape[0], basis.shape[2]):
+                raise ValueError("residual coefficients do not align to the basis")
+            projected = torch.einsum("nlr,nr->nl", basis, coefficients)
+            scale = gate.unsqueeze(-1)
+        elif coefficients.ndim == 3:
+            if coefficients.shape[1:] != (basis.shape[0], basis.shape[2]):
+                raise ValueError("sampled residual coefficients do not align to the basis")
+            projected = torch.einsum("nlr,dnr->dnl", basis, coefficients)
+            scale = gate.reshape(1, -1, 1)
+        else:
+            raise ValueError("residual coefficients must have two or three dimensions")
+        # x / sqrt(1 + ||x||^2) is smooth at zero and has norm strictly below
+        # one, so multiplying by the bounded gate gives a hard per-cell bound.
+        denominator = torch.sqrt(1.0 + projected.square().sum(dim=-1, keepdim=True))
+        return scale * projected / denominator
+
+    def sample_residuals(self, output: HEIROutput, draws: int) -> Tensor:
+        """Sample residuals under the checkpoint's explicit residual contract."""
+
+        if draws <= 0:
+            raise ValueError("draws must be positive")
+        if output.residual_coefficients is None:
+            noise = torch.randn(
+                (draws, *output.residual_mu.shape),
+                device=output.residual_mu.device,
+                dtype=output.residual_mu.dtype,
+            )
+            return output.residual_mu.unsqueeze(0) + noise * torch.exp(
+                0.5 * output.residual_logvar
+            ).unsqueeze(0)
+        if (
+            output.residual_coefficient_logvar is None
+            or output.residual_basis is None
+            or output.residual_gate is None
+        ):
+            raise ValueError("restricted residual output is incomplete")
+        noise = torch.randn(
+            (draws, *output.residual_coefficients.shape),
+            device=output.residual_coefficients.device,
+            dtype=output.residual_coefficients.dtype,
+        )
+        coefficients = output.residual_coefficients.unsqueeze(0) + noise * torch.exp(
+            0.5 * output.residual_coefficient_logvar
+        ).unsqueeze(0)
+        return self._bounded_low_rank_residual(
+            output.residual_basis,
+            coefficients,
+            output.residual_gate,
+        )
+
     def forward(
         self,
         morphology: Tensor,
@@ -554,35 +663,74 @@ class HEIRModel(nn.Module):
             prototype_mask,
             sample_index,
         )
-        # For new checkpoints this head predicts the absolute molecular latent
-        # mean.  The residual is then the exact difference from the selected
-        # measured-prototype mixture.  This keeps local routing, UOT, and the
-        # decoded expression latent tied to one representation while retaining
-        # the historical module name/state-dict key.
-        image_latent_mu = self.residual_mu_head(embedding)
-        residual_logvar = self.residual_logvar_head(embedding).clamp(
-            min=self.config.logvar_min,
-            max=self.config.logvar_max,
-        )
-        # Old checkpoints retain the independent query module for strict state-dict
-        # compatibility. New models route from the absolute molecular latent mean,
-        # so there is no second freely trainable representation.
-        routing_query = (
-            self.prototype_query_head(embedding)
-            if self.config.legacy_independent_prototype_query
-            else image_latent_mu
-        )
+        routing_query = self.prototype_query_head(embedding)
+        residual_coefficients: Optional[Tensor]
+        residual_coefficient_logvar: Optional[Tensor]
+        residual_basis: Optional[Tensor]
+        residual_gate: Optional[Tensor]
+        if self.config.legacy_unrestricted_residual:
+            assert self.residual_mu_head is not None
+            image_latent_mu = self.residual_mu_head(embedding)
+            residual_logvar = self.residual_logvar_head(embedding).clamp(
+                min=self.config.logvar_min,
+                max=self.config.logvar_max,
+            )
+            if not self.config.legacy_independent_prototype_query:
+                routing_query = image_latent_mu
+            residual_coefficients = None
+            residual_coefficient_logvar = None
+            residual_basis = None
+            residual_gate = None
+            residual_mu = image_latent_mu
+            residual_variance = residual_logvar.exp()
+        else:
+            assert self.residual_coefficient_head is not None
+            assert self.residual_gate_head is not None
+            assert self.residual_type_basis is not None
+            residual_coefficients = self.residual_coefficient_head(embedding)
+            residual_coefficient_logvar = self.residual_logvar_head(embedding).clamp(
+                min=self.config.logvar_min,
+                max=self.config.logvar_max,
+            )
+            residual_basis = torch.einsum(
+                "nc,clr->nlr",
+                type_probabilities,
+                self.residual_type_basis,
+            )
+            residual_gate = self.config.residual_max_norm * torch.sigmoid(
+                self.residual_gate_head(embedding).squeeze(-1)
+            )
+            residual_mu = self._bounded_low_rank_residual(
+                residual_basis,
+                residual_coefficients,
+                residual_gate,
+            )
+            # A diagonal moment approximation is retained for the trainer's
+            # Gaussian transport cost. Normalize its trace by the same unit-ball
+            # envelope, so uncertainty cannot evade the residual magnitude bound.
+            projected_variance = torch.einsum(
+                "nlr,nr->nl",
+                residual_basis.square(),
+                residual_coefficient_logvar.exp(),
+            )
+            residual_variance = residual_gate.square().unsqueeze(-1) * (
+                projected_variance / (1.0 + projected_variance.sum(dim=-1, keepdim=True))
+            )
+            residual_logvar = residual_variance.clamp_min(
+                torch.finfo(residual_variance.dtype).tiny
+            ).log()
+
         routing_cost = (routing_query.unsqueeze(1) - means).square().mean(dim=-1)
         if self.config.covariance_aware_uot and means.shape[1]:
-            total_variance = residual_logvar.exp().unsqueeze(1) + variances.clamp_min(
+            total_variance = residual_variance.unsqueeze(1) + variances.clamp_min(
                 self.config.prototype_variance_floor
             )
-            molecular_cost = 0.5 * (
-                (image_latent_mu.unsqueeze(1) - means).square() / total_variance
+            routing_molecular_cost = 0.5 * (
+                (routing_query.unsqueeze(1) - means).square() / total_variance
                 + total_variance.log()
             ).mean(dim=-1)
         else:
-            molecular_cost = routing_cost
+            routing_molecular_cost = routing_cost
         compatibility, compatible_mask = self._prototype_compatibility(
             type_probabilities,
             hierarchy_parent,
@@ -590,7 +738,7 @@ class HEIRModel(nn.Module):
             mask,
             cell_type_constraints,
         )
-        known_logits = -molecular_cost / self.config.prototype_temperature
+        known_logits = -routing_molecular_cost / self.config.prototype_temperature
         known_logits = known_logits + (
             self.config.prototype_abundance_logit_weight * weights.clamp_min(1e-12).log()
         )
@@ -612,16 +760,30 @@ class HEIRModel(nn.Module):
             else conditional_prototype_probabilities
         )
         prototype_latent = (mixture_probabilities.unsqueeze(-1) * means).sum(dim=1)
-        residual_mu = (
-            image_latent_mu
-            if self.config.legacy_independent_prototype_query
-            else image_latent_mu - prototype_latent
-        )
+        if self.config.legacy_unrestricted_residual:
+            residual_mu = (
+                image_latent_mu
+                if self.config.legacy_independent_prototype_query
+                else image_latent_mu - prototype_latent
+            )
         should_sample = self.training if sample_latent is None else sample_latent
         if should_sample:
-            residual = residual_mu + torch.randn_like(residual_mu) * torch.exp(
-                0.5 * residual_logvar
-            )
+            if residual_coefficients is None:
+                residual = residual_mu + torch.randn_like(residual_mu) * torch.exp(
+                    0.5 * residual_logvar
+                )
+            else:
+                assert residual_coefficient_logvar is not None
+                assert residual_basis is not None
+                assert residual_gate is not None
+                sampled_coefficients = residual_coefficients + torch.randn_like(
+                    residual_coefficients
+                ) * torch.exp(0.5 * residual_coefficient_logvar)
+                residual = self._bounded_low_rank_residual(
+                    residual_basis,
+                    sampled_coefficients,
+                    residual_gate,
+                )
         else:
             residual = residual_mu
         latent_mu = prototype_latent + residual_mu
@@ -630,8 +792,20 @@ class HEIRModel(nn.Module):
 
         # UOT now acts on the same posterior mean decoded into expression. The
         # diagonal Gaussian cost incorporates both image and RNA-state uncertainty.
-        if self.config.covariance_aware_uot and means.shape[1]:
-            transport_base_cost = molecular_cost
+        if not self.config.legacy_unrestricted_residual:
+            transport_query = latent_mu
+            if self.config.covariance_aware_uot and means.shape[1]:
+                transport_variance = residual_variance.unsqueeze(1) + variances.clamp_min(
+                    self.config.prototype_variance_floor
+                )
+                transport_base_cost = 0.5 * (
+                    (latent_mu.unsqueeze(1) - means).square() / transport_variance
+                    + transport_variance.log()
+                ).mean(dim=-1)
+            else:
+                transport_base_cost = (latent_mu.unsqueeze(1) - means).square().mean(dim=-1)
+        elif self.config.covariance_aware_uot and means.shape[1]:
+            transport_base_cost = routing_molecular_cost
             transport_query = latent_mu
         else:
             transport_base_cost = routing_cost
@@ -656,8 +830,8 @@ class HEIRModel(nn.Module):
             ) / math.log(all_prototypes.shape[1])
         else:
             prototype_entropy = unknown_probability.new_zeros(unknown_probability.shape)
-        residual_variance = residual_logvar.exp().mean(dim=-1)
-        residual_uncertainty = -torch.expm1(-residual_variance)
+        mean_residual_variance = residual_variance.mean(dim=-1)
+        residual_uncertainty = -torch.expm1(-mean_residual_variance)
         certainty = (
             (1.0 - unknown_probability)
             * (1.0 - type_entropy)
@@ -692,6 +866,10 @@ class HEIRModel(nn.Module):
             prototype_variances=variances,
             prototype_mask=compatible_mask,
             prototype_latent=prototype_latent,
+            residual_coefficients=residual_coefficients,
+            residual_coefficient_logvar=residual_coefficient_logvar,
+            residual_basis=residual_basis,
+            residual_gate=residual_gate,
             residual_mu=residual_mu,
             residual_logvar=residual_logvar,
             residual=residual,
@@ -748,7 +926,7 @@ class HEIRModel(nn.Module):
         if "config" not in checkpoint or "state_dict" not in checkpoint:
             raise KeyError("checkpoint must contain config and state_dict")
         schema = checkpoint.get("schema")
-        if schema not in {None, _HEIR_CHECKPOINT_SCHEMA}:
+        if schema not in {None, _LEGACY_TIED_CHECKPOINT_SCHEMA, _HEIR_CHECKPOINT_SCHEMA}:
             raise ValueError("unsupported HEIR model checkpoint schema")
         config_values = dict(checkpoint["config"])
         if schema is None:
@@ -758,6 +936,12 @@ class HEIRModel(nn.Module):
             config_values.setdefault("prototype_abundance_logit_weight", 1.0)
             config_values.setdefault("covariance_aware_uot", False)
             config_values.setdefault("legacy_independent_prototype_query", True)
+            config_values["legacy_unrestricted_residual"] = True
+        elif schema == _LEGACY_TIED_CHECKPOINT_SCHEMA:
+            # v2 implemented ``prototype + (image - prototype)``. Recreate that
+            # algebraic cancellation intentionally instead of silently loading
+            # its full-rank head into the restricted v3 residual.
+            config_values["legacy_unrestricted_residual"] = True
         model = cls(HEIRConfig.from_dict(config_values))
         model.load_state_dict(checkpoint["state_dict"], strict=strict)
         return model

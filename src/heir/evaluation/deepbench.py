@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,17 +31,28 @@ from .snpatho import SnPathoBenchmarkResult, load_snpatho_plan, run_snpatho_benc
 from .spatial import morans_i
 
 DEEPBENCH_PLAN_SCHEMA = "heir.snpatho_deepbench_plan.v1"
-DEEPBENCH_REPORT_SCHEMA = "heir.snpatho_deepbench.v1"
+DEEPBENCH_REPORT_SCHEMA = "heir.snpatho_deepbench.v2"
 DEEPBENCH_STATUS = "retrospective_diagnostic"
 DEEPBENCH_SAMPLES = ("4066", "4399", "4411")
-PRIMARY_METHOD = "heir_round0_rna_mass"
-SELECTIVE_METHOD = "heir_round0_selective_rna_mass"
+PRIMARY_METHOD = "heir_round0_historical_integrated_reference_library_size_weighted"
+SELECTIVE_METHOD = "heir_round0_historical_integrated_reference_library_size_weighted_nonabstained"
 EQUAL_CELL_METHOD = "heir_round0_equal_cell"
-TYPE_MEAN_METHOD = "historical_integrated_type_mean_rna_mass"
+TYPE_MEAN_METHOD = "historical_integrated_hard_type_mean"
+SOFT_TYPE_MEAN_METHOD = "historical_integrated_soft_type_mean"
 PSEUDOBULK_METHOD = "historical_integrated_snrna_pseudobulk"
-SHUFFLE_METHOD = "heir_spatial_shuffle_rna_mass"
+SHUFFLE_METHOD = (
+    "heir_final_cell_record_shuffle_historical_integrated_reference_library_size_weighted"
+)
+R1_HARD_TYPE_MEAN_METHOD = "r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean"
+R1_SOFT_TYPE_MEAN_METHOD = "r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean"
+HISTORICAL_LIBRARY_SIZE_AGGREGATION = "historical_integrated_reference_library_size_weighted"
+R1_LIBRARY_SIZE_AGGREGATION = (
+    "ffpe_snpatho_reference_type_median_library_size_weighted_integrated_annotation_sensitivity"
+)
+R1_MANIFEST_SCHEMA = "heir.snpatho_r1_reference_manifest.v1"
 
 OPTIONAL_ARTIFACTS = (
+    "primary_ffpe_snpatho_reference_manifest",
     "refined_predictions",
     "five_seed_predictions",
     "alternative_workflow_references",
@@ -77,10 +89,32 @@ class DeepBenchPlan:
     sample_ids: Tuple[str, ...]
     minimum_nuclei: int
     bootstrap_iterations: int
+    final_cell_record_shuffle_permutations: int
     primary_seeds: Tuple[int, ...]
     optional_artifacts: Mapping[str, Optional[Path]]
     optional_artifact_sha256: Mapping[str, Optional[str]]
     specification: Mapping[str, Any]
+
+
+def _validate_r1_reference_identity(
+    reference: RNAReference,
+    section_id: str,
+    manifest_entry: Mapping[str, Any],
+) -> None:
+    """Bind an R1 count artifact to its specimen and upstream H5AD lineage."""
+
+    expected_source = str(manifest_entry.get("h5ad_sha256", ""))
+    expected_block = "%s_FFPE" % section_id
+    if reference.sample_id != section_id:
+        raise ValueError("R1 reference sample_id differs from its specimen")
+    if set(np.asarray(reference.sample_ids).astype(str).tolist()) != {section_id}:
+        raise ValueError("R1 per-cell sample IDs differ from their specimen")
+    if set(np.asarray(reference.donor_ids).astype(str).tolist()) != {section_id}:
+        raise ValueError("R1 per-cell donor IDs differ from their specimen")
+    if reference.block_id != expected_block:
+        raise ValueError("R1 reference block identity differs from its FFPE specimen")
+    if not expected_source or reference.source_count_sha256 != expected_source:
+        raise ValueError("R1 reference source-count lineage differs from its H5AD manifest")
 
 
 def _nested(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -126,7 +160,8 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
     _require_equal(payload, 15, "targets", "programs", "published_robust_nmf_clusters")
     _require_equal(payload, "detached_uot_responsibilities", "refinement", "e_step")
     _require_equal(payload, True, "refinement", "anchors_revocable")
-    _require_equal(payload, 3, "refinement", "maximum_rounds")
+    _require_equal(payload, 4, "refinement", "maximum_rounds")
+    _require_equal(payload, 2, "refinement", "broad_refinement_rounds")
     _require_equal(payload, 0.90, "refinement", "minimum_probability")
     _require_equal(payload, 0.20, "refinement", "maximum_normalized_entropy")
     _require_equal(payload, 0.50, "refinement", "minimum_segmentation_confidence")
@@ -134,7 +169,18 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
     _require_equal(payload, 2, "refinement", "trusted_after_consecutive_rounds")
     _require_equal(payload, 0.70, "refinement", "revoke_probability_threshold")
     _require_equal(payload, [17, 41, 89, 131, 197], "randomness", "primary_seeds")
-    _require_equal(payload, "matched_type_mean", "evaluation", "primary_baseline")
+    _require_equal(
+        payload,
+        "matched_ffpe_r1_soft_type_mean",
+        "evaluation",
+        "primary_baseline",
+    )
+    _require_equal(
+        payload,
+        "matched_ffpe_r1_hard_type_mean",
+        "evaluation",
+        "primary_baseline_sensitivity",
+    )
     _require_equal(
         payload,
         "paired_median_gene_spearman_delta",
@@ -157,7 +203,7 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
             "gene_mse",
             "gene_mae",
             "gene_concordance",
-            "hotspot_auroc",
+            "expression_detection_auroc",
             "hotspot_dice",
             "hotspot_jaccard",
             "location_cosine",
@@ -169,6 +215,19 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
         "secondary_metrics",
     )
     _require_equal(payload, 10000, "statistics", "bootstrap_iterations")
+    shuffle_permutations = _nested(
+        payload,
+        "statistics",
+        "final_cell_record_shuffle_permutations",
+    )
+    if (
+        isinstance(shuffle_permutations, bool)
+        or not isinstance(shuffle_permutations, int)
+        or shuffle_permutations < 100
+    ):
+        raise ValueError(
+            "DeepBench final_cell_record_shuffle_permutations must be an integer >= 100"
+        )
     _require_equal(payload, 750, "statistics", "spatial_block_um")
     _require_equal(payload, "benjamini_hochberg", "statistics", "per_gene_fdr")
     _require_equal(payload, "equal", "statistics", "specimen_macro_weighting")
@@ -182,6 +241,7 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
         "no_refinement",
         "no_unknown",
         "no_graph",
+        "prototype_only_no_residual",
         "state_omission",
     ):
         _require_equal(payload, True, "controls", control)
@@ -263,6 +323,9 @@ def load_deepbench_plan(path: Path) -> DeepBenchPlan:
         sample_ids=DEEPBENCH_SAMPLES,
         minimum_nuclei=int(_nested(payload, "evaluation", "primary_spot_minimum_nuclei")),
         bootstrap_iterations=int(_nested(payload, "statistics", "bootstrap_iterations")),
+        final_cell_record_shuffle_permutations=int(
+            _nested(payload, "statistics", "final_cell_record_shuffle_permutations")
+        ),
         primary_seeds=tuple(
             int(value) for value in _nested(payload, "randomness", "primary_seeds")
         ),
@@ -270,6 +333,86 @@ def load_deepbench_plan(path: Path) -> DeepBenchPlan:
         optional_artifact_sha256=optional_hashes,
         specification=dict(payload),
     )
+
+
+def _load_r1_references(
+    plan: DeepBenchPlan,
+    *,
+    gene_panel_sha256: str,
+) -> Dict[str, Tuple[RNAReference, Dict[str, Any]]]:
+    """Load hash-bound FFPE-only references as annotation-sensitivity controls."""
+
+    manifest = plan.optional_artifacts["primary_ffpe_snpatho_reference_manifest"]
+    if manifest is None:
+        return {}
+    with manifest.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping) or payload.get("schema") != R1_MANIFEST_SCHEMA:
+        raise ValueError("R1 reference manifest has an unsupported schema")
+    if payload.get("filter") != {
+        "column": "processing_method",
+        "accepted_values": ["FFPE_snPATHO"],
+        "matching": "exact",
+    }:
+        raise ValueError("R1 reference manifest does not freeze the exact FFPE filter")
+    panel = payload.get("gene_panel")
+    if not isinstance(panel, Mapping) or panel.get("sha256") != gene_panel_sha256:
+        raise ValueError("R1 reference manifest uses a different frozen gene panel")
+    annotation = payload.get("cell_type_annotation")
+    if (
+        not isinstance(annotation, Mapping)
+        or annotation.get("primary_clean_reannotation_status") != "not_complete"
+    ):
+        raise ValueError("R1 annotation status must remain explicit and fail closed")
+    prototype_adapter = payload.get("development_prototype_adapter")
+    if not isinstance(prototype_adapter, Mapping) or prototype_adapter.get("status") != (
+        "materialized_svd_fallback_not_primary_scANVI"
+    ):
+        raise ValueError("R1 development prototype status is not explicit")
+    specimens = payload.get("specimens")
+    if not isinstance(specimens, Mapping) or set(specimens) != set(plan.sample_ids):
+        raise ValueError("R1 reference manifest must contain exactly the DeepBench specimens")
+    repository_root = manifest.parent.parent
+    references: Dict[str, Tuple[RNAReference, Dict[str, Any]]] = {}
+    for section_id in plan.sample_ids:
+        raw = specimens[section_id]
+        if not isinstance(raw, Mapping):
+            raise ValueError("R1 specimen manifest entry must be a mapping")
+        reference_path = (repository_root / str(raw["panel_reference"])).resolve()
+        expected_sha256 = str(raw["panel_reference_sha256"])
+        if not reference_path.is_file() or sha256_file(reference_path) != expected_sha256:
+            raise ValueError("R1 panel reference is absent or hash-mismatched: %s" % section_id)
+        reference = RNAReference.load_npz(reference_path)
+        _validate_r1_reference_identity(reference, section_id, raw)
+        selected = int(raw["selected_observations"])
+        if reference.counts.shape[0] != selected:
+            raise ValueError("R1 reference row count differs from its manifest")
+        expected_counts = raw.get("cell_type_counts")
+        if not isinstance(expected_counts, Mapping):
+            raise ValueError("R1 reference manifest lacks cell-type counts")
+        labels, counts = np.unique(
+            np.asarray(reference.cell_type_labels).astype(str),
+            return_counts=True,
+        )
+        observed_counts = {str(name): int(count) for name, count in zip(labels, counts)}
+        if observed_counts != {str(name): int(count) for name, count in expected_counts.items()}:
+            raise ValueError("R1 reference cell-type counts differ from its manifest")
+        references[section_id] = (
+            reference,
+            {
+                "manifest_sha256": plan.optional_artifact_sha256[
+                    "primary_ffpe_snpatho_reference_manifest"
+                ],
+                "reference_path": str(reference_path),
+                "reference_sha256": expected_sha256,
+                "selected_observations": selected,
+                "filter": dict(cast(Mapping[str, Any], payload["filter"])),
+                "annotation_provenance": annotation.get("provenance"),
+                "development_prototype_status": prototype_adapter.get("status"),
+                "status": ("retrospective_integrated_annotation_sensitivity_not_primary_clean_R1"),
+            },
+        )
+    return references
 
 
 def aggregate_cells_to_spots(
@@ -310,7 +453,7 @@ def _reference_linear_profiles(
     reference: RNAReference,
     type_names: Sequence[object],
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Build type profiles from pooled counts/full-library mass in linear space."""
+    """Build type profiles in linear space, failing closed on unsupported types."""
 
     counts = sparse.csr_matrix(reference.counts, dtype=np.float64)
     if reference.library_sizes is None:
@@ -319,20 +462,21 @@ def _reference_linear_profiles(
     if library.shape != (counts.shape[0],) or np.any(library <= 0):
         raise ValueError("reference requires positive full-transcriptome library sizes")
     labels = np.asarray(reference.cell_type_labels).astype(str)
-    global_profile = np.asarray(counts.sum(axis=0)).reshape(-1)
-    global_profile = global_profile * (EXPRESSION_TARGET_SUM / library.sum())
-    global_median = float(np.median(library))
+    requested = tuple(str(value) for value in type_names)
+    supported = set(labels.tolist())
+    missing = tuple(name for name in requested if name not in supported)
+    if missing:
+        raise ValueError(
+            "historical integrated reference is missing prediction cell types; "
+            "global-profile fallback is prohibited: %s" % ", ".join(missing)
+        )
     profiles = []
     median_library_sizes = []
-    for raw_name in type_names:
-        selected = labels == str(raw_name)
-        if selected.any():
-            pooled = np.asarray(counts[selected].sum(axis=0)).reshape(-1)
-            profiles.append(pooled * (EXPRESSION_TARGET_SUM / library[selected].sum()))
-            median_library_sizes.append(float(np.median(library[selected])))
-        else:
-            profiles.append(global_profile)
-            median_library_sizes.append(global_median)
+    for name in requested:
+        selected = labels == name
+        pooled = np.asarray(counts[selected].sum(axis=0)).reshape(-1)
+        profiles.append(pooled * (EXPRESSION_TARGET_SUM / library[selected].sum()))
+        median_library_sizes.append(float(np.median(library[selected])))
     return (
         np.asarray(profiles, dtype=np.float32),
         np.asarray(median_library_sizes, dtype=np.float64),
@@ -348,10 +492,53 @@ def _reference_linear_pseudobulk(reference: RNAReference) -> np.ndarray:
     return (pooled * (EXPRESSION_TARGET_SUM / library.sum())).astype(np.float32)
 
 
+def _normalized_type_probabilities(prediction: PredictionBundle) -> np.ndarray:
+    probabilities = np.asarray(prediction.type_probabilities, dtype=np.float64)
+    if probabilities.ndim != 2 or probabilities.shape[1] != len(prediction.type_names):
+        raise ValueError("prediction type probabilities are misaligned")
+    if not np.isfinite(probabilities).all() or np.any(probabilities < 0):
+        raise ValueError("prediction type probabilities must be finite and non-negative")
+    total = probabilities.sum(axis=1, keepdims=True)
+    if np.any(total <= 0):
+        raise ValueError("prediction type probabilities require positive row mass")
+    return probabilities / total
+
+
+def _reference_type_support(
+    reference: RNAReference,
+    prediction: PredictionBundle,
+) -> Dict[str, Any]:
+    """Audit prediction/reference type overlap before constructing a baseline."""
+
+    reference_types = tuple(sorted(set(np.asarray(reference.cell_type_labels).astype(str))))
+    prediction_types = tuple(str(value) for value in prediction.type_names.tolist())
+    reference_set = set(reference_types)
+    supported = tuple(name for name in prediction_types if name in reference_set)
+    missing = tuple(name for name in prediction_types if name not in reference_set)
+    probabilities = _normalized_type_probabilities(prediction)
+    missing_mask = np.asarray([name in missing for name in prediction_types], dtype=bool)
+    hard_names = np.asarray(prediction_types, dtype=object)[probabilities.argmax(axis=1)]
+    hard_fallback = np.isin(hard_names, np.asarray(missing, dtype=object))
+    soft_fallback_mass = (
+        probabilities[:, missing_mask].sum(axis=1)
+        if missing_mask.any()
+        else np.zeros(len(probabilities), dtype=np.float64)
+    )
+    return {
+        "prediction_cell_types": list(prediction_types),
+        "reference_cell_types": list(reference_types),
+        "reference_supported_prediction_cell_types": list(supported),
+        "missing_prediction_cell_types": list(missing),
+        "missing_type_policy": "fail_closed_no_global_profile_fallback",
+        "hard_assignment_global_fallback_cells": int(hard_fallback.sum()),
+        "hard_assignment_global_fallback_cell_fraction": float(hard_fallback.mean()),
+        "soft_assignment_global_fallback_probability_mass_mean": float(soft_fallback_mass.mean()),
+    }
+
+
 def _cell_rna_mass(reference: RNAReference, prediction: PredictionBundle) -> np.ndarray:
     _, medians = _reference_linear_profiles(reference, prediction.type_names.tolist())
-    probabilities = np.asarray(prediction.type_probabilities, dtype=np.float64)
-    probabilities = probabilities / np.maximum(probabilities.sum(axis=1, keepdims=True), 1.0e-12)
+    probabilities = _normalized_type_probabilities(prediction)
     mass = probabilities.dot(medians)
     return mass / max(float(np.median(mass)), 1.0e-12)
 
@@ -361,10 +548,20 @@ def _type_mean_cells(
     prediction: PredictionBundle,
 ) -> np.ndarray:
     profiles, _ = _reference_linear_profiles(reference, prediction.type_names.tolist())
-    probabilities = np.asarray(prediction.type_probabilities, dtype=np.float64)
-    probabilities = probabilities / np.maximum(probabilities.sum(axis=1, keepdims=True), 1.0e-12)
+    probabilities = _normalized_type_probabilities(prediction)
     hard_types = probabilities.argmax(axis=1)
     return np.log1p(profiles[hard_types]).astype(np.float32)
+
+
+def _soft_type_mean_cells(
+    reference: RNAReference,
+    prediction: PredictionBundle,
+) -> np.ndarray:
+    """Return the probability-weighted historical integrated type-mean baseline."""
+
+    profiles, _ = _reference_linear_profiles(reference, prediction.type_names.tolist())
+    probabilities = _normalized_type_probabilities(prediction)
+    return np.log1p(probabilities.dot(profiles)).astype(np.float32)
 
 
 def _safe_correlation(
@@ -393,8 +590,18 @@ def _concordance(predicted: np.ndarray, observed: np.ndarray) -> float:
 
 
 def _top_indices(values: np.ndarray, fraction: float = 0.10) -> np.ndarray:
+    """Select an exact top fraction with a frozen lower-index-wins tie policy."""
+
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or not len(values) or not np.isfinite(values).all():
+        raise ValueError("top-fraction values must be a non-empty finite vector")
+    if not 0 < fraction <= 1:
+        raise ValueError("top-fraction must be in (0, 1]")
     count = max(1, int(math.ceil(len(values) * fraction)))
-    return np.argpartition(values, -count)[-count:]
+    # ``lexsort`` uses the last key first: larger values rank first, then the
+    # original spot index resolves cutoff ties deterministically.
+    order = np.lexsort((np.arange(len(values), dtype=np.int64), -values))
+    return order[:count]
 
 
 def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float:
@@ -409,7 +616,10 @@ def _binary_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     )
 
 
-def _hotspot_scores(predicted: np.ndarray, observed: np.ndarray) -> Tuple[float, float, float]:
+def _detection_and_hotspot_scores(
+    predicted: np.ndarray,
+    observed: np.ndarray,
+) -> Tuple[float, float, float]:
     observed_top = _top_indices(observed)
     predicted_top = _top_indices(predicted)
     detection_auc = _binary_auc(predicted, observed > 0)
@@ -445,8 +655,12 @@ def deepbench_expression_metrics(
     coordinates = np.asarray(coordinates, dtype=np.float64)
     if prediction.shape != truth.shape or prediction.ndim != 2:
         raise ValueError("predicted and observed expression must have identical 2-D shapes")
+    if not np.isfinite(prediction).all() or not np.isfinite(truth).all():
+        raise ValueError("predicted and observed expression must be finite")
     if coordinates.shape != (prediction.shape[0], 2):
         raise ValueError("spot coordinates must align to expression")
+    if not np.isfinite(coordinates).all():
+        raise ValueError("spot coordinates must be finite")
     if prediction.shape[0] < 3:
         raise ValueError("DeepBench metrics require at least three spots")
     resolved_gene_names = (
@@ -467,7 +681,7 @@ def deepbench_expression_metrics(
             "mse",
             "mae",
             "concordance",
-            "hotspot_auroc",
+            "expression_detection_auroc",
             "hotspot_dice",
             "hotspot_jaccard",
             "observed_mean",
@@ -485,7 +699,7 @@ def deepbench_expression_metrics(
         prediction_constant = float(np.var(left)) <= 1.0e-12
         spearman = _safe_correlation(left, right, rank=True) if evaluable else float("nan")
         pearson = _safe_correlation(left, right, rank=False) if evaluable else float("nan")
-        hotspot = _hotspot_scores(left, right) if evaluable else (float("nan"),) * 3
+        hotspot = _detection_and_hotspot_scores(left, right) if evaluable else (float("nan"),) * 3
         gene_predicted_i = morans_i(left, edges) if evaluable else float("nan")
         gene_observed_i = morans_i(right, edges) if evaluable else float("nan")
         values = {
@@ -494,7 +708,7 @@ def deepbench_expression_metrics(
             "mse": float(np.mean((left - right) ** 2)),
             "mae": float(np.mean(np.abs(left - right))),
             "concordance": _concordance(left, right) if evaluable else float("nan"),
-            "hotspot_auroc": hotspot[0],
+            "expression_detection_auroc": hotspot[0],
             "hotspot_dice": hotspot[1],
             "hotspot_jaccard": hotspot[2],
             "observed_mean": float(np.mean(right)),
@@ -548,13 +762,14 @@ def deepbench_expression_metrics(
         values = finite(name)
         return float(np.nanmedian(values)) if np.isfinite(values).any() else None
 
-    summary: Dict[str, Optional[float]] = {
+    correlation_status = per_gene["correlation_status"]
+    summary: Dict[str, Any] = {
         "median_gene_spearman": median("spearman"),
         "median_gene_pearson": median("pearson"),
         "median_gene_mse": median("mse"),
         "median_gene_mae": median("mae"),
         "median_gene_concordance": median("concordance"),
-        "median_hotspot_auroc": median("hotspot_auroc"),
+        "median_expression_detection_auroc": median("expression_detection_auroc"),
         "median_hotspot_dice": median("hotspot_dice"),
         "median_hotspot_jaccard": median("hotspot_jaccard"),
         "mean_location_cosine": float(np.mean(cosine)),
@@ -569,6 +784,12 @@ def deepbench_expression_metrics(
             else None
         ),
         "fraction_genes_evaluable": float(np.isfinite(finite("spearman")).mean()),
+        "prediction_constant_scored_zero_count": int(
+            sum(value == "prediction_constant_scored_zero" for value in correlation_status)
+        ),
+        "observed_constant_excluded_count": int(
+            sum(value == "excluded_observed_constant" for value in correlation_status)
+        ),
     }
     return {"summary": summary, "per_gene": per_gene}
 
@@ -578,12 +799,162 @@ def _stable_seed(seed: int, sample: str) -> int:
     return int.from_bytes(digest[:8], byteorder="big") % (2**32)
 
 
+def _record_shuffle_seed(seed: int, sample: str, draw_index: int) -> int:
+    """Derive independent deterministic seeds while preserving the historical first draw."""
+
+    if draw_index < 0:
+        raise ValueError("record-shuffle draw_index must be non-negative")
+    if draw_index == 0:
+        return _stable_seed(seed, sample)
+    return _stable_seed(
+        seed,
+        "%s\x1ffinal_cell_record_shuffle\x1f%d" % (sample, draw_index),
+    )
+
+
+def _prepare_spearman_truth(
+    observed: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    truth = np.asarray(observed, dtype=np.float64)
+    if truth.ndim != 2 or truth.shape[0] < 3 or not np.isfinite(truth).all():
+        raise ValueError("shuffle-null truth must be a finite spots-by-genes matrix")
+    evaluable = np.var(truth, axis=0) > 1.0e-12
+    if not evaluable.any():
+        raise ValueError("shuffle-null truth has no spatially variable genes")
+    ranks = np.asarray(rankdata(truth[:, evaluable], axis=0), dtype=np.float64)
+    centered = ranks - ranks.mean(axis=0, keepdims=True)
+    norm = np.sqrt(np.square(centered).sum(axis=0))
+    return evaluable, centered, norm
+
+
+def _median_gene_spearman_prepared(
+    predicted: np.ndarray,
+    evaluable_genes: np.ndarray,
+    centered_truth_ranks: np.ndarray,
+    truth_rank_norm: np.ndarray,
+) -> float:
+    prediction = np.asarray(predicted, dtype=np.float64)
+    if (
+        prediction.ndim != 2
+        or prediction.shape[1] != len(evaluable_genes)
+        or prediction.shape[0] != centered_truth_ranks.shape[0]
+        or not np.isfinite(prediction).all()
+    ):
+        raise ValueError("shuffle-null prediction is invalid or misaligned")
+    selected = prediction[:, evaluable_genes]
+    variable = np.var(selected, axis=0) > 1.0e-12
+    correlations = np.zeros(selected.shape[1], dtype=np.float64)
+    if variable.any():
+        ranks = np.asarray(rankdata(selected[:, variable], axis=0), dtype=np.float64)
+        centered = ranks - ranks.mean(axis=0, keepdims=True)
+        denominator = np.sqrt(np.square(centered).sum(axis=0)) * truth_rank_norm[variable]
+        correlations[variable] = (centered * centered_truth_ranks[:, variable]).sum(
+            axis=0
+        ) / denominator
+    return float(np.median(correlations))
+
+
+def _compact_shuffle_distribution(values: np.ndarray) -> Dict[str, Any]:
+    statistics = np.asarray(values, dtype=np.float64)
+    if statistics.ndim != 1 or not len(statistics) or not np.isfinite(statistics).all():
+        raise ValueError("shuffle-null statistics must be a finite vector")
+    return {
+        "statistic": "median_gene_spearman",
+        "permutations": int(len(statistics)),
+        "mean": float(np.mean(statistics)),
+        "median": float(np.median(statistics)),
+        "sample_standard_deviation": (
+            float(np.std(statistics, ddof=1)) if len(statistics) > 1 else 0.0
+        ),
+        "minimum": float(np.min(statistics)),
+        "maximum": float(np.max(statistics)),
+        "empirical_percentile_interval_95": {
+            "lower": float(np.quantile(statistics, 0.025)),
+            "upper": float(np.quantile(statistics, 0.975)),
+        },
+    }
+
+
+def _repeated_final_record_shuffle_null(
+    cell_log_expression: np.ndarray,
+    cell_weights: np.ndarray,
+    spot_index: np.ndarray,
+    primary_spots: np.ndarray,
+    observed_expression: np.ndarray,
+    *,
+    sample: str,
+    seed: int,
+    permutations: int,
+) -> Tuple[Dict[str, Any], np.ndarray, np.ndarray, np.ndarray]:
+    """Score a compact repeated final-record shuffle null.
+
+    Expression and its corresponding library-size weight move together. Raw
+    per-permutation matrices and per-gene metrics are deliberately not returned
+    in the report summary.
+    """
+
+    expression = np.asarray(cell_log_expression, dtype=np.float64)
+    weights = np.asarray(cell_weights, dtype=np.float64)
+    indices = np.asarray(spot_index, dtype=np.int64)
+    selected_spots = np.asarray(primary_spots, dtype=bool)
+    truth = np.asarray(observed_expression, dtype=np.float64)
+    if permutations < 100:
+        raise ValueError("repeated final-record shuffle requires at least 100 permutations")
+    if (
+        expression.ndim != 2
+        or weights.shape != (len(expression),)
+        or indices.shape != (len(expression),)
+        or truth.ndim != 2
+        or expression.shape[1] != truth.shape[1]
+        or selected_spots.shape != (truth.shape[0],)
+    ):
+        raise ValueError("record-shuffle inputs are misaligned")
+    assigned = np.flatnonzero(indices >= 0)
+    if not len(assigned) or np.any(indices[assigned] >= len(truth)):
+        raise ValueError("record-shuffle requires valid assigned cells")
+    if (
+        not np.isfinite(expression[assigned]).all()
+        or not np.isfinite(weights[assigned]).all()
+        or np.any(weights[assigned] <= 0)
+    ):
+        raise ValueError("assigned record-shuffle expression and weights must be finite/positive")
+    truth_state = _prepare_spearman_truth(truth[selected_spots])
+    statistics = np.empty(permutations, dtype=np.float64)
+    first_spots: Optional[np.ndarray] = None
+    first_mass: Optional[np.ndarray] = None
+    assigned_spots = indices[assigned]
+    for draw_index in range(permutations):
+        rng = np.random.default_rng(_record_shuffle_seed(seed, sample, draw_index))
+        permutation = rng.permutation(assigned)
+        shuffled_spots, shuffled_mass = aggregate_cells_to_spots(
+            expression[permutation],
+            assigned_spots,
+            len(truth),
+            weights[permutation],
+        )
+        if np.any(shuffled_mass[selected_spots] <= 0):
+            raise RuntimeError("record shuffle removed all positive mass from a primary spot")
+        statistics[draw_index] = _median_gene_spearman_prepared(
+            shuffled_spots[selected_spots],
+            *truth_state,
+        )
+        if draw_index == 0:
+            first_spots = shuffled_spots
+            first_mass = shuffled_mass
+    assert first_spots is not None and first_mass is not None
+    return _compact_shuffle_distribution(statistics), first_spots, first_mass, statistics
+
+
 def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
     ready = [
         ("locked_round0_predictions", "Hash-frozen v0.2 predictions for all three specimens"),
         (
-            "historical_integrated_type_mean",
-            "Derived from the v0.2 pooled integrated multi-workflow reference",
+            "historical_integrated_hard_type_mean",
+            "Hard argmax baseline derived from the v0.2 pooled multi-workflow reference",
+        ),
+        (
+            "historical_integrated_soft_type_mean",
+            "Probability-weighted baseline derived from the v0.2 pooled multi-workflow reference",
         ),
         (
             "historical_integrated_pseudobulk",
@@ -591,12 +962,14 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
         ),
         (
             "historical_final_cell_record_shuffle",
-            "Deterministic final cell-record shuffle; this is distinct from and does not "
-            "satisfy the required image-feature or coordinate/graph shuffle controls",
+            "%d deterministic independently seeded final-cell-record permutations are "
+            "summarized compactly; draw 0 remains the single-method backward comparison. "
+            "Neither satisfies image-feature or coordinate/graph shuffle controls"
+            % plan.final_cell_record_shuffle_permutations,
         ),
         (
-            "rna_mass_aggregation",
-            "Historical integrated-reference type median library sizes",
+            "historical_integrated_reference_library_size_weighting",
+            "Type-median library sizes from the historical pooled multi-workflow reference",
         ),
     ]
     records: List[Dict[str, Any]] = [
@@ -604,9 +977,11 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
     ]
     partial = {
         "primary_ffpe_snpatho_reference": (
-            "blocked_noncompliant_input",
-            "v0.2 reference500 artifacts pool integrated RNA workflows; no FFPE-snPATHO-only "
-            "reference is frozen",
+            "partial_materialized_not_benchmark_ready",
+            "FFPE-snPATHO-only count artifacts are hash-manifested, but use the published "
+            "integrated-workflow annotation and have no independent clean reannotation, "
+            "primary scANVI encoding, or prototype-only prediction/scorer; materialized SVD "
+            "fallback prototypes remain development-only",
         ),
         "primary_spot_qc": (
             "partial",
@@ -669,7 +1044,7 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
             "The 8-NN, radius, multiscale, no-graph, and degree-preserving rewiring runs are absent"
         ),
         "refinement_trajectory_and_ablations": (
-            "No round 1-3 predictions, anchor telemetry, E-step comparison, or prior-update "
+            "No round 1-4 predictions, anchor telemetry, E-step comparison, or prior-update "
             "sensitivity is frozen"
         ),
         "composition_controlled_residuals": (
@@ -727,6 +1102,9 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
         for name, reason in blocked_plan_components.items()
     )
     reasons = {
+        "primary_ffpe_snpatho_reference_manifest": (
+            "No hash-bound FFPE-snPATHO-only R1 reference manifest is registered"
+        ),
         "refined_predictions": "No post-redesign refined predictions are supplied",
         "five_seed_predictions": "Only the historical seed-17 prediction is frozen",
         "alternative_workflow_references": "No scFFPE/Flex/3-prime reference artifacts are frozen",
@@ -754,19 +1132,28 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
     }
     for name in OPTIONAL_ARTIFACTS:
         artifact = plan.optional_artifacts[name]
+        if name == "primary_ffpe_snpatho_reference_manifest" and artifact is not None:
+            status = "partial_consumed_retrospective_sensitivity"
+            reason = (
+                "Hash-validated FFPE-only counts are consumed for hard/soft type-mean "
+                "sensitivities, but integrated published annotations are not a clean R1 "
+                "reannotation, the SVD prototype adapter is not primary scANVI, and no "
+                "prototype-only/refined scorer is available"
+            )
+        else:
+            status = (
+                "registered_not_implemented" if artifact is not None else "blocked_missing_artifact"
+            )
+            reason = (
+                "Hash-validated artifact is registered, but no scorer consumes this schema yet"
+                if artifact is not None
+                else reasons[name]
+            )
         records.append(
             {
                 "component": name,
-                "status": (
-                    "registered_not_implemented"
-                    if artifact is not None
-                    else "blocked_missing_artifact"
-                ),
-                "reason": (
-                    "Hash-validated artifact is registered, but no scorer consumes this schema yet"
-                    if artifact is not None
-                    else reasons[name]
-                ),
+                "status": status,
+                "reason": reason,
                 "path": None if artifact is None else str(artifact),
             }
         )
@@ -808,17 +1195,21 @@ def _bootstrap_macro_delta(
         "estimate": float(np.mean(donor_estimates)),
         "ci_lower": float(np.quantile(finite, 0.025)) if len(finite) else None,
         "ci_upper": float(np.quantile(finite, 0.975)) if len(finite) else None,
-        "probability_positive": float(np.mean(finite > 0)) if len(finite) else None,
+        "bootstrap_fraction_delta_positive": (float(np.mean(finite > 0)) if len(finite) else None),
         "iterations": int(iterations),
         "method": "paired specimen/gene abundance-stratified bootstrap",
         "limitation": "connected spatial blocks were not frozen in the historical artifacts",
     }
 
 
-def _primary_diagnostic(cases: Sequence[Dict[str, Any]], plan: DeepBenchPlan) -> Dict[str, Any]:
-    deltas = []
-    observed_means = []
-    rows = []
+def _primary_diagnostic(
+    cases: Sequence[Dict[str, Any]],
+    plan: DeepBenchPlan,
+    repeated_shuffle_statistics: Optional[Mapping[str, np.ndarray]] = None,
+) -> Dict[str, Any]:
+    deltas: List[np.ndarray] = []
+    observed_means: List[np.ndarray] = []
+    rows: List[Dict[str, Any]] = []
     for case in cases:
         methods = case["methods"]
         assert isinstance(methods, Mapping)
@@ -838,7 +1229,7 @@ def _primary_diagnostic(cases: Sequence[Dict[str, Any]], plan: DeepBenchPlan) ->
             [np.nan if value is None else value for value in baseline_gene["spearman"]],
             dtype=np.float64,
         )
-        shuffle_values = np.asarray(
+        shuffle_draw_zero_values = np.asarray(
             [np.nan if value is None else value for value in shuffled_gene["spearman"]],
             dtype=np.float64,
         )
@@ -853,54 +1244,114 @@ def _primary_diagnostic(cases: Sequence[Dict[str, Any]], plan: DeepBenchPlan) ->
         primary_summary = primary["summary"]
         baseline_summary = baseline["summary"]
         assert isinstance(primary_summary, Mapping) and isinstance(baseline_summary, Mapping)
+        section_id = str(case["section_id"])
+        repeated_comparison: Dict[str, Any] = {
+            "status": "unavailable",
+            "reason": "repeated final-record shuffle statistics were not supplied",
+        }
+        if repeated_shuffle_statistics is not None and section_id in repeated_shuffle_statistics:
+            null_values = np.asarray(
+                repeated_shuffle_statistics[section_id],
+                dtype=np.float64,
+            )
+            if null_values.ndim != 1 or not len(null_values) or not np.isfinite(null_values).all():
+                raise ValueError("repeated final-record shuffle statistics are invalid")
+            observed_spearman = float(primary_summary["median_gene_spearman"])
+            null_lower = float(np.quantile(null_values, 0.025))
+            null_upper = float(np.quantile(null_values, 0.975))
+            repeated_comparison = {
+                "status": "available_retrospective_record_shuffle",
+                "observed_heir_median_gene_spearman": observed_spearman,
+                "null_permutations": int(len(null_values)),
+                "null_median": float(np.median(null_values)),
+                "null_empirical_percentile_interval_95": {
+                    "lower": null_lower,
+                    "upper": null_upper,
+                },
+                "observed_heir_empirical_percentile_in_null": float(
+                    np.mean(null_values <= observed_spearman)
+                ),
+                "empirical_percentile_definition": (
+                    "fraction of repeated-null statistics <= observed HEIR statistic"
+                ),
+                "observed_heir_above_null_95_upper": observed_spearman > null_upper,
+                "observed_heir_minus_null_median": (
+                    observed_spearman - float(np.median(null_values))
+                ),
+            }
         rows.append(
             {
-                "section_id": case["section_id"],
-                "median_gene_spearman_delta_vs_type_mean": float(np.nanmedian(difference)),
-                "median_gene_spearman_delta_vs_spatial_shuffle": float(
-                    np.nanmedian(left - shuffle_values)
+                "section_id": section_id,
+                "median_paired_per_gene_spearman_delta_vs_historical_integrated_hard_type_mean": (
+                    float(np.nanmedian(difference))
                 ),
+                "median_paired_per_gene_spearman_delta_vs_final_record_shuffle_draw_0": (
+                    float(np.nanmedian(left - shuffle_draw_zero_values))
+                ),
+                "repeated_final_record_shuffle_null_comparison": repeated_comparison,
                 "median_mse_improvement_vs_type_mean": float(
                     baseline_summary["median_gene_mse"] - primary_summary["median_gene_mse"]
                 ),
             }
         )
-    macro_delta = float(np.mean([row["median_gene_spearman_delta_vs_type_mean"] for row in rows]))
+    paired_delta_key = (
+        "median_paired_per_gene_spearman_delta_vs_historical_integrated_hard_type_mean"
+    )
+    macro_delta = float(np.mean([row[paired_delta_key] for row in rows]))
     rules = {
         "macro_delta_positive": macro_delta > 0,
-        "positive_in_at_least_two_specimens": sum(
-            row["median_gene_spearman_delta_vs_type_mean"] > 0 for row in rows
-        )
-        >= 2,
-        "no_specimen_below_minus_0_01": all(
-            row["median_gene_spearman_delta_vs_type_mean"] >= -0.01 for row in rows
-        ),
+        "positive_in_at_least_two_specimens": sum(row[paired_delta_key] > 0 for row in rows) >= 2,
+        "no_specimen_below_minus_0_01": all(row[paired_delta_key] >= -0.01 for row in rows),
         "mse_improves_in_at_least_two_specimens": sum(
             row["median_mse_improvement_vs_type_mean"] > 0 for row in rows
         )
         >= 2,
-        "beats_spatial_shuffle_in_at_least_two_specimens": sum(
-            row["median_gene_spearman_delta_vs_spatial_shuffle"] > 0 for row in rows
+        "beats_final_record_shuffle_draw_0_in_at_least_two_specimens": sum(
+            row["median_paired_per_gene_spearman_delta_vs_final_record_shuffle_draw_0"] > 0
+            for row in rows
         )
         >= 2,
+        "above_repeated_final_record_shuffle_null_95_upper_in_at_least_two_specimens": (
+            sum(
+                row["repeated_final_record_shuffle_null_comparison"].get(
+                    "observed_heir_above_null_95_upper",
+                    False,
+                )
+                for row in rows
+            )
+            >= 2
+            if repeated_shuffle_statistics is not None
+            else None
+        ),
         "composition_adjusted_residual_positive": None,
     }
     refined_available = plan.optional_artifacts["refined_predictions"] is not None
     requested_blockers = [
-        "required FFPE-snPATHO-only primary reference is absent",
+        "materialized FFPE-snPATHO-only counts lack independent clean reannotation, scANVI "
+        "encoding and prototype-only predictions; the SVD fallback adapter is development-only",
         "refined predictions are absent or their schema is not consumed",
         "composition-adjusted residual inputs are absent",
         "required per-spot H&E tissue fraction is absent",
     ]
     return {
-        "requested_primary_contrast": "refined_heir_minus_matched_type_mean",
+        "requested_primary_contrast": ("refined_heir_minus_matched_ffpe_r1_soft_type_mean"),
         "requested_primary_status": (
             "not_testable_registered_refined_schema_not_implemented"
             if refined_available
             else "not_testable_missing_refined_predictions"
         ),
         "requested_primary_blockers": requested_blockers,
-        "diagnostic_contrast": ("historical_round0_minus_historical_integrated_type_mean"),
+        "diagnostic_contrast": ("historical_round0_minus_historical_integrated_hard_type_mean"),
+        "diagnostic_statistic": {
+            "label": "median paired per-gene Spearman delta",
+            "specimen_formula": (
+                "median_g(rho_HEIR,g - rho_historical_integrated_hard_type_mean,g)"
+            ),
+            "macro_formula": "mean_d(specimen_median_paired_per_gene_delta_d)",
+            "not_equal_to": (
+                "median_g(rho_HEIR,g) - median_g(rho_historical_integrated_hard_type_mean,g)"
+            ),
+        },
         "diagnostic_status": (
             "fails_available_criteria"
             if any(value is False for value in rules.values())
@@ -983,6 +1434,10 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
     locked_plan = load_snpatho_plan(plan.frozen_plan)
     if tuple(sorted(case.section_id for case in locked_plan.cases)) != plan.sample_ids:
         raise ValueError("frozen benchmark plan does not contain the DeepBench specimens")
+    r1_references = _load_r1_references(
+        plan,
+        gene_panel_sha256=locked_plan.gene_panel_sha256,
+    )
     # This re-evaluation validates all frozen hashes and target-isolation
     # contracts; it does not write or mutate the historical report.
     locked: SnPathoBenchmarkResult = run_snpatho_benchmark(
@@ -993,12 +1448,16 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         require_complete=True,
     )
     cases: List[Dict[str, Any]] = []
+    shuffle_null_specimens: Dict[str, Dict[str, Any]] = {}
+    shuffle_null_draw_statistics: Dict[str, np.ndarray] = {}
     for case in sorted(locked_plan.cases, key=lambda item: item.section_id):
         prediction = PredictionBundle.from_npz(case.predictions)
         reference = RNAReference.load_npz(case.matched_reference)
         truth = SpatialTruthArtifact.from_npz(case.truth)
+        type_support = _reference_type_support(reference, prediction)
         rna_mass = _cell_rna_mass(reference, prediction)
         type_cells = _type_mean_cells(reference, prediction)
+        soft_type_cells = _soft_type_mean_cells(reference, prediction)
         spot_index = truth.nucleus_spot_index
         spot_counts = np.bincount(
             spot_index[spot_index >= 0], minlength=len(truth.spot_ids)
@@ -1009,6 +1468,40 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         gene_order = tuple(str(value) for value in prediction.gene_names.tolist())
         if gene_order != tuple(str(value) for value in truth.gene_names.tolist()):
             raise ValueError("DeepBench prediction and truth gene orders differ")
+        r1_payload = r1_references.get(case.section_id)
+        r1_type_support: Optional[Dict[str, Any]] = None
+        r1_provenance: Optional[Dict[str, Any]] = None
+        r1_values: Dict[str, Tuple[np.ndarray, np.ndarray, str]] = {}
+        if r1_payload is not None:
+            r1_reference, r1_provenance = r1_payload
+            if gene_order != tuple(str(value) for value in r1_reference.gene_ids.tolist()):
+                raise ValueError("R1 reference and DeepBench gene orders differ")
+            r1_type_support = _reference_type_support(r1_reference, prediction)
+            r1_cell_mass = _cell_rna_mass(r1_reference, prediction)
+            r1_hard_spots, r1_hard_mass = aggregate_cells_to_spots(
+                _type_mean_cells(r1_reference, prediction),
+                spot_index,
+                len(truth.spot_ids),
+                r1_cell_mass,
+            )
+            r1_soft_spots, r1_soft_mass = aggregate_cells_to_spots(
+                _soft_type_mean_cells(r1_reference, prediction),
+                spot_index,
+                len(truth.spot_ids),
+                r1_cell_mass,
+            )
+            r1_values = {
+                R1_HARD_TYPE_MEAN_METHOD: (
+                    r1_hard_spots,
+                    r1_hard_mass,
+                    R1_LIBRARY_SIZE_AGGREGATION,
+                ),
+                R1_SOFT_TYPE_MEAN_METHOD: (
+                    r1_soft_spots,
+                    r1_soft_mass,
+                    R1_LIBRARY_SIZE_AGGREGATION,
+                ),
+            }
         heir_rna, heir_mass = aggregate_cells_to_spots(
             prediction.expression_mean,
             spot_index,
@@ -1032,45 +1525,66 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
             len(truth.spot_ids),
             rna_mass,
         )
-        pseudobulk = np.log1p(_reference_linear_pseudobulk(reference))
-        pseudobulk_spots = np.repeat(pseudobulk[None, :], len(truth.spot_ids), axis=0)
-        rng = np.random.default_rng(_stable_seed(plan.primary_seeds[0], case.section_id))
-        assigned = np.flatnonzero(spot_index >= 0)
-        permutation = rng.permutation(assigned)
-        shuffled_cells = np.asarray(prediction.expression_mean).copy()
-        shuffled_cell_mass = rna_mass.copy()
-        shuffled_cells[assigned] = shuffled_cells[permutation]
-        shuffled_cell_mass[assigned] = shuffled_cell_mass[permutation]
-        shuffled_spots, shuffled_mass = aggregate_cells_to_spots(
-            shuffled_cells,
+        soft_type_spots, soft_type_mass = aggregate_cells_to_spots(
+            soft_type_cells,
             spot_index,
             len(truth.spot_ids),
-            shuffled_cell_mass,
+            rna_mass,
         )
+        pseudobulk = np.log1p(_reference_linear_pseudobulk(reference))
+        pseudobulk_spots = np.repeat(pseudobulk[None, :], len(truth.spot_ids), axis=0)
+        (
+            shuffle_null_summary,
+            shuffled_spots,
+            shuffled_mass,
+            shuffle_draw_statistics,
+        ) = _repeated_final_record_shuffle_null(
+            prediction.expression_mean,
+            rna_mass,
+            spot_index,
+            primary_spots,
+            truth.observed_expression,
+            sample=case.section_id,
+            seed=plan.primary_seeds[0],
+            permutations=plan.final_cell_record_shuffle_permutations,
+        )
+        shuffle_null_specimens[case.section_id] = shuffle_null_summary
+        shuffle_null_draw_statistics[case.section_id] = shuffle_draw_statistics
         method_values = {
             PRIMARY_METHOD: (
                 heir_rna,
                 heir_mass,
-                "historical_integrated_type_median_library_size",
+                HISTORICAL_LIBRARY_SIZE_AGGREGATION,
             ),
             SELECTIVE_METHOD: (
                 selective_rna,
                 selective_mass,
-                "historical_integrated_type_median_library_size_nonabstained_only",
+                HISTORICAL_LIBRARY_SIZE_AGGREGATION + "_nonabstained_only",
             ),
             EQUAL_CELL_METHOD: (heir_equal, equal_mass, "equal_cell"),
             TYPE_MEAN_METHOD: (
                 type_spots,
                 type_mass,
-                "historical_integrated_type_median_library_size",
+                HISTORICAL_LIBRARY_SIZE_AGGREGATION,
+            ),
+            SOFT_TYPE_MEAN_METHOD: (
+                soft_type_spots,
+                soft_type_mass,
+                HISTORICAL_LIBRARY_SIZE_AGGREGATION,
             ),
             PSEUDOBULK_METHOD: (
                 pseudobulk_spots,
                 np.ones(len(truth.spot_ids)),
                 "spatially_constant",
             ),
-            SHUFFLE_METHOD: (shuffled_spots, shuffled_mass, "spatially_shuffled_cells"),
+            SHUFFLE_METHOD: (
+                shuffled_spots,
+                shuffled_mass,
+                "single_draw_0_complete_final_cell_record_shuffle_with_"
+                + HISTORICAL_LIBRARY_SIZE_AGGREGATION,
+            ),
         }
+        method_values.update(r1_values)
         methods: Dict[str, Dict[str, Any]] = {}
         for method, (values, mass, aggregation) in method_values.items():
             evaluable = primary_spots & (mass > 0)
@@ -1086,6 +1600,8 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 "spot_coverage": float(evaluable.sum() / primary_spots.sum()),
                 **metrics,
             }
+            if method == SHUFFLE_METHOD:
+                methods[method]["shuffle_role"] = "single_draw_0_preserved_for_backward_comparison"
         cases.append(
             {
                 "section_id": case.section_id,
@@ -1101,16 +1617,116 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                     "spots_at_least_5_nuclei": int((spot_counts >= 5).sum()),
                     "cell_coverage": float((~prediction.abstain.astype(bool)).mean()),
                 },
+                "reference_type_support": type_support,
+                "r1_reference_type_support": (
+                    r1_type_support
+                    if r1_type_support is not None
+                    else {
+                        "status": "unavailable",
+                        "reason": "no hash-bound R1 manifest was registered",
+                    }
+                ),
                 "methods": methods,
                 "provenance": {
                     "prediction_sha256": case.predictions_sha256,
                     "truth_sha256": case.truth_sha256,
                     "reference_sha256": case.matched_reference_sha256,
                     "checkpoint_sha256": case.checkpoint_sha256,
+                    "r1_reference": r1_provenance,
                 },
             }
         )
+    if len(shuffle_null_draw_statistics) != len(cases):
+        raise RuntimeError("record-shuffle null is incomplete")
+    shuffle_macro_statistics = np.mean(
+        np.stack(
+            [shuffle_null_draw_statistics[case["section_id"]] for case in cases],
+            axis=0,
+        ),
+        axis=0,
+    )
+    shuffle_null_report = {
+        "status": "retrospective_final_cell_record_shuffle_only",
+        "permutations_per_specimen": plan.final_cell_record_shuffle_permutations,
+        "seed": plan.primary_seeds[0],
+        "seed_derivation": (
+            "SHA-256(base seed, specimen, draw index); draw 0 preserves the historical "
+            "single-shuffle seed"
+        ),
+        "record_unit": (
+            "complete assigned-cell prediction record: expression and library-size weight "
+            "move together"
+        ),
+        "single_draw_method": SHUFFLE_METHOD,
+        "single_draw_index": 0,
+        "specimens": shuffle_null_specimens,
+        "equal_weight_specimen_macro": _compact_shuffle_distribution(shuffle_macro_statistics),
+        "raw_permutation_values_reported": False,
+        "does_not_replace": [
+            "shuffled_image_features_followed_by_model_rerun",
+            "coordinate_or_graph_shuffle_followed_by_model_rerun",
+        ],
+    }
     readiness = _readiness(plan)
+    method_macro = _method_macro_summaries(cases)
+    locked_macro_spearman = {
+        summary.method: summary.estimate
+        for summary in locked.benchmark.summaries
+        if summary.cohort_id == "snpatho_seq" and summary.metric == "median_gene_spearman"
+    }
+    reconciliation = {
+        "interpretation": (
+            "Locked-v0.2 and DeepBench-v1 evaluate different estimands; their numerical "
+            "differences are expected and do not alter either negative conclusion"
+        ),
+        "macro_median_gene_spearman": {
+            "locked_v0_2": {
+                "heir": locked_macro_spearman.get("heir"),
+                "type_mean": locked_macro_spearman.get("matched_type_mean"),
+                "shuffle": locked_macro_spearman.get("heir_spatial_shuffle"),
+            },
+            "deepbench_v1": {
+                "heir": method_macro[PRIMARY_METHOD]["metrics"]["median_gene_spearman"][
+                    "macro_mean"
+                ],
+                "hard_type_mean": method_macro[TYPE_MEAN_METHOD]["metrics"]["median_gene_spearman"][
+                    "macro_mean"
+                ],
+                "final_record_shuffle_draw_0": method_macro[SHUFFLE_METHOD]["metrics"][
+                    "median_gene_spearman"
+                ]["macro_mean"],
+            },
+        },
+        "estimand_differences": [
+            {
+                "feature": "minimum_nuclei_per_spot",
+                "locked_v0_2": ">=1",
+                "deepbench_v1": ">=3",
+            },
+            {
+                "feature": "cell_aggregation",
+                "locked_v0_2": "equal-cell",
+                "deepbench_v1": HISTORICAL_LIBRARY_SIZE_AGGREGATION,
+            },
+            {
+                "feature": "type_profile",
+                "locked_v0_2": "historical locked implementation",
+                "deepbench_v1": "pooled raw counts divided by full-library mass",
+            },
+            {
+                "feature": "constant_prediction_policy",
+                "locked_v0_2": "earlier metric implementation",
+                "deepbench_v1": "correlation fixed at zero when observed expression varies",
+            },
+            {
+                "feature": "shuffle",
+                "locked_v0_2": "historical spatial shuffle",
+                "deepbench_v1": (
+                    "complete final-cell-record shuffle draw 0; repeated null reported separately"
+                ),
+            },
+        ],
+    }
     return {
         "schema_version": DEEPBENCH_REPORT_SCHEMA,
         "benchmark": {
@@ -1145,11 +1761,22 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         },
         "reference_policy": {
             "required_primary": "matched FFPE snPATHO-seq only",
+            "materialized_local_manifest": "reports/snpatho_r1_reference_manifest.json",
+            "materialized_local_status": (
+                "counts isolated and hash-bound; integrated published annotations are "
+                "sensitivity-only; independent reannotation, primary scANVI and prototype-only "
+                "predictions remain unavailable for the requested primary endpoint"
+            ),
+            "retrospective_r1_sensitivity_methods": [
+                R1_HARD_TYPE_MEAN_METHOD,
+                R1_SOFT_TYPE_MEAN_METHOD,
+            ],
             "historical_available": (
                 "v0.2 pooled integrated multi-workflow reference containing FFPE snPATHO-seq, "
                 "frozen Flex, and frozen 3-prime nuclei"
             ),
             "status": "historical_retrospective_only_not_primary_R1",
+            "machine_readable_workflow_audit": ("reports/snpatho_reference_workflow_audit.json"),
         },
         "track_policy": {
             "historical_mode": "capture-area-aware with target H&E",
@@ -1162,13 +1789,18 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
             ),
         },
         "shuffle_policy": {
-            "available": "complete final cell-record shuffle across assigned nuclei",
+            "available": (
+                "repeated complete final cell-record shuffle null plus preserved draw-0 method"
+            ),
             "status": "historical_diagnostic_only",
+            "permutations": plan.final_cell_record_shuffle_permutations,
+            "single_draw_method": SHUFFLE_METHOD,
             "does_not_replace": [
                 "shuffled_image_features",
                 "coordinate_shuffled_graph",
             ],
         },
+        "final_cell_record_shuffle_null": shuffle_null_report,
         "refinement_policy": {
             "segmentation_source": "Space Ranger",
             "historical_segmentation_confidence": 1.0,
@@ -1180,10 +1812,33 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 "blocked pending a calibrated confidence measurement"
             ),
         },
+        "metric_policy": {
+            "expression_detection_auroc": (
+                "AUROC(predicted expression, observed expression > 0); this is not a hotspot AUROC"
+            ),
+            "top_10_percent_hotspot": {
+                "selection_size": "ceil(0.10 * spots), at least one",
+                "tie_policy": (
+                    "exact-k; descending expression, then ascending frozen spot-row index"
+                ),
+            },
+            "morans_i_spatial_weights": {
+                "graph": "directed unweighted 6-nearest-neighbor graph",
+                "symmetrized": False,
+                "row_standardized": False,
+                "normalization": "n divided by total directed edge weight",
+                "status": "historical DeepBench sensitivity graph, not Visium hex adjacency",
+            },
+        },
+        "locked_v0_2_deepbench_v1_reconciliation": reconciliation,
         "readiness": list(readiness),
         "cases": cases,
-        "method_macro": _method_macro_summaries(cases),
-        "primary": _primary_diagnostic(cases, plan),
+        "method_macro": method_macro,
+        "primary": _primary_diagnostic(
+            cases,
+            plan,
+            repeated_shuffle_statistics=shuffle_null_draw_statistics,
+        ),
         "reporting": {
             "specimen_is_biological_unit": True,
             "pooled_spot_inference": False,
@@ -1248,6 +1903,72 @@ def write_deepbench_report(
                             ),
                         }
                     )
+            shuffle_null = report.get("final_cell_record_shuffle_null")
+            if isinstance(shuffle_null, Mapping):
+                null_payloads = {
+                    **dict(cast(Mapping[str, Any], shuffle_null["specimens"])),
+                    "macro": shuffle_null["equal_weight_specimen_macro"],
+                }
+                for section_id, payload in null_payloads.items():
+                    interval = payload["empirical_percentile_interval_95"]
+                    metrics = {
+                        "null_mean": payload["mean"],
+                        "null_median": payload["median"],
+                        "null_sample_standard_deviation": payload["sample_standard_deviation"],
+                        "null_minimum": payload["minimum"],
+                        "null_maximum": payload["maximum"],
+                        "null_empirical_95_lower": interval["lower"],
+                        "null_empirical_95_upper": interval["upper"],
+                    }
+                    for metric, value in metrics.items():
+                        writer.writerow(
+                            {
+                                "record_type": "shuffle_null",
+                                "section_id": section_id,
+                                "method": SHUFFLE_METHOD,
+                                "aggregation": "repeated_complete_final_cell_record_shuffle",
+                                "gene_name": "",
+                                "metric": metric,
+                                "value": "%.12g" % value,
+                                "spots_evaluated": "",
+                                "status": "ok",
+                                "reason": "%d deterministic permutations" % payload["permutations"],
+                            }
+                        )
+                primary_payload = report.get("primary")
+                if isinstance(primary_payload, Mapping):
+                    for row in primary_payload["specimens"]:
+                        comparison = row["repeated_final_record_shuffle_null_comparison"]
+                        comparison_metrics = {
+                            "observed_heir_median_gene_spearman": comparison[
+                                "observed_heir_median_gene_spearman"
+                            ],
+                            "observed_heir_empirical_percentile_in_null": comparison[
+                                "observed_heir_empirical_percentile_in_null"
+                            ],
+                            "observed_heir_minus_null_median": comparison[
+                                "observed_heir_minus_null_median"
+                            ],
+                            "observed_heir_above_null_95_upper": float(
+                                comparison["observed_heir_above_null_95_upper"]
+                            ),
+                        }
+                        for metric, value in comparison_metrics.items():
+                            writer.writerow(
+                                {
+                                    "record_type": "shuffle_null_comparison",
+                                    "section_id": row["section_id"],
+                                    "method": PRIMARY_METHOD,
+                                    "aggregation": HISTORICAL_LIBRARY_SIZE_AGGREGATION,
+                                    "gene_name": "",
+                                    "metric": metric,
+                                    "value": "%.12g" % value,
+                                    "spots_evaluated": "",
+                                    "status": "ok",
+                                    "reason": "%d deterministic permutations"
+                                    % comparison["null_permutations"],
+                                }
+                            )
             for case in report["cases"]:
                 methods = case["methods"]
                 for method, payload in methods.items():
@@ -1334,6 +2055,16 @@ def write_deepbench_report(
             "Flex, and frozen 3-prime nuclei; its results and type-mean baseline are therefore "
             "retrospective diagnostics, not the primary R1 comparison.",
             "",
+            "A hash-bound FFPE-only count reference is now consumed for hard/soft type-mean "
+            "sensitivities with FFPE-only type-median library-size weights. It retains the "
+            "published integrated-workflow annotation and has no native-scANVI prototype-only "
+            "prediction, so it is not the requested clean primary R1 comparison.",
+            "",
+            "Cell-to-spot weights in this diagnostic are **historical integrated-reference "
+            "library-size weights**, not assay-corrected biological RNA-mass estimates. Both "
+            "hard-argmax and probability-weighted soft historical type-mean baselines are "
+            "reported. Missing prediction types fail closed; no global profile is substituted.",
+            "",
             "The available null is a complete shuffle of final cell records across assigned "
             "nuclei. It does not substitute for the separately required shuffled-image-feature "
             "and coordinate-shuffled-graph controls.",
@@ -1342,6 +2073,11 @@ def write_deepbench_report(
             "confidence. Historical v0.2 substituted a constant confidence of 1.0, making the "
             ">=0.50 anchor gate vacuous; refinement benchmarking remains blocked until that "
             "measurement is available.",
+            "",
+            "Expression-detection AUROC uses observed expression > 0 as its label; top-10% "
+            "Dice/Jaccard are the hotspot metrics. Exact top-decile sets break cutoff ties by "
+            "ascending frozen spot-row index. Moran's I uses a directed, unweighted 6-NN graph "
+            "that is not symmetrized or row-standardized.",
             "",
             "## Executability",
             "",
@@ -1356,9 +2092,84 @@ def write_deepbench_report(
         lines.extend(
             [
                 "",
+                "## Locked-v0.2 versus DeepBench-v1 reconciliation",
+                "",
+                "The two reports use different estimands, so their values need not match.",
+                "",
+                "| Feature | Locked-v0.2 | DeepBench-v1 |",
+                "|---|---|---|",
+            ]
+        )
+        lines.extend(
+            "| %s | %s | %s |" % (row["feature"], row["locked_v0_2"], row["deepbench_v1"])
+            for row in report["locked_v0_2_deepbench_v1_reconciliation"]["estimand_differences"]
+        )
+        lines.extend(
+            [
+                "",
+                "## Reference type support",
+                "",
+                "| Specimen | Prediction types | Supported | Missing | Hard fallback cells |",
+                "|---|---:|---:|---|---:|",
+            ]
+        )
+        lines.extend(
+            "| %s | %d | %d | %s | %d (%.4f) |"
+            % (
+                case["section_id"],
+                len(case["reference_type_support"]["prediction_cell_types"]),
+                len(case["reference_type_support"]["reference_supported_prediction_cell_types"]),
+                ", ".join(case["reference_type_support"]["missing_prediction_cell_types"])
+                or "none",
+                case["reference_type_support"]["hard_assignment_global_fallback_cells"],
+                case["reference_type_support"]["hard_assignment_global_fallback_cell_fraction"],
+            )
+            for case in report["cases"]
+        )
+        r1_cases = [
+            case
+            for case in report["cases"]
+            if "prediction_cell_types" in case["r1_reference_type_support"]
+        ]
+        if r1_cases:
+            lines.extend(
+                [
+                    "",
+                    "FFPE-only R1 count-reference support (integrated-annotation sensitivity):",
+                    "",
+                    "| Specimen | Prediction types | Supported | Missing | Hard fallback cells |",
+                    "|---|---:|---:|---|---:|",
+                ]
+            )
+            lines.extend(
+                "| %s | %d | %d | %s | %d (%.4f) |"
+                % (
+                    case["section_id"],
+                    len(case["r1_reference_type_support"]["prediction_cell_types"]),
+                    len(
+                        case["r1_reference_type_support"][
+                            "reference_supported_prediction_cell_types"
+                        ]
+                    ),
+                    ", ".join(case["r1_reference_type_support"]["missing_prediction_cell_types"])
+                    or "none",
+                    case["r1_reference_type_support"]["hard_assignment_global_fallback_cells"],
+                    case["r1_reference_type_support"][
+                        "hard_assignment_global_fallback_cell_fraction"
+                    ],
+                )
+                for case in r1_cases
+            )
+        lines.extend(
+            [
+                "",
                 "## Historical round-0 diagnostic",
                 "",
-                "| Specimen | Spearman delta vs type mean | MSE improvement vs type mean |",
+                "The paired statistic is "
+                "`median_g(rho_HEIR,g - rho_historical-integrated-hard-type-mean,g)`; it is "
+                "not the difference between the two marginal medians.",
+                "",
+                "| Specimen | Median paired per-gene delta | MSE improvement vs hard type mean |",
                 "|---|---:|---:|",
             ]
         )
@@ -1366,10 +2177,57 @@ def write_deepbench_report(
             "| %s | %.6f | %.6f |"
             % (
                 row["section_id"],
-                row["median_gene_spearman_delta_vs_type_mean"],
+                row[
+                    "median_paired_per_gene_spearman_delta_vs_historical_integrated_hard_type_mean"
+                ],
                 row["median_mse_improvement_vs_type_mean"],
             )
             for row in primary["specimens"]
+        )
+        shuffle_null = report["final_cell_record_shuffle_null"]
+        macro_null = shuffle_null["equal_weight_specimen_macro"]
+        lines.extend(
+            [
+                "",
+                "## Repeated final-cell-record shuffle null",
+                "",
+                "The preserved draw-0 method is one member of a %d-per-specimen null. "
+                "Expression and its library-size weight move together. This retrospective "
+                "record shuffle does not replace image-feature or coordinate/graph reruns."
+                % shuffle_null["permutations_per_specimen"],
+                "",
+                "| Specimen | HEIR median-gene Spearman | Null median | "
+                "Null empirical 95% interval | HEIR percentile in null | Above null upper? |",
+                "|---|---:|---:|---:|---:|---|",
+            ]
+        )
+        for row in primary["specimens"]:
+            comparison = row["repeated_final_record_shuffle_null_comparison"]
+            interval = comparison["null_empirical_percentile_interval_95"]
+            lines.append(
+                "| %s | %.6f | %.6f | [%.6f, %.6f] | %.3f | %s |"
+                % (
+                    row["section_id"],
+                    comparison["observed_heir_median_gene_spearman"],
+                    comparison["null_median"],
+                    interval["lower"],
+                    interval["upper"],
+                    comparison["observed_heir_empirical_percentile_in_null"],
+                    "yes" if comparison["observed_heir_above_null_95_upper"] else "no",
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "The equal-weight specimen-macro null median was **%.6f**, with empirical "
+                "95%% interval **[%.6f, %.6f]**. HEIR exceeded the specimen null upper "
+                "bound in one of three cases, so the prespecified at-least-two rule failed."
+                % (
+                    macro_null["median"],
+                    macro_null["empirical_percentile_interval_95"]["lower"],
+                    macro_null["empirical_percentile_interval_95"]["upper"],
+                ),
+            ]
         )
         lines.extend(
             [
@@ -1391,10 +2249,40 @@ def write_deepbench_report(
                     metrics["spot_coverage"]["macro_mean"],
                 )
             )
+        constant_rows = []
+        for case in report["cases"]:
+            for method, payload in case["methods"].items():
+                summary = payload["summary"]
+                predicted_constant = summary["prediction_constant_scored_zero_count"]
+                observed_constant = summary["observed_constant_excluded_count"]
+                if predicted_constant or observed_constant:
+                    constant_rows.append(
+                        (case["section_id"], method, predicted_constant, observed_constant)
+                    )
+        if constant_rows:
+            lines.extend(
+                [
+                    "",
+                    "## Constant-prediction audit",
+                    "",
+                    "Only nonzero counts are listed. A constant prediction receives correlation "
+                    "zero when observed expression varies; an observed-constant gene is excluded.",
+                    "",
+                    "| Specimen | Method | Prediction-constant scored zero | "
+                    "Observed-constant excluded |",
+                    "|---|---|---:|---:|",
+                ]
+            )
+            lines.extend("| %s | %s | %d | %d |" % row for row in constant_rows)
         lines.extend(
             [
                 "",
-                "Macro paired Spearman delta: **%.6f**." % primary["macro_delta"],
+                "Macro mean of specimen median paired per-gene Spearman deltas: **%.6f**."
+                % primary["macro_delta"],
+                "",
+                "Bootstrap fraction with delta > 0: **%.4f** (this is neither a p-value nor "
+                "a posterior probability)."
+                % primary["bootstrap"]["bootstrap_fraction_delta_positive"],
                 "",
                 "Requested refined-versus-type-mean endpoint: **%s**."
                 % primary["requested_primary_status"],

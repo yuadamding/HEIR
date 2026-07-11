@@ -3,12 +3,27 @@
 For sample (s), HEIR receives H&E nuclei (\{(x_i,r_i,m_i)\}_{i=1}^{N_s}) and an unregistered matched snRNA reference (\{(y_j,c_j)\}_{j=1}^{M_s}). There is no assumed correspondence (i\leftrightarrow j).
 
 The image graph predicts hierarchical type probabilities, a conditional
-known-state prototype distribution, a separate biological-unknown probability
-(u_i), and a residual RNA posterior. The decoded molecular mean is
+known-state prototype distribution (q_{ik}), a separate biological-unknown
+probability (u_i), and a restricted residual posterior. For new v3 checkpoints,
+the decoded molecular mean is
 
 \[
-z_i=\sum_k \frac{p_{ik}}{1-u_i+\epsilon}\,\widetilde\mu_{sk}+\Delta z_i.
+z_i^{\mathrm{proto}}=\sum_k q_{ik}\widetilde\mu_{sk},
+\qquad
+\Delta z_i=
+\alpha_i\frac{B_i a_i}{\sqrt{1+\lVert B_i a_i\rVert_2^2}},
+\qquad
+z_i=z_i^{\mathrm{proto}}+\Delta z_i,
 \]
+
+where (B_i=\sum_c p_i(c)B_c) mixes type-conditioned bases,
+(\operatorname{rank}(B_c)\le r), and
+(0<\alpha_i<\alpha_{\max}). The coefficient-mean head is initialized exactly at
+zero and every deterministic or sampled residual has
+(\lVert\Delta z_i\rVert_2<\alpha_{\max}); a fresh deterministic model therefore
+equals its routed prototype baseline. Checkpoint v1/v2 models retain their
+historical unrestricted residual behavior when loaded and are never silently
+upgraded.
 
 Unknown probability therefore changes confidence and loss participation, not the
 biological latent by scaling it toward zero.
@@ -21,15 +36,19 @@ HEIR aligns the final decoded latent mean to prototype Gaussians with
 covariance-aware entropic unbalanced transport. A dustbin column absorbs image
 objects or states that should remain unassigned. Unlike balanced transport, this
 does not force the H&E section to reproduce biased snRNA capture fractions
-exactly. Sample dustbin mass is estimated from calibrated unknown targets (or
-detached model probabilities) with shrinkage toward a prespecified Beta-prior
-mean rather than fixed unconditionally at 5%. The UOT plan is normalized by
+exactly. The primary path uses a prespecified fixed dustbin mass (default 0.05,
+to be calibrated only on development data), or explicit `unknown_targets` when
+supplied. Estimation from the model's own
+unknown head is retained only as an explicit sensitivity because it can create
+self-reinforcing dustbin assignments. The UOT plan is normalized by
 each row's complete transported mass,
 including the dustbin, and detached to form known-state subprobabilities. Their
 row sum preserves molecular known-state mass; conditional known responsibilities
 directly supervise prototype routing, cell type, latent mean, marker, program,
-and frozen-teacher objectives in the M-step. Live image type predictions are not
-the responsibility target.
+and frozen-teacher objectives in the M-step. Detached transported known-state
+row mass, rather than the live unknown-head probability, weights the weak
+biological objectives. Live image type predictions are not the responsibility
+target.
 
 The optimized objective combines:
 
@@ -51,10 +70,14 @@ Every term is implemented independently under `src/heir/losses/` and can be abla
 1. Fit/adapt the RNA teacher on real snRNA counts only.
 2. Optionally pretrain the image mapping on decontaminated public H&E–ST samples.
 3. Personalize on H&E plus matched snRNA; target ST is prohibited.
-4. Refine for at most five rounds (default three) with an EMA molecular E-step,
-   parent-to-fine transport masks, confidence/entropy/OOD/segmentation/view gates,
-   two-round revocable anchors, constrained prior updates, and immediate rollback
-   of model/teacher/prior/anchors after a failed round.
+4. Before refinement, evaluate and snapshot round 0 (student, EMA teacher,
+   batches, measured priors, and empty anchor state). Refine for at most five
+   rounds (default four), using two parent-gated rounds followed by two fine
+   rounds, confidence/entropy/OOD/segmentation/view gates, and two-round
+   revocable anchors. Measured priors are fixed by default; updating them is an
+   explicit sensitivity. A first or later candidate whose validation loss
+   exceeds the best loss plus `objective_stability_tolerance` restores the best
+   complete snapshot immediately.
 5. Calibrate on development donors.
 6. Open locked spatial measurements once the checkpoint and thresholds are frozen.
 
@@ -68,3 +91,8 @@ The corrected refiner is development code until it beats the one-pass model and
 matched type-mean baseline on a separate development cohort, then succeeds on a
 new untouched cohort. It does not retroactively change the negative locked
 snPATHO v0.2 result.
+
+The current broad phase is deliberately described as **parent-gated
+fine-prototype transport**: parent probabilities restrict compatible fine
+states, and only the parent head is trainable, but the UOT bank is still fine
+grained. A genuine parent-Gaussian transport contract remains future work.

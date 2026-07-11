@@ -11,13 +11,32 @@ import pytest
 import torch
 from scipy import sparse
 
-from heir.cli import _log_normalize, _sha256, main
+from heir.cli import _log_normalize, _sha256, build_parser, main
 from heir.data import HistologyBag, PrototypeSet, RNAReference
 from heir.data.manifest import MANIFEST_COLUMNS, ManifestRecord
 from heir.inference import PredictionBundle
 from heir.models.rna import RNAVAE, RNAVAEConfig
 from heir.training import HEIRTrainingBatch, TrainingStage
 from heir.uncertainty import MahalanobisOOD
+
+
+def test_refine_cli_defaults_use_two_round_trust_and_fixed_prior() -> None:
+    args = build_parser().parse_args(
+        [
+            "refine",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--train-batch",
+            "train.npz",
+            "--validation-batch",
+            "validation.npz",
+            "--output",
+            "refined",
+        ]
+    )
+    assert args.maximum_rounds == 4
+    assert args.broad_refinement_rounds == 2
+    assert args.prior_old_weight == 1.0
 
 
 def _write_input_artifacts(tmp_path):
@@ -762,6 +781,16 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
     )
     assert (refined / "heir_refined.pt").is_file()
     assert (refined / "refinement.json").is_file()
+    refinement_audit = json.loads((refined / "refinement.json").read_text())
+    assert np.isfinite(refinement_audit["round_zero_validation_loss"])
+    assert [row["round_id"] for row in refinement_audit["rounds"]] == [1]
+    refined_payload = torch.load(
+        refined / "heir_refined.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert refined_payload["metadata"]["refinement_round"] == refinement_audit["selected_round"]
+    assert refined_payload["metadata"]["refinement_rounds_executed"] == 1
     assert (refined / "prototypes" / "donor1__sample1.npz").is_file()
 
 

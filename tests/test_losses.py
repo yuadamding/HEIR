@@ -356,6 +356,9 @@ class CompositeLossTests(unittest.TestCase):
         total.backward()
         self.assertIsNotNone(morphology.grad)
         self.assertTrue(torch.isfinite(morphology.grad).all())
+        self.assertIsNotNone(model.residual_coefficient_head)
+        assert model.residual_coefficient_head is not None
+        self.assertIsNotNone(model.residual_coefficient_head.weight.grad)
 
 
 if __name__ == "__main__":

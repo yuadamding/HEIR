@@ -28,7 +28,7 @@ pathology = [
   "open-clip-torch==2.26.1",
 ]
 science = ["anndata>=0.9", "scanpy>=1.9", "scvi-tools>=1.1"]
-dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.5", "mypy>=1.8"]
+dev = ["Pillow>=9", "pytest>=7", "pytest-cov>=4", "ruff>=0.5", "mypy>=1.8"]
 
 [project.scripts]
 heir = "heir.cli:main"

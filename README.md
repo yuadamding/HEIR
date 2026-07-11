@@ -23,12 +23,20 @@ The repository contains a runnable HEIR core and a development-only refinement r
 - calibrated PIL/OpenSlide access, coordinate transforms, nucleus tables, image QC, sparse cellular graphs, Visium assignment, and conservative registration;
 - a transferable RNA VAE fallback, scVI-decoder export, and frozen scGPT teacher objective;
 - shrunken sample/type RNA prototypes;
-- a graph-aware, hierarchical prototype-plus-residual HEIR model;
-- differentiable unbalanced optimal transport with unknown mass;
+- a graph-aware, hierarchical prototype model with a zero-initialized,
+  type-conditioned low-rank residual whose latent L2 norm is hard-bounded;
+- differentiable unbalanced optimal transport with prespecified fixed unknown
+  mass, or explicit unknown targets, in the primary path;
 - composition, pseudobulk, marker/program, residual, cycle, hierarchy, graph, anchor, and uncertainty objectives;
 - covariance-aware UOT on the decoded molecular latent, detached transport responsibilities, and direct molecular/type M-step supervision;
-- broad-to-fine refinement with an EMA teacher, revocable two-round anchors, independent-view gates, immediate rollback, and audited prior drift;
-- H&E-only distillation, calibration, OOD detection, abstention, inference intervals, biological baselines, and donor-aware metrics;
+- two parent-gated rounds followed by fine refinement, with an EMA teacher,
+  revocable anchors, independent-view gates, a validated round-0 rollback target,
+  and fixed measured priors by default;
+- H&E-only distillation, calibration, OOD detection, abstention, v7
+  known-state-conditional inference intervals (suppressed on abstention while
+  legacy v2-v6 arrays remain labeled and unchanged), biological baselines, and
+  donor-aware metrics;
+- pull-request and main-branch CI for formatting, lint, and the unit/synthetic suite;
 - synthetic, unit, and local-data smoke paths.
 
 Large pretrained components are deliberately external assets. HEIR contains the
@@ -143,11 +151,13 @@ claim.
 
 The attached comprehensive plan is implemented as the separate retrospective
 [`snPATHO-DeepBench-v1`](docs/snpatho_deepbench.md) scorer. It revalidates the
-immutable locked inputs, applies RNA-mass aggregation and the expanded metric
-panel, writes per-gene and equal-weight specimen summaries, and records every
+immutable locked inputs, applies historical integrated-reference library-size
+weighting and the expanded metric panel, consumes hash-bound FFPE-only counts for
+explicitly labeled hard/soft integrated-annotation sensitivities, writes per-gene
+and equal-weight specimen summaries, and records every
 unavailable track without substituting weaker evidence. The available
-historical round-0 diagnostic is also negative (paired macro Spearman delta
-versus the historical integrated type mean: -0.0259); the requested refined
+historical round-0 diagnostic is also negative (equal-weight mean across
+specimens of `median_g(rho_HEIR,dg - rho_hard-type-mean,dg)`: -0.0259); the requested refined
 FFPE-snPATHO-only primary endpoint is not yet testable.
 
 For refinement development, use only a development cohort with spatial truth.
@@ -233,9 +243,19 @@ regardless of conversion or extraction.
 
 ## Local cohort decision
 
-The downloaded DLPFC directory contains imagery and alignment files but not the expression objects needed for the blueprint's primary DLPFC experiment. The directly usable development cohort is therefore the NatCommun/MOSAIC tumor set: 16 H&E sections from 14 donors and 86,356 annotated nuclei in total; 15 sections from 13 donors remain after the prespecified B2 exclusion (only 50 reference nuclei).
+The downloaded DLPFC directory contains imagery and alignment files but not the
+expression objects needed for the blueprint's primary DLPFC experiment.
+NatCommun/MOSAIC is directly usable for personalization, matched-versus-wrong
+molecular falsification, and pipeline smoke tests: it contains 16 H&E sections
+from 14 donors and 86,356 annotated nuclei (15 sections from 13 donors after the
+prespecified B2 exclusion). Its current local derivatives do not provide the
+registered spatial truth required to validate redesigned refinement.
 
-The three snPATHO samples (4066, 4399, 4411) are locked Tier-1 Visium validation cases. Their spatial measurements must not enter personalized optimization.
+The three snPATHO samples (4066, 4399, 4411) have a completed historical locked
+round-0 Visium benchmark, but the clean-R1/refined full plan remains incomplete
+and these already opened cases cannot serve as a new untouched confirmation.
+Their spatial measurements must not enter personalized optimization. No
+downloaded cohort currently supports the full proposed refined validation claim.
 
 See [data.md](docs/data.md), [method.md](docs/method.md),
 [validation.md](docs/validation.md), and

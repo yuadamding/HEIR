@@ -174,7 +174,19 @@ class HEIRTrainer:
         batch: HEIRTrainingBatch,
         output: HEIROutput,
     ) -> Tensor:
-        """Estimate sample dustbin mass with a Beta-style prior shrinkage."""
+        """Resolve dustbin mass without defaulting to a self-reinforcing estimate.
+
+        The primary mode is fixed unless independent ``unknown_targets`` are
+        available.  Model-estimated mass is retained only as an explicit
+        sensitivity mode because the same unknown head also changes real and
+        dustbin transport costs.
+        """
+
+        fixed = output.unknown_probability.new_tensor(self.uot_unknown_mass)
+        if self.uot_unknown_mass_mode == "fixed":
+            return fixed
+        if batch.unknown_targets is None and self.uot_unknown_mass_mode == "targets_or_fixed":
+            return fixed
 
         observations = (
             output.unknown_probability.detach()
@@ -196,6 +208,17 @@ class HEIRTrainer:
             max=1.0 - torch.finfo(observations.dtype).eps,
         )
 
+    @staticmethod
+    def _uot_known_cell_weights(base_cell_weights: Tensor, responsibilities: Tensor) -> Tensor:
+        """Weight biological objectives by detached transported known-state mass."""
+
+        if base_cell_weights.ndim != 1 or responsibilities.ndim != 2:
+            raise ValueError("cell weights and molecular responsibilities have wrong dimensions")
+        if responsibilities.shape[0] != len(base_cell_weights):
+            raise ValueError("molecular responsibilities must align to cell weights")
+        known_mass = responsibilities.detach().sum(dim=1).clamp(min=0.0, max=1.0)
+        return base_cell_weights * known_mass.to(base_cell_weights.dtype)
+
     def __init__(
         self,
         model: HEIRModel,
@@ -209,6 +232,7 @@ class HEIRTrainer:
         uot_convergence_tolerance: Optional[float] = 1.0e-5,
         uot_unknown_mass: float = 0.05,
         uot_unknown_prior_strength: float = 2.0,
+        uot_unknown_mass_mode: str = "targets_or_fixed",
         seed: int = 17,
         device: str = "auto",
         allow_split_overlap: bool = False,
@@ -231,6 +255,10 @@ class HEIRTrainer:
             raise ValueError("uot_convergence_tolerance must be finite and positive")
         if not math.isfinite(uot_unknown_prior_strength) or uot_unknown_prior_strength <= 0:
             raise ValueError("uot_unknown_prior_strength must be finite and positive")
+        if uot_unknown_mass_mode not in {"fixed", "targets_or_fixed", "model_estimate"}:
+            raise ValueError(
+                "uot_unknown_mass_mode must be fixed, targets_or_fixed, or model_estimate"
+            )
         self.model = model
         self.stage = stage
         self.optimization = optimization
@@ -242,6 +270,7 @@ class HEIRTrainer:
         self.uot_convergence_tolerance = uot_convergence_tolerance
         self.uot_unknown_mass = uot_unknown_mass
         self.uot_unknown_prior_strength = uot_unknown_prior_strength
+        self.uot_unknown_mass_mode = uot_unknown_mass_mode
         self.criterion = HEIRCompositeLoss(
             HEIRLossConfig.from_experiment_weights(
                 loss_weights,
@@ -375,13 +404,16 @@ class HEIRTrainer:
             if batch.cell_weights is None
             else batch.cell_weights
         )
-        biological_cell_weights = base_cell_weights * (1.0 - output.unknown_probability.detach())
         estimated_unknown_mass = self._estimated_uot_unknown_mass(batch, output)
         precomputed_uot: Optional[UnbalancedSinkhornResult] = None
         if batch.molecular_responsibilities is None:
             responsibilities, precomputed_uot = self.transport_responsibilities(batch, output)
         else:
             responsibilities = batch.molecular_responsibilities.detach()
+        biological_cell_weights = self._uot_known_cell_weights(
+            base_cell_weights,
+            responsibilities,
+        )
         molecular_type_responsibilities = self._type_responsibilities(
             responsibilities,
             batch.prototype_types,
@@ -424,7 +456,10 @@ class HEIRTrainer:
             output,
             batch,
             responsibilities,
-            biological_cell_weights,
+            # _molecular_posterior_loss applies transported known-state row
+            # mass itself. Passing biological_cell_weights here would square
+            # that mass and over-suppress ambiguous but still assigned cells.
+            base_cell_weights,
         )
         terms.update(posterior_terms)
         terms["molecular_posterior"] = posterior

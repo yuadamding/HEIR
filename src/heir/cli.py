@@ -1849,6 +1849,8 @@ def command_train(args: argparse.Namespace) -> int:
         abstain_threshold=args.abstain_threshold,
         nonnegative_expression=nonnegative_expression,
         num_domains=num_domains,
+        residual_rank=args.residual_rank,
+        residual_max_norm=args.residual_max_norm,
         scgpt_embedding_dim=scgpt_dim,
     )
     initial_checkpoint_sha256 = None
@@ -2265,7 +2267,9 @@ def command_refine(args: argparse.Namespace) -> int:
             "schema": "heir.refined_model.v1",
             "parent_checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
             "parent_checkpoint_sha256": _sha256(args.checkpoint),
-            "refinement_round": len(result.rounds),
+            "refinement_round": result.selected_round,
+            "refinement_rounds_executed": len(result.rounds),
+            "refinement_round_zero_validation_loss": result.round_zero_validation_loss,
             "refinement_stopped_reason": result.stopped_reason,
             "refinement_rounds": round_rows,
             "training_donors": all_training_donors,
@@ -2346,6 +2350,8 @@ def command_refine(args: argparse.Namespace) -> int:
     atomic_json_dump(
         {
             "rounds": round_rows,
+            "round_zero_validation_loss": result.round_zero_validation_loss,
+            "selected_round": result.selected_round,
             "stopped_reason": result.stopped_reason,
             "prototype_artifacts": prototype_outputs,
         },
@@ -2356,6 +2362,8 @@ def command_refine(args: argparse.Namespace) -> int:
             "checkpoint": str(checkpoint_path),
             "audit": str(audit_path),
             "rounds": len(result.rounds),
+            "round_zero_validation_loss": result.round_zero_validation_loss,
+            "selected_round": result.selected_round,
             "stopped_reason": result.stopped_reason,
             "prototype_artifacts": prototype_outputs,
         }
@@ -3218,6 +3226,18 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--dropout", type=float, default=0.1)
     train.add_argument("--hard-type-routing", action="store_true")
     train.add_argument("--abstain-threshold", type=float, default=0.60)
+    train.add_argument(
+        "--residual-rank",
+        type=int,
+        default=0,
+        help="low-rank residual width (default: min(4, latent dimension))",
+    )
+    train.add_argument(
+        "--residual-max-norm",
+        type=float,
+        default=0.5,
+        help="hard upper bound on each morphology residual's latent L2 norm",
+    )
     train.add_argument("--allow-negative-expression", action="store_true")
     train.add_argument("--rna-vae-checkpoint")
     train.add_argument("--initial-heir-checkpoint")
@@ -3251,13 +3271,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="DONOR::SAMPLE::BAG=NPZ with nucleus_ids and view_predictions",
     )
     refine.add_argument("--rna-vae-checkpoint")
-    refine.add_argument("--maximum-rounds", type=int, default=3)
-    refine.add_argument("--broad-refinement-rounds", type=int, default=1)
+    refine.add_argument(
+        "--maximum-rounds",
+        type=int,
+        default=4,
+        help="maximum candidates; default leaves two parent-gated and two fine rounds",
+    )
+    refine.add_argument(
+        "--broad-refinement-rounds",
+        type=int,
+        default=2,
+        help="parent-gated rounds; use 0 for fine-only or at least 2 for anchor trust",
+    )
     refine.add_argument("--epochs-per-round", type=int, default=25)
     refine.add_argument("--min-probability", type=float, default=0.90)
     refine.add_argument("--max-normalized-entropy", type=float, default=0.20)
     refine.add_argument("--teacher-ema", type=float, default=0.99)
-    refine.add_argument("--prior-old-weight", type=float, default=0.80)
+    refine.add_argument(
+        "--prior-old-weight",
+        type=float,
+        default=1.0,
+        help="measured-prior weight (default 1.0 fixes it; lower values are sensitivities)",
+    )
     refine.add_argument("--minimum-segmentation-confidence", type=float, default=0.50)
     refine.add_argument("--maximum-prior-total-variation", type=float, default=0.10)
     refine.add_argument("--max-anchors-per-class", type=int, default=10000)

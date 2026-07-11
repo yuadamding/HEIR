@@ -423,10 +423,18 @@ class HEIRCompositeLoss(nn.Module):
                 eps,
             )
         residual_mu = _get(output, "residual_mu")
-        if residual_mu is not None and residual_logvar is not None and self.config.latent_kl_weight:
+        residual_coefficient_mu = _get(output, "residual_coefficients")
+        residual_coefficient_logvar = _get(output, "residual_coefficient_logvar")
+        if (residual_coefficient_mu is None) != (residual_coefficient_logvar is None):
+            raise ValueError("restricted residual coefficient posterior is incomplete")
+        kl_mu = residual_mu if residual_coefficient_mu is None else residual_coefficient_mu
+        kl_logvar = (
+            residual_logvar if residual_coefficient_logvar is None else residual_coefficient_logvar
+        )
+        if kl_mu is not None and kl_logvar is not None and self.config.latent_kl_weight:
             terms["latent_kl"] = residual_gaussian_kl_loss(
-                residual_mu,
-                residual_logvar,
+                kl_mu,
+                kl_logvar,
                 biological_weights,
                 eps,
             )

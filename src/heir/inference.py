@@ -37,6 +37,8 @@ class PredictionBundle:
     abstain: np.ndarray
     ood_score: np.ndarray
     refinement_round: int
+    expression_interval_semantics: str = ""
+    expression_interval_available: Optional[np.ndarray] = None
     sample_id: str = ""
     donor_id: str = ""
     slide_id: str = ""
@@ -60,7 +62,11 @@ class PredictionBundle:
     expression_space_id: str = ""
 
     CONTRACT: ClassVar[str] = "heir.prediction_bundle"
-    CONTRACT_VERSION: ClassVar[int] = 6
+    CONTRACT_VERSION: ClassVar[int] = 7
+    CONDITIONAL_KNOWN_STATE: ClassVar[str] = "conditional_on_measured_known_state"
+    LEGACY_CONDITIONAL_KNOWN_STATE: ClassVar[str] = (
+        "legacy_conditional_on_measured_known_state_unsuppressed"
+    )
     CORE_FIELDS: ClassVar[frozenset] = frozenset(
         {
             "nucleus_ids",
@@ -168,16 +174,57 @@ class PredictionBundle:
             raise ValueError("latent variance must be non-negative")
 
         gene_names = self._names(self.gene_names, "gene_names")
-        expression_mean = self._finite(self.expression_mean, "expression_mean")
-        expression_lower = self._finite(self.expression_lower, "expression_lower")
-        expression_upper = self._finite(self.expression_upper, "expression_upper")
+        expression_mean = np.asarray(self.expression_mean)
+        expression_lower = np.asarray(self.expression_lower)
+        expression_upper = np.asarray(self.expression_upper)
+        for name, values in (
+            ("expression_mean", expression_mean),
+            ("expression_lower", expression_lower),
+            ("expression_upper", expression_upper),
+        ):
+            if not np.issubdtype(values.dtype, np.number):
+                raise ValueError("%s must be numeric" % name)
         if expression_mean.ndim != 2 or expression_mean.shape[1] != len(gene_names):
             raise ValueError("gene names do not match expression outputs")
         if expression_lower.shape != expression_mean.shape or expression_upper.shape != (
             expression_mean.shape
         ):
             raise ValueError("expression means and intervals must have identical shapes")
-        if np.any(expression_lower > expression_upper):
+        if self.expression_interval_semantics not in {
+            "",
+            self.CONDITIONAL_KNOWN_STATE,
+            self.LEGACY_CONDITIONAL_KNOWN_STATE,
+        }:
+            raise ValueError("expression interval semantics are unsupported")
+        if self.expression_interval_available is None:
+            available = np.ones(count, dtype=bool)
+            for name, values in (
+                ("expression_mean", expression_mean),
+                ("expression_lower", expression_lower),
+                ("expression_upper", expression_upper),
+            ):
+                if not np.isfinite(values).all():
+                    raise ValueError("%s must be finite" % name)
+        else:
+            available = np.asarray(self.expression_interval_available)
+            if available.shape != (count,) or available.dtype != bool:
+                raise ValueError("expression_interval_available must be a boolean nuclei vector")
+            if self.expression_interval_semantics != self.CONDITIONAL_KNOWN_STATE:
+                raise ValueError("expression availability requires conditional interval semantics")
+            unavailable = ~available
+            if not np.isfinite(expression_mean).all():
+                raise ValueError("expression_mean must remain finite for internal aggregation")
+            for name, values in (
+                ("expression_lower", expression_lower),
+                ("expression_upper", expression_upper),
+            ):
+                if not np.isfinite(values[available]).all():
+                    raise ValueError("available %s values must be finite" % name)
+                if unavailable.any() and not np.isnan(values[unavailable]).all():
+                    raise ValueError("unavailable %s values must be suppressed" % name)
+            if np.any(available & np.asarray(self.abstain, dtype=bool)):
+                raise ValueError("abstained cells cannot expose conditional expression")
+        if np.any(expression_lower[available] > expression_upper[available]):
             raise ValueError("expression interval bounds are inverted")
 
         for name in ("unknown_probability", "abstain_score"):
@@ -262,9 +309,13 @@ class PredictionBundle:
         if self.program_scores is not None:
             assert self.program_names is not None
             program_names = self._names(self.program_names, "program_names")
-            scores = self._finite(self.program_scores, "program_scores")
+            scores = np.asarray(self.program_scores)
+            if not np.issubdtype(scores.dtype, np.number):
+                raise ValueError("program_scores must be numeric")
             if scores.shape != (count, len(program_names)):
                 raise ValueError("program scores have the wrong shape")
+            if not np.isfinite(scores).all():
+                raise ValueError("program_scores must be finite")
             if self.program_training_donors is not None:
                 self._names(self.program_training_donors, "program_training_donors")
             if require_provenance and not allow_legacy_provenance:
@@ -319,7 +370,7 @@ class PredictionBundle:
                 raise ValueError("%s must be a lowercase SHA-256 digest" % name)
 
     def to_npz(self, path: Union[str, Path]) -> None:
-        """Atomically write the strict v6 prediction artifact."""
+        """Atomically write the strict v7 prediction artifact."""
 
         self.validate(require_provenance=True)
         assert self.inference_seed is not None
@@ -328,6 +379,16 @@ class PredictionBundle:
         assert self.artifact_threshold is not None
         destination = Path(path).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
+        expression_available = (
+            ~np.asarray(self.abstain, dtype=bool)
+            if self.expression_interval_available is None
+            else np.asarray(self.expression_interval_available, dtype=bool)
+        )
+        expression_mean = np.asarray(self.expression_mean, dtype=np.float32).copy()
+        expression_lower = np.asarray(self.expression_lower, dtype=np.float32).copy()
+        expression_upper = np.asarray(self.expression_upper, dtype=np.float32).copy()
+        expression_lower[~expression_available] = np.nan
+        expression_upper[~expression_available] = np.nan
         payload: Dict[str, np.ndarray] = dict(
             __contract__=np.asarray(self.CONTRACT, dtype=np.dtype("U")),
             __version__=np.asarray(self.CONTRACT_VERSION, dtype=np.int64),
@@ -340,9 +401,14 @@ class PredictionBundle:
             prototype_ids=self.prototype_ids.astype(np.str_),
             latent_mean=self.latent_mean.astype(np.float32),
             latent_variance=self.latent_variance.astype(np.float32),
-            expression_mean=self.expression_mean.astype(np.float32),
-            expression_lower=self.expression_lower.astype(np.float32),
-            expression_upper=self.expression_upper.astype(np.float32),
+            expression_mean=expression_mean,
+            expression_lower=expression_lower,
+            expression_upper=expression_upper,
+            expression_interval_semantics=np.asarray(
+                self.CONDITIONAL_KNOWN_STATE,
+                dtype=np.dtype("U"),
+            ),
+            expression_interval_available=expression_available,
             gene_names=self.gene_names.astype(np.str_),
             unknown_probability=self.unknown_probability.astype(np.float32),
             abstain_score=self.abstain_score.astype(np.float32),
@@ -407,11 +473,11 @@ class PredictionBundle:
 
     @classmethod
     def from_npz(cls, path: Union[str, Path]) -> "PredictionBundle":
-        """Load v2-v6 or migrate the original unversioned schema in memory.
+        """Load v2-v7 or migrate the original unversioned schema in memory.
 
         Legacy artifacts receive empty provenance and optional outputs. Saving
         that object again therefore requires callers to populate provenance
-        explicitly; legacy data are never silently presented as audited v6.
+        explicitly; legacy data are never silently presented as audited v7.
         """
 
         with np.load(path, allow_pickle=False) as values:
@@ -429,7 +495,7 @@ class PredictionBundle:
                 version = int(np.asarray(values["__version__"]).item())
                 if contract != cls.CONTRACT:
                     raise ValueError("artifact is not a HEIR PredictionBundle")
-                if version not in {2, 3, 4, 5, cls.CONTRACT_VERSION}:
+                if version not in {2, 3, 4, 5, 6, cls.CONTRACT_VERSION}:
                     raise ValueError("unsupported PredictionBundle version %d" % version)
                 required_versioned = {
                     "sample_id",
@@ -463,6 +529,13 @@ class PredictionBundle:
                     )
                 if version >= 6:
                     required_versioned.add("expression_space_id")
+                if version >= 7:
+                    required_versioned.update(
+                        {
+                            "expression_interval_semantics",
+                            "expression_interval_available",
+                        }
+                    )
                 missing = sorted(required_versioned - set(values.files))
                 if missing:
                     raise ValueError(
@@ -487,6 +560,27 @@ class PredictionBundle:
             else:
                 has_parent = False
                 has_programs = False
+            abstain = np.array(values["abstain"], copy=True)
+            expression_mean = np.array(values["expression_mean"], copy=True)
+            expression_lower = np.array(values["expression_lower"], copy=True)
+            expression_upper = np.array(values["expression_upper"], copy=True)
+            program_scores = np.array(values["program_scores"], copy=True) if has_programs else None
+            if versioned and version >= 7:
+                expression_interval_semantics = str(
+                    np.asarray(values["expression_interval_semantics"]).item()
+                )
+                expression_available = np.array(
+                    values["expression_interval_available"],
+                    copy=True,
+                )
+            else:
+                # v2-v6 used the conditional-known-state sampler without an
+                # availability mask. Preserve those immutable arrays exactly
+                # for historical revalidation while labeling their weaker,
+                # unsuppressed semantics explicitly in memory. Re-saving them
+                # as v7 applies the current fail-closed mask in ``to_npz``.
+                expression_interval_semantics = cls.LEGACY_CONDITIONAL_KNOWN_STATE
+                expression_available = None
             result = cls(
                 nucleus_ids=np.array(values["nucleus_ids"], copy=True),
                 coordinates_um=np.array(values["coordinates_um"], copy=True),
@@ -497,15 +591,17 @@ class PredictionBundle:
                 prototype_ids=np.array(values["prototype_ids"], copy=True),
                 latent_mean=np.array(values["latent_mean"], copy=True),
                 latent_variance=np.array(values["latent_variance"], copy=True),
-                expression_mean=np.array(values["expression_mean"], copy=True),
-                expression_lower=np.array(values["expression_lower"], copy=True),
-                expression_upper=np.array(values["expression_upper"], copy=True),
+                expression_mean=expression_mean,
+                expression_lower=expression_lower,
+                expression_upper=expression_upper,
                 gene_names=np.array(values["gene_names"], copy=True),
                 unknown_probability=np.array(values["unknown_probability"], copy=True),
                 abstain_score=np.array(values["abstain_score"], copy=True),
-                abstain=np.array(values["abstain"], copy=True),
+                abstain=abstain,
                 ood_score=np.array(values["ood_score"], copy=True),
                 refinement_round=int(np.asarray(values["refinement_round"]).item()),
+                expression_interval_semantics=expression_interval_semantics,
+                expression_interval_available=expression_available,
                 sample_id=(str(np.asarray(values["sample_id"]).item()) if versioned else ""),
                 donor_id=(str(np.asarray(values["donor_id"]).item()) if versioned else ""),
                 slide_id=(str(np.asarray(values["slide_id"]).item()) if versioned else ""),
@@ -567,9 +663,7 @@ class PredictionBundle:
                 parent_type_names=(
                     np.array(values["parent_type_names"], copy=True) if has_parent else None
                 ),
-                program_scores=(
-                    np.array(values["program_scores"], copy=True) if has_programs else None
-                ),
+                program_scores=program_scores,
                 program_names=(
                     np.array(values["program_names"], copy=True) if has_programs else None
                 ),
@@ -643,7 +737,9 @@ def predict_cells(
     outputs. Provenance kwargs become mandatory when the returned bundle is
     persisted with :meth:`PredictionBundle.to_npz`. ``inference_seed`` is
     recorded only; callers remain responsible for configuring their RNGs
-    before invoking this function.
+    before invoking this function. Molecular intervals are conditional on a
+    measured known state and are suppressed for every abstained cell; the
+    finite expression mean is retained only for internal aggregate scoring.
     """
 
     morphology = np.array(features, dtype=np.float32, copy=True)
@@ -783,7 +879,6 @@ def predict_cells(
     else:
         resolved_chunk_size = min(latent_samples, mc_chunk_size)
     latent_mu = deterministic.latent_mu
-    residual_std = torch.exp(0.5 * deterministic.residual_logvar)
     conditional = deterministic.conditional_prototype_probabilities.float()
     known_rows = conditional.sum(dim=-1) > torch.finfo(conditional.dtype).eps
     safe_conditional = conditional
@@ -792,14 +887,7 @@ def predict_cells(
         safe_conditional[~known_rows, 0] = 1.0
     for start in range(0, latent_samples, resolved_chunk_size):
         draws = min(resolved_chunk_size, latent_samples - start)
-        residual_noise = torch.randn(
-            (draws, latent_mu.shape[0], latent_mu.shape[1]),
-            device=target,
-            dtype=latent_mu.dtype,
-        )
-        residual_draws = deterministic.residual_mu.unsqueeze(0) + (
-            residual_noise * residual_std.unsqueeze(0)
-        )
+        residual_draws = model.sample_residuals(deterministic, draws)
         if conditional.shape[1]:
             sampled_indices = torch.multinomial(
                 safe_conditional,
@@ -877,6 +965,18 @@ def predict_cells(
 
     resolved_program_names = None
     program_scores = None
+    expression_available = ~decision.abstain
+    expression_mean = expression_stack.mean(axis=0)
+    expression_lower = np.quantile(expression_stack, 0.05, axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    expression_upper = np.quantile(expression_stack, 0.95, axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+    expression_lower[~expression_available] = np.nan
+    expression_upper[~expression_available] = np.nan
     if (program_matrix is None) != (program_names is None):
         raise ValueError("program_matrix and program_names must be supplied together")
     if program_matrix is not None:
@@ -889,7 +989,7 @@ def predict_cells(
         resolved_program_names = np.asarray([str(value) for value in program_names])
         if matrix.shape[1] != len(resolved_program_names):
             raise ValueError("program names do not match program_matrix")
-        program_scores = expression_stack.mean(axis=0).dot(matrix)
+        program_scores = expression_mean.dot(matrix)
     result = PredictionBundle(
         nucleus_ids=np.asarray([str(value) for value in nucleus_ids]),
         coordinates_um=coordinates,
@@ -900,15 +1000,17 @@ def predict_cells(
         prototype_ids=prototypes.prototype_ids,
         latent_mean=latent_stack.mean(axis=0),
         latent_variance=latent_stack.var(axis=0),
-        expression_mean=expression_stack.mean(axis=0),
-        expression_lower=np.quantile(expression_stack, 0.05, axis=0).astype(np.float32, copy=False),
-        expression_upper=np.quantile(expression_stack, 0.95, axis=0).astype(np.float32, copy=False),
+        expression_mean=expression_mean,
+        expression_lower=expression_lower,
+        expression_upper=expression_upper,
         gene_names=np.asarray(resolved_gene_names),
         unknown_probability=deterministic.unknown_probability.float().cpu().numpy(),
         abstain_score=deterministic.abstain_score.float().cpu().numpy(),
         abstain=decision.abstain,
         ood_score=ood_values,
         refinement_round=refinement_round,
+        expression_interval_semantics=PredictionBundle.CONDITIONAL_KNOWN_STATE,
+        expression_interval_available=expression_available,
         sample_id=resolved_sample_id,
         donor_id=str(donor_id),
         slide_id=str(slide_id),

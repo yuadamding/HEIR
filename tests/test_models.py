@@ -292,26 +292,68 @@ class HEIRModelTests(unittest.TestCase):
             1, types.unsqueeze(0).expand(len(morphology), -1)
         )
         expected = expected - model.config.prototype_type_cost_weight * compatibility.log()
-        expected_local_logits = (
-            -(
-                0.5
-                * (
-                    (output.latent_mu.unsqueeze(1) - means.unsqueeze(0)).square() / total_variance
-                    + total_variance.log()
-                ).mean(dim=-1)
-                / model.config.prototype_temperature
-            )
-            + compatibility.log()
-        )
         torch.testing.assert_close(output.prototype_query, output.latent_mu)
         torch.testing.assert_close(
             output.prototype_latent + output.residual_mu,
             output.latent_mu,
         )
-        torch.testing.assert_close(output.prototype_logits, expected_local_logits)
         torch.testing.assert_close(output.prototype_cost, expected)
-        torch.testing.assert_close(changed_legacy_query.prototype_cost, output.prototype_cost)
-        torch.testing.assert_close(changed_legacy_query.expression, output.expression)
+        self.assertFalse(
+            torch.allclose(changed_legacy_query.prototype_latent, output.prototype_latent)
+        )
+
+    def test_zero_initialized_restricted_residual_inherits_prototype_baseline(self) -> None:
+        model = HEIRModel(
+            small_config(
+                hard_type_routing=False,
+                residual_rank=2,
+                residual_max_norm=0.25,
+            )
+        ).eval()
+        output = model(
+            torch.randn(7, 6),
+            prototype_means=torch.randn(3, 4),
+            prototype_types=torch.tensor([0, 1, 2]),
+            sample_latent=False,
+        )
+
+        torch.testing.assert_close(output.residual_mu, torch.zeros_like(output.residual_mu))
+        torch.testing.assert_close(output.latent_mu, output.prototype_latent)
+        torch.testing.assert_close(
+            output.expression,
+            model.expression_decoder(output.prototype_latent),
+        )
+
+    def test_restricted_residual_has_bounded_norm_and_type_basis_rank(self) -> None:
+        rank = 2
+        maximum = 0.15
+        model = HEIRModel(
+            small_config(
+                hard_type_routing=False,
+                residual_rank=rank,
+                residual_max_norm=maximum,
+            )
+        ).eval()
+        assert model.residual_coefficient_head is not None
+        assert model.residual_gate_head is not None
+        with torch.no_grad():
+            model.fine_type_head.weight.zero_()
+            model.fine_type_head.bias.copy_(torch.tensor([20.0, -20.0, -20.0]))
+            model.residual_coefficient_head.weight.normal_()
+            model.residual_coefficient_head.bias.normal_()
+            model.residual_gate_head.weight.zero_()
+            model.residual_gate_head.bias.fill_(20.0)
+        output = model(
+            torch.randn(12, 6),
+            prototype_means=torch.randn(3, 4),
+            prototype_types=torch.tensor([0, 1, 2]),
+            sample_latent=False,
+        )
+
+        self.assertTrue(torch.all(output.residual_mu.norm(dim=-1) <= maximum + 1.0e-6))
+        self.assertLessEqual(int(torch.linalg.matrix_rank(output.residual_mu)), rank)
+        sampled = model.sample_residuals(output, draws=64)
+        self.assertTrue(torch.all(sampled.norm(dim=-1) <= maximum + 1.0e-6))
 
     def test_deterministic_inference_and_checkpoint_round_trip(self) -> None:
         model = HEIRModel(small_config()).eval()
@@ -357,6 +399,9 @@ class HEIRModelTests(unittest.TestCase):
             "prototype_variance_floor",
             "covariance_aware_uot",
             "legacy_independent_prototype_query",
+            "legacy_unrestricted_residual",
+            "residual_rank",
+            "residual_max_norm",
         ):
             checkpoint["config"].pop(key)
         restored = HEIRModel.from_checkpoint(checkpoint).eval()
@@ -382,6 +427,41 @@ class HEIRModelTests(unittest.TestCase):
             prototype_weights=weights,
             sample_latent=False,
         )
+        torch.testing.assert_close(observed.expression, expected.expression)
+        torch.testing.assert_close(observed.prototype_cost, expected.prototype_cost)
+
+    def test_v2_checkpoint_intentionally_preserves_tied_full_rank_residual(self) -> None:
+        legacy = HEIRModel(
+            small_config(
+                hard_type_routing=False,
+                legacy_unrestricted_residual=True,
+            )
+        ).eval()
+        morphology = torch.randn(5, 6)
+        means = torch.randn(3, 4)
+        types = torch.tensor([0, 1, 2])
+        expected = legacy(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            sample_latent=False,
+        )
+        checkpoint = legacy.checkpoint()
+        checkpoint["schema"] = "heir.model.v2"
+        for key in ("legacy_unrestricted_residual", "residual_rank", "residual_max_norm"):
+            checkpoint["config"].pop(key)
+
+        restored = HEIRModel.from_checkpoint(checkpoint).eval()
+        observed = restored(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            sample_latent=False,
+        )
+
+        self.assertTrue(restored.config.legacy_unrestricted_residual)
+        self.assertIsNotNone(restored.residual_mu_head)
+        torch.testing.assert_close(observed.latent_mu, expected.latent_mu)
         torch.testing.assert_close(observed.expression, expected.expression)
         torch.testing.assert_close(observed.prototype_cost, expected.prototype_cost)
 

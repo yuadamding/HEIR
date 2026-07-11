@@ -165,6 +165,64 @@ def test_uot_unknown_mass_is_sample_estimated_with_prior_shrinkage() -> None:
     torch.testing.assert_close(estimate, torch.tensor(0.3))
 
 
+def test_uot_unknown_mass_is_fixed_without_independent_targets_by_default() -> None:
+    trainer = _trainer()
+    trainer.uot_unknown_mass = 0.2
+    trainer.uot_unknown_prior_strength = 2.0
+    batch = _patch(3, "fixed-unknown-mass", 0.0)
+    with torch.no_grad():
+        trainer.model.unknown_head.weight.zero_()
+        trainer.model.unknown_head.bias.fill_(20.0)
+    output = trainer._forward_output(batch)
+
+    torch.testing.assert_close(
+        trainer._estimated_uot_unknown_mass(batch, output),
+        torch.tensor(0.2),
+    )
+    trainer.uot_unknown_mass_mode = "model_estimate"
+    assert trainer._estimated_uot_unknown_mass(batch, output) > 0.6
+
+
+def test_biological_weights_use_detached_uot_known_state_mass() -> None:
+    base = torch.tensor([2.0, 3.0], requires_grad=True)
+    responsibilities = torch.tensor(
+        [[0.2, 0.3], [0.0, 0.0]],
+        requires_grad=True,
+    )
+
+    weights = HEIRTrainer._uot_known_cell_weights(base, responsibilities)
+
+    torch.testing.assert_close(weights, torch.tensor([1.0, 0.0]))
+    weights.sum().backward()
+    torch.testing.assert_close(base.grad, torch.tensor([0.5, 0.0]))
+    assert responsibilities.grad is None
+
+
+def test_molecular_posterior_receives_base_weights_before_known_mass(
+    monkeypatch,
+) -> None:
+    trainer = _trainer()
+    responsibilities = torch.tensor([[0.2, 0.3], [0.05, 0.05]])
+    batch = replace(
+        _patch(2, "posterior-known-mass", 0.0),
+        cell_weights=torch.tensor([2.0, 3.0]),
+        molecular_responsibilities=responsibilities,
+    )
+    output = trainer._forward_output(batch)
+    captured = {}
+
+    def capture(output_value, batch_value, responsibility_value, cell_weights):
+        del batch_value
+        captured["weights"] = cell_weights.detach().clone()
+        zero = output_value.latent_mu.sum() * 0.0
+        return zero, {}
+
+    monkeypatch.setattr(trainer, "_molecular_posterior_loss", capture)
+    trainer._output_loss(output, batch)
+
+    torch.testing.assert_close(captured["weights"], torch.tensor([2.0, 3.0]))
+
+
 def test_uot_responsibilities_preserve_dustbin_row_mass() -> None:
     trainer = _trainer()
     trainer.uot_unknown_prior_strength = 0.01

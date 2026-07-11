@@ -13,4 +13,7 @@ prototype_temperature: 0.5
 hard_type_routing: false
 abstain_threshold: 0.60
 nonnegative_expression: true
+legacy_unrestricted_residual: false
+residual_rank: 4
+residual_max_norm: 0.5
 scgpt_embedding_dim: 512

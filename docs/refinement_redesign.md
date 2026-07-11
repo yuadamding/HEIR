@@ -8,12 +8,17 @@ The current development refiner addresses the code-level audit findings:
 
 - UOT cost is evaluated on the same latent mean decoded into expression and
   uses image plus prototype diagonal covariance.
-- The legacy independent prototype-query module remains loadable for checkpoint
-  compatibility but is not used by new routing unless explicitly requested.
+- New v3 checkpoints may use a learned local query to form candidate prototype
+  probabilities, but the UOT cost is recomputed on the final decoded latent.
+  Legacy v1/v2 query and unrestricted-residual behaviors remain loadable only for
+  exact checkpoint compatibility.
 - Known prototype probabilities are normalized conditional on not-unknown, so
   unknown confidence cannot shrink the molecular latent toward zero.
-- Sample dustbin mass uses calibrated unknown targets or detached predictions
-  with Beta-style prior shrinkage instead of an unconditional fixed 5% target.
+- Sample dustbin mass is prespecified and fixed by default (0.05, to be
+  calibrated only on development data) or derived from explicit
+  `unknown_targets`. Detached model-estimated mass is available only as an explicit
+  sensitivity because it otherwise feeds the unknown head back into its own UOT
+  target.
 - UOT uses a numerical convergence tolerance with a bounded iteration budget;
   a nonconverged molecular E-step is rejected rather than silently reused.
 - The EMA teacher's UOT plan is detached and normalized by complete row mass,
@@ -24,14 +29,28 @@ The current development refiner addresses the code-level audit findings:
 - Anchors are provisional for one round, trusted after two agreeing rounds,
   challenged by contradictory evidence, relabelled after two contradictory
   rounds, and revoked by technical/model rejection.
-- A degraded round restores the best student, EMA teacher, prototype prior, and
-  anchor lifecycle immediately; the failed student never updates the EMA.
-- Broad rounds apply parent-derived constraints to molecular transport before
-  fine-state rounds.
-- Biological aggregate losses and spot aggregation are weighted by known-state
-  probability. Spot aggregation accepts external RNA-mass weights.
+- Round 0 is evaluated and snapshotted before the first candidate. A first or
+  later candidate beyond the configured validation-loss tolerance restores the
+  best student, EMA teacher, prototype prior,
+  training batches, and anchor lifecycle immediately; the failed student never
+  updates the EMA.
+- The default schedule uses two parent-gated rounds (enough to establish trusted
+  parent anchors) and then two fine rounds (enough to establish trusted fine
+  anchors). Broad rounds train only the parent head and cannot update
+  fine-prototype priors or terminate refinement
+  before the fine phase.
+- Measured prototype priors are fixed by default. Lower measured-prior weights
+  are explicitly sensitivity analyses.
+- Biological aggregate losses are weighted by detached transported known-state
+  row mass. Spot aggregation accepts external RNA-mass weights.
+- New checkpoints replace the algebraically cancelling unrestricted residual
+  with a zero-initialized type-conditioned low-rank correction. A smooth
+  unit-ball projection and sigmoid gate hard-bound deterministic and sampled
+  latent corrections.
 - Inference intervals sample prototype assignment, prototype covariance, and
-  residual uncertainty rather than the residual Gaussian alone.
+  coefficient-space residual uncertainty. They are explicitly conditional on a
+  measured known state and are suppressed for abstained cells; finite means are
+  retained only for aggregate internal scoring.
 - scVI panel output preserves the full-library 10,000 normalization and applies
   only `log1p`; corrected exports carry an explicit v2 normalization contract.
 
@@ -62,6 +81,8 @@ This refactor does not supply missing biological evidence. A publishable result
 still requires a disjoint generic H&E-to-molecular initializer, donor-held-out
 scVI/scANVI validation, at least three development seeds, cell-resolution or
 reliably registered spatial truth, a matched-refined versus matched-one-pass
-contrast, and a new untouched final cohort. The simple mean-aggregation graph,
-free residual width, technical OOD semantics, and learned RNA-mass calibration
+contrast, and a new untouched final cohort. The broad E-step still gates a fine
+prototype bank rather than transporting against moment-matched parent
+Gaussians. The simple mean-aggregation graph, calibrated segmentation/OOD
+semantics, biological RNA-mass calibration, and parameter-ensemble uncertainty
 also remain development targets.

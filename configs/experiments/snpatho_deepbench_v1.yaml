@@ -79,7 +79,8 @@ optimization:
   maximum_sample_cells: 16384
 
 refinement:
-  maximum_rounds: 3
+  maximum_rounds: 4
+  broad_refinement_rounds: 2
   e_step: detached_uot_responsibilities
   teacher_ema: 0.99
   minimum_probability: 0.90
@@ -95,7 +96,8 @@ randomness:
   ablation_seeds: [17, 41, 89]
 
 evaluation:
-  primary_baseline: matched_type_mean
+  primary_baseline: matched_ffpe_r1_soft_type_mean
+  primary_baseline_sensitivity: matched_ffpe_r1_hard_type_mean
   primary_endpoint: paired_median_gene_spearman_delta
   primary_spot_minimum_nuclei: 3
   constant_prediction_correlation: zero
@@ -106,7 +108,7 @@ evaluation:
     - gene_mse
     - gene_mae
     - gene_concordance
-    - hotspot_auroc
+    - expression_detection_auroc
     - hotspot_dice
     - hotspot_jaccard
     - location_cosine
@@ -116,6 +118,7 @@ evaluation:
 
 statistics:
   bootstrap_iterations: 10000
+  final_cell_record_shuffle_permutations: 100
   spatial_block_um: 750
   per_gene_fdr: benjamini_hochberg
   specimen_macro_weighting: equal
@@ -130,6 +133,7 @@ controls:
   no_refinement: true
   no_unknown: true
   no_graph: true
+  prototype_only_no_residual: true
   state_omission: true
   reference_downsampling: [1000, 2500, 5000, all]
 
@@ -139,6 +143,9 @@ execution:
   frozen_historical_report: ../../artifacts/snpatho/orchestration_v0_2/benchmark.all.json
   frozen_historical_report_sha256: d002e601ffc0f1b69d141d507906f839815d305af9055780b38ff72bb4c12d65
   optional_artifacts:
+    primary_ffpe_snpatho_reference_manifest:
+      path: ../../reports/snpatho_r1_reference_manifest.json
+      sha256: aea4040a6e0e758b491fa4609c0734e6093bfe0277ce00946f090e067134c9b1
     refined_predictions: null
     five_seed_predictions: null
     alternative_workflow_references: null
