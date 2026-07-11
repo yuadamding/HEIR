@@ -252,6 +252,54 @@ class BiologicalLossTests(unittest.TestCase):
 
 
 class CompositeLossTests(unittest.TestCase):
+    def test_type_conditioned_biology_uses_detached_molecular_responsibilities(self) -> None:
+        live_probabilities = torch.tensor(
+            [[0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],
+            requires_grad=True,
+        )
+        molecular_types = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            requires_grad=True,
+        )
+        expression = torch.tensor(
+            [[2.0, 0.0], [1.0, 0.0], [0.0, 2.0], [0.0, 1.0]],
+            requires_grad=True,
+        )
+        output = {
+            "type_probabilities": live_probabilities,
+            "expression": expression,
+            "latent": torch.zeros(4, 2, requires_grad=True),
+        }
+        criterion = HEIRCompositeLoss(
+            HEIRLossConfig(
+                cell_type_weight=0.0,
+                uot_weight=0.0,
+                program_weight=1.0,
+                marker_weight=0.0,
+                pseudobulk_weight=0.0,
+                composition_weight=0.0,
+                cycle_weight=0.0,
+                residual_weight=0.0,
+                latent_kl_weight=0.0,
+                graph_weight=0.0,
+                calibration_weight=0.0,
+                hierarchy_weight=0.0,
+                scgpt_weight=0.0,
+            )
+        )
+        total, logs = criterion(
+            output,
+            molecular_type_responsibilities=molecular_types,
+            program_matrix=torch.eye(2),
+            target_program_scores=torch.tensor([[1.5, 0.0], [0.0, 1.5]]),
+        )
+
+        self.assertLess(float(logs["program"].detach()), 1.0e-7)
+        total.backward()
+        self.assertIsNotNone(live_probabilities.grad)
+        self.assertTrue(torch.equal(live_probabilities.grad, torch.zeros_like(live_probabilities)))
+        self.assertIsNone(molecular_types.grad)
+
     def test_composite_logs_and_backpropagates(self) -> None:
         torch.manual_seed(31)
         config = HEIRConfig(

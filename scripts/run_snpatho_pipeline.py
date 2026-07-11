@@ -403,6 +403,7 @@ class Settings:
         artifact_root: Optional[Path],
         panel_override: Optional[Path],
         spaceranger_override: Optional[Path],
+        omiclip_checkpoint_override: Optional[Path],
     ) -> "Settings":
         with config_path.open("r", encoding="utf-8") as handle:
             raw = yaml.safe_load(handle)
@@ -473,6 +474,20 @@ class Settings:
         if not isinstance(mpp_raw, Mapping):
             raise PipelineError("physical calibration must be a sample mapping")
         mpp = {str(key): float(value) for key, value in mpp_raw.items()}
+        checkpoint_environment = os.environ.get("HEIR_OMICLIP_CHECKPOINT", "").strip()
+        pretrained_root = os.environ.get("HEIR_PRETRAINED_DIR", "").strip()
+        if omiclip_checkpoint_override is not None:
+            omiclip_checkpoint = omiclip_checkpoint_override.expanduser().resolve()
+        elif checkpoint_environment:
+            omiclip_checkpoint = Path(checkpoint_environment).expanduser().resolve()
+        elif pretrained_root:
+            omiclip_checkpoint = (
+                Path(pretrained_root).expanduser() / "omiclip_loki" / "checkpoint.pt"
+            ).resolve()
+        else:
+            omiclip_checkpoint = _resolve_path(
+                config_path, _nested(raw, "pathology_features", "checkpoint")
+            )
         return cls(
             repository=repository,
             config_path=config_path,
@@ -485,9 +500,7 @@ class Settings:
                 else (repository / "artifacts" / "snpatho").resolve()
             ),
             spaceranger=spaceranger,
-            omiclip_checkpoint=_resolve_path(
-                config_path, _nested(raw, "pathology_features", "checkpoint")
-            ),
+            omiclip_checkpoint=omiclip_checkpoint,
             omiclip_checkpoint_sha256=str(
                 _nested(raw, "pathology_features", "checkpoint_sha256", default="")
             ),
@@ -2651,6 +2664,14 @@ def _parser(repository: Path) -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", type=Path)
     parser.add_argument("--spaceranger", type=Path)
     parser.add_argument(
+        "--omiclip-checkpoint",
+        type=Path,
+        help=(
+            "external pretrained visual checkpoint; overrides HEIR_OMICLIP_CHECKPOINT, "
+            "HEIR_PRETRAINED_DIR, and the frozen config path"
+        ),
+    )
+    parser.add_argument(
         "--execute",
         action="store_true",
         help="run missing stages; without this flag only a dry-run plan is emitted",
@@ -2673,6 +2694,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         artifact_root=args.artifact_root,
         panel_override=args.gene_panel,
         spaceranger_override=args.spaceranger,
+        omiclip_checkpoint_override=args.omiclip_checkpoint,
     )
     requested = args.sample or ["all"]
     selected = SAMPLES if "all" in requested else tuple(dict.fromkeys(requested))

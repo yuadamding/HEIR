@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass, fields, replace
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
@@ -10,7 +10,12 @@ from torch.nn import functional as F
 
 from ..config import LossWeightConfig, OptimizationConfig
 from ..expression import EXPRESSION_MAX, EXPRESSION_SPACE_ID
-from ..losses import HEIRCompositeLoss, HEIRLossConfig
+from ..losses import (
+    HEIRCompositeLoss,
+    HEIRLossConfig,
+    UnbalancedSinkhornResult,
+    unbalanced_sinkhorn,
+)
 from ..models.heir import HEIRModel, HEIROutput
 from ..models.rna import RNAVAE
 from ..utils import resolve_device, set_seed
@@ -30,8 +35,14 @@ def aggregate_to_spots(
     assignment: Tensor,
     eps: float = 1e-8,
     expression_space_id: str = EXPRESSION_SPACE_ID,
+    cell_rna_mass: Optional[Tensor] = None,
 ) -> Tensor:
-    """Aggregate cell log1p-CPM in linear space and return spot log1p-CPM."""
+    """Aggregate cell log1p-CPM in linear space and return spot log1p-CPM.
+
+    ``cell_rna_mass`` may combine known-state probability, fractional cell
+    overlap, and an externally calibrated type/state RNA-mass estimate. Equal
+    cell mass remains the backward-compatible default.
+    """
 
     if expression.ndim != 2 or assignment.ndim != 2 or assignment.shape[1] != expression.shape[0]:
         raise ValueError("expression or spot assignment has the wrong shape")
@@ -41,9 +52,20 @@ def aggregate_to_spots(
         raise ValueError("unsupported expression space for spot aggregation")
     if not torch.isfinite(expression).all() or bool((expression < 0).any()):
         raise ValueError("log1p-CPM expression must be finite and non-negative")
-    mass = assignment.sum(dim=1, keepdim=True)
+    weighted_assignment = assignment
+    if cell_rna_mass is not None:
+        if cell_rna_mass.shape != (expression.shape[0],):
+            raise ValueError("cell_rna_mass must contain one value per cell")
+        if (
+            not torch.is_floating_point(cell_rna_mass)
+            or not torch.isfinite(cell_rna_mass).all()
+            or bool((cell_rna_mass < 0).any())
+        ):
+            raise ValueError("cell_rna_mass must be finite and non-negative")
+        weighted_assignment = assignment * cell_rna_mass.to(assignment.dtype).unsqueeze(0)
+    mass = weighted_assignment.sum(dim=1, keepdim=True)
     linear = torch.expm1(expression.clamp_max(EXPRESSION_MAX))
-    spot_linear = assignment.matmul(linear) / mass.clamp_min(eps)
+    spot_linear = weighted_assignment.matmul(linear) / mass.clamp_min(eps)
     return torch.log1p(spot_linear)
 
 
@@ -68,6 +90,112 @@ class HEIRTrainer:
         dustbin_gate = -torch.log(probability)
         return prototype_cost + real_gate.unsqueeze(-1), dustbin_gate
 
+    def _anchor_constraints(self, batch: HEIRTrainingBatch) -> Optional[Tensor]:
+        """Translate accepted fine/parent anchors into prototype routing masks."""
+
+        cells = len(batch.morphology)
+        types = self.model.config.num_cell_types
+        constraints = batch.morphology.new_ones((cells, types))
+        constrained = torch.zeros(cells, dtype=torch.bool, device=batch.morphology.device)
+        parent_labels = batch.parent_anchor_labels
+        if parent_labels is not None:
+            mapping = self.model.config.fine_to_parent
+            if mapping is None:
+                raise ValueError("parent anchors require a hierarchical HEIR model")
+            valid = parent_labels >= 0
+            if batch.parent_anchor_weights is not None:
+                valid = valid & (batch.parent_anchor_weights > 0)
+            if bool(valid.any()):
+                fine_to_parent = torch.tensor(mapping, device=batch.morphology.device)
+                constraints[valid] = (
+                    fine_to_parent.unsqueeze(0) == parent_labels[valid].unsqueeze(1)
+                ).to(constraints.dtype)
+                constrained = constrained | valid
+        fine_labels = batch.anchor_labels
+        if fine_labels is not None:
+            valid = fine_labels >= 0
+            if batch.anchor_weights is not None:
+                valid = valid & (batch.anchor_weights > 0)
+            if bool(valid.any()):
+                constraints[valid] = F.one_hot(
+                    fine_labels[valid],
+                    num_classes=types,
+                ).to(constraints.dtype)
+                constrained = constrained | valid
+        return constraints if bool(constrained.any()) else None
+
+    def transport_responsibilities(
+        self,
+        batch: HEIRTrainingBatch,
+        output: Optional[HEIROutput] = None,
+    ) -> Tuple[Tensor, UnbalancedSinkhornResult]:
+        """Return detached known-state subprobabilities from the UOT plan.
+
+        Each row is normalized by its complete transported mass, including the
+        dustbin. Its sum therefore preserves the real-state responsibility and
+        can be below one for an unknown cell.
+        """
+
+        resolved = self._forward_output(batch) if output is None else output
+        real_cost, unknown_cost = self._bernoulli_uot_costs(
+            resolved.prototype_cost,
+            resolved.unknown_probability,
+        )
+        result = unbalanced_sinkhorn(
+            real_cost,
+            batch.cell_weights,
+            batch.prototype_weights,
+            target_mask=batch.prototype_mask,
+            pair_mask=resolved.prototype_mask,
+            epsilon=self.uot_epsilon,
+            marginal_relaxation=self.uot_relaxation,
+            iterations=self.uot_iterations,
+            convergence_tolerance=self.uot_convergence_tolerance,
+            unknown_mass=self._estimated_uot_unknown_mass(batch, resolved),
+            unknown_cost=unknown_cost,
+        )
+        if (
+            self.uot_convergence_tolerance is not None
+            and result.converged is not None
+            and not bool(result.converged.all())
+        ):
+            raise FloatingPointError("molecular E-step UOT did not converge")
+        real_plan = result.plan[..., : real_cost.shape[-1]]
+        row_mass = result.plan.sum(dim=-1, keepdim=True)
+        responsibilities = torch.where(
+            row_mass > torch.finfo(real_plan.dtype).eps,
+            real_plan / row_mass.clamp_min(torch.finfo(real_plan.dtype).eps),
+            torch.zeros_like(real_plan),
+        )
+        return responsibilities.detach(), result
+
+    def _estimated_uot_unknown_mass(
+        self,
+        batch: HEIRTrainingBatch,
+        output: HEIROutput,
+    ) -> Tensor:
+        """Estimate sample dustbin mass with a Beta-style prior shrinkage."""
+
+        observations = (
+            output.unknown_probability.detach()
+            if batch.unknown_targets is None
+            else batch.unknown_targets.detach().to(output.unknown_probability.dtype)
+        )
+        weights = (
+            torch.ones_like(observations)
+            if batch.cell_weights is None
+            else batch.cell_weights.to(observations.dtype)
+        )
+        observed_mass = (observations * weights).sum()
+        effective_cells = weights.sum()
+        numerator = self.uot_unknown_prior_strength * self.uot_unknown_mass + observed_mass
+        denominator = self.uot_unknown_prior_strength + effective_cells
+        estimate = numerator / denominator.clamp_min(torch.finfo(observations.dtype).eps)
+        return estimate.clamp(
+            min=0.0,
+            max=1.0 - torch.finfo(observations.dtype).eps,
+        )
+
     def __init__(
         self,
         model: HEIRModel,
@@ -77,7 +205,10 @@ class HEIRTrainer:
         rna_encoder: Optional[RNAVAE] = None,
         uot_epsilon: float = 0.1,
         uot_relaxation: float = 1.0,
+        uot_iterations: int = 160,
+        uot_convergence_tolerance: Optional[float] = 1.0e-5,
         uot_unknown_mass: float = 0.05,
+        uot_unknown_prior_strength: float = 2.0,
         seed: int = 17,
         device: str = "auto",
         allow_split_overlap: bool = False,
@@ -90,6 +221,16 @@ class HEIRTrainer:
             raise ValueError("HEIRTrainer supports pretraining, personalized, or refinement stages")
         optimization.validate()
         loss_weights.validate()
+        if not 0.0 <= uot_unknown_mass < 1.0:
+            raise ValueError("uot_unknown_mass must lie in [0, 1)")
+        if uot_iterations <= 0:
+            raise ValueError("uot_iterations must be positive")
+        if uot_convergence_tolerance is not None and (
+            not math.isfinite(uot_convergence_tolerance) or uot_convergence_tolerance <= 0
+        ):
+            raise ValueError("uot_convergence_tolerance must be finite and positive")
+        if not math.isfinite(uot_unknown_prior_strength) or uot_unknown_prior_strength <= 0:
+            raise ValueError("uot_unknown_prior_strength must be finite and positive")
         self.model = model
         self.stage = stage
         self.optimization = optimization
@@ -97,13 +238,18 @@ class HEIRTrainer:
         self.rna_encoder = rna_encoder
         self.uot_epsilon = uot_epsilon
         self.uot_relaxation = uot_relaxation
+        self.uot_iterations = uot_iterations
+        self.uot_convergence_tolerance = uot_convergence_tolerance
         self.uot_unknown_mass = uot_unknown_mass
+        self.uot_unknown_prior_strength = uot_unknown_prior_strength
         self.criterion = HEIRCompositeLoss(
             HEIRLossConfig.from_experiment_weights(
                 loss_weights,
                 marker_weight=loss_weights.marker,
                 uot_epsilon=uot_epsilon,
                 uot_marginal_relaxation=uot_relaxation,
+                uot_iterations=uot_iterations,
+                uot_convergence_tolerance=uot_convergence_tolerance,
                 uot_unknown_mass=uot_unknown_mass,
                 pseudobulk_metric="smooth_l1",
                 program_metric="smooth_l1",
@@ -121,10 +267,96 @@ class HEIRTrainer:
             batch.edge_index,
             batch.edge_weight,
             prototype_means=batch.prototype_means,
+            prototype_variances=batch.prototype_variances,
             prototype_types=batch.prototype_types,
             prototype_weights=batch.prototype_weights,
             prototype_mask=batch.prototype_mask,
+            cell_type_constraints=self._anchor_constraints(batch),
         )
+
+    @staticmethod
+    def _molecular_posterior_loss(
+        output: HEIROutput,
+        batch: HEIRTrainingBatch,
+        responsibilities: Tensor,
+        cell_weights: Tensor,
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
+        """Detached UOT E-step targets for molecular routing, type, and latent mean."""
+
+        if responsibilities.shape != output.conditional_prototype_probabilities.shape:
+            raise ValueError("molecular responsibilities and prototype routing must align")
+        responsibilities = responsibilities.detach()
+        row_mass = responsibilities.sum(dim=1)
+        valid = row_mass > 1.0e-8
+        conditional = responsibilities / row_mass.unsqueeze(1).clamp_min(1.0e-8)
+        # The real-plan fraction is the molecular E-step's known-state mass.
+        # Dustbin-dominated cells therefore contribute proportionally less to
+        # every complete-data M-step term.
+        effective = cell_weights * row_mass
+        mass = effective.sum().clamp_min(1.0e-8)
+        if not bool(valid.any()):
+            zero = output.latent_mu.sum() * 0.0
+            return zero, {
+                "molecular_posterior/routing": zero,
+                "molecular_posterior/type": zero,
+                "molecular_posterior/latent": zero,
+            }
+
+        routing_per_cell = -(
+            conditional * output.conditional_prototype_probabilities.clamp_min(1.0e-8).log()
+        ).sum(dim=1)
+        routing = (routing_per_cell * effective).sum() / mass
+
+        type_targets = responsibilities.new_zeros(
+            (len(responsibilities), output.type_probabilities.shape[1])
+        )
+        type_targets = type_targets.index_add(
+            1,
+            batch.prototype_types,
+            conditional,
+        )
+        type_targets = type_targets / type_targets.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+        type_per_cell = -(type_targets * output.type_probabilities.clamp_min(1.0e-8).log()).sum(
+            dim=1
+        )
+        type_loss = (type_per_cell * effective).sum() / mass
+
+        total_variance = output.residual_logvar.exp().unsqueeze(1) + (
+            batch.prototype_variances.unsqueeze(0)
+        )
+        latent_nll = 0.5 * (
+            (output.latent_mu.unsqueeze(1) - batch.prototype_means.unsqueeze(0)).square()
+            / total_variance
+            + total_variance.log()
+        ).mean(dim=2)
+        latent_per_cell = (conditional * latent_nll).sum(dim=1)
+        latent_loss = (latent_per_cell * effective).sum() / mass
+        total = routing + type_loss + latent_loss
+        return total, {
+            "molecular_posterior/routing": routing,
+            "molecular_posterior/type": type_loss,
+            "molecular_posterior/latent": latent_loss,
+        }
+
+    @staticmethod
+    def _type_responsibilities(
+        responsibilities: Tensor,
+        prototype_types: Tensor,
+        num_types: int,
+    ) -> Tensor:
+        """Aggregate detached prototype responsibilities onto the type simplex."""
+
+        if responsibilities.ndim != 2:
+            raise ValueError("molecular responsibilities must be a matrix")
+        if prototype_types.shape != (responsibilities.shape[1],):
+            raise ValueError("prototype types must align to molecular responsibilities")
+        if prototype_types.dtype != torch.long or bool((prototype_types < 0).any()):
+            raise ValueError("molecular responsibilities require typed prototypes")
+        if prototype_types.numel() and int(prototype_types.max()) >= num_types:
+            raise ValueError("prototype types exceed the model ontology")
+        result = responsibilities.new_zeros((responsibilities.shape[0], num_types))
+        result = result.index_add(1, prototype_types, responsibilities.detach())
+        return result / result.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
 
     def _output_loss(
         self,
@@ -138,9 +370,28 @@ class HEIRTrainer:
             output.prototype_cost,
             output.unknown_probability,
         )
+        base_cell_weights = (
+            output.unknown_probability.new_ones(len(output.unknown_probability))
+            if batch.cell_weights is None
+            else batch.cell_weights
+        )
+        biological_cell_weights = base_cell_weights * (1.0 - output.unknown_probability.detach())
+        estimated_unknown_mass = self._estimated_uot_unknown_mass(batch, output)
+        precomputed_uot: Optional[UnbalancedSinkhornResult] = None
+        if batch.molecular_responsibilities is None:
+            responsibilities, precomputed_uot = self.transport_responsibilities(batch, output)
+        else:
+            responsibilities = batch.molecular_responsibilities.detach()
+        molecular_type_responsibilities = self._type_responsibilities(
+            responsibilities,
+            batch.prototype_types,
+            output.type_probabilities.shape[1],
+        )
         total, terms = self.criterion(
             output,
             cell_weights=batch.cell_weights,
+            biological_cell_weights=biological_cell_weights,
+            molecular_type_responsibilities=molecular_type_responsibilities,
             target_composition=batch.target_composition,
             uot_cost=uot_cost,
             uot_source_mass=batch.cell_weights,
@@ -148,13 +399,15 @@ class HEIRTrainer:
             uot_target_mask=batch.prototype_mask,
             uot_pair_mask=output.prototype_mask,
             uot_unknown_cost=uot_unknown_cost,
+            uot_unknown_mass=estimated_unknown_mass,
+            precomputed_uot=precomputed_uot,
             target_pseudobulk=batch.target_pseudobulk,
             program_matrix=batch.program_matrix,
             target_program_scores=batch.target_program_scores,
             marker_centroids=batch.marker_centroids,
             marker_mask=batch.marker_mask,
             residual_precision=batch.prototype_variances.reciprocal(),
-            residual_assignments=output.prototype_probabilities,
+            residual_assignments=responsibilities,
             cycle_latent=cycle_latent,
             edge_index=batch.edge_index,
             edge_weight=batch.edge_weight,
@@ -167,6 +420,16 @@ class HEIRTrainer:
             scgpt_type_prototypes=batch.scgpt_type_prototypes,
             scgpt_type_variances=batch.scgpt_type_variances,
         )
+        posterior, posterior_terms = self._molecular_posterior_loss(
+            output,
+            batch,
+            responsibilities,
+            biological_cell_weights,
+        )
+        terms.update(posterior_terms)
+        terms["molecular_posterior"] = posterior
+        terms["weighted/molecular_posterior"] = self.weights.molecular_posterior * posterior
+        total = total + terms["weighted/molecular_posterior"]
         domain = output.expression.sum() * 0.0
         if batch.domain_labels is not None:
             if output.domain_logits is None:
@@ -185,6 +448,7 @@ class HEIRTrainer:
                 output.expression,
                 batch.spot_assignment,
                 expression_space_id=batch.expression_space_id,
+                cell_rna_mass=biological_cell_weights,
             )
             finite = torch.isfinite(batch.target_spatial_expression)
             terms["spatial"] = (
@@ -210,7 +474,7 @@ class HEIRTrainer:
 
     @staticmethod
     def _concatenate_outputs(outputs: Sequence[HEIROutput]) -> HEIROutput:
-        values = {}
+        values: Dict[str, Any] = {}
         for item in fields(HEIROutput):
             tensors = [getattr(output, item.name) for output in outputs]
             if all(value is None for value in tensors):
@@ -317,6 +581,17 @@ class HEIRTrainer:
             else torch.cat([value for value in unknown_values if value is not None])
         )
 
+        responsibility_values = [batch.molecular_responsibilities for batch in batches]
+        if any(value is None for value in responsibility_values) and not all(
+            value is None for value in responsibility_values
+        ):
+            raise ValueError("molecular responsibilities must cover every sample bag")
+        molecular_responsibilities = (
+            None
+            if all(value is None for value in responsibility_values)
+            else torch.cat([value for value in responsibility_values if value is not None], dim=0)
+        )
+
         spot_values = [batch.spot_assignment for batch in batches]
         if any(value is None for value in spot_values) and not all(
             value is None for value in spot_values
@@ -403,6 +678,7 @@ class HEIRTrainer:
             ),
             parent_anchor_weights=concatenate_optional("parent_anchor_weights", 0.0),
             unknown_targets=unknown_targets,
+            molecular_responsibilities=molecular_responsibilities,
             domain_labels=concatenate_optional("domain_labels", -100, dtype=torch.long),
             segmentation_confidence=concatenate_optional("segmentation_confidence", 1.0),
             ood_mask=concatenate_optional("ood_mask", 0, dtype=torch.bool),

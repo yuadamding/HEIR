@@ -1,6 +1,13 @@
-"""Confidence-gated pseudo-label selection with explicit rejection reasons."""
+"""Confidence-gated, revocable pseudo-label anchors.
+
+Anchor selection is deliberately stateless.  :func:`update_anchor_lifecycle`
+adds the state transition policy used by iterative refinement: a new anchor is
+provisional, becomes trusted only after a second agreeing round, and can be
+challenged, relabelled, or revoked as the evidence changes.
+"""
 
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Optional
 
 import numpy as np
@@ -22,6 +29,224 @@ class AnchorSelection:
     @property
     def indices(self) -> np.ndarray:
         return np.flatnonzero(self.accepted)
+
+
+class AnchorStatus(IntEnum):
+    """Lifecycle state for one pseudo-label anchor."""
+
+    UNASSIGNED = 0
+    PROVISIONAL = 1
+    TRUSTED = 2
+    CHALLENGED = 3
+    REVOKED = 4
+
+
+@dataclass(frozen=True)
+class AnchorLifecycle:
+    """Round-to-round anchor state with no permanently sticky confidence."""
+
+    status: np.ndarray
+    labels: np.ndarray
+    confidence: np.ndarray
+    agreement_rounds: np.ndarray
+    contradiction_labels: np.ndarray
+    contradiction_rounds: np.ndarray
+
+    @property
+    def accepted(self) -> np.ndarray:
+        return (self.status == AnchorStatus.PROVISIONAL) | (self.status == AnchorStatus.TRUSTED)
+
+    def copy(self) -> "AnchorLifecycle":
+        return AnchorLifecycle(
+            status=self.status.copy(),
+            labels=self.labels.copy(),
+            confidence=self.confidence.copy(),
+            agreement_rounds=self.agreement_rounds.copy(),
+            contradiction_labels=self.contradiction_labels.copy(),
+            contradiction_rounds=self.contradiction_rounds.copy(),
+        )
+
+
+def _empty_lifecycle(count: int) -> AnchorLifecycle:
+    return AnchorLifecycle(
+        status=np.full(count, AnchorStatus.UNASSIGNED, dtype=np.uint8),
+        labels=np.full(count, -1, dtype=np.int64),
+        confidence=np.zeros(count, dtype=np.float32),
+        agreement_rounds=np.zeros(count, dtype=np.uint8),
+        contradiction_labels=np.full(count, -1, dtype=np.int64),
+        contradiction_rounds=np.zeros(count, dtype=np.uint8),
+    )
+
+
+def _validate_lifecycle(state: AnchorLifecycle, count: int, num_types: int) -> None:
+    for name in (
+        "status",
+        "labels",
+        "confidence",
+        "agreement_rounds",
+        "contradiction_labels",
+        "contradiction_rounds",
+    ):
+        if getattr(state, name).shape != (count,):
+            raise ValueError("previous anchor lifecycle must align to cells")
+    if np.any(state.status > AnchorStatus.REVOKED):
+        raise ValueError("previous anchor lifecycle has an invalid status")
+    assigned = state.labels >= 0
+    if np.any(state.labels[assigned] >= num_types):
+        raise ValueError("previous anchor labels are outside the cell-type ontology")
+    if np.any(~np.isfinite(state.confidence)) or np.any(state.confidence < 0):
+        raise ValueError("previous anchor confidence must be finite and non-negative")
+
+
+def update_anchor_lifecycle(
+    selection: AnchorSelection,
+    probabilities: np.ndarray,
+    previous: Optional[AnchorLifecycle] = None,
+    *,
+    min_probability: float = 0.90,
+    hysteresis_probability: Optional[float] = None,
+    additional_rejection: Optional[np.ndarray] = None,
+) -> AnchorLifecycle:
+    """Update revocable anchors from the current round's evidence.
+
+    A high-confidence label is provisional for its first round and trusted
+    after two consecutive agreeing rounds.  Existing anchors survive a soft
+    confidence dip only while their *current* label posterior stays above a
+    lower hysteresis threshold.  A strong contradictory selection challenges
+    an anchor and relabels it after two consecutive contradictory rounds.
+    Technical rejection (OOD, segmentation, view disagreement, unsupported
+    type, or model abstention) revokes an existing anchor immediately.
+
+    Confidence is always read from ``probabilities`` in this call; no previous
+    confidence value is carried forward.
+    """
+
+    values = np.asarray(probabilities, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] < 2:
+        raise ValueError("probabilities must have shape (cells, types>=2)")
+    if np.any(values < 0) or not np.isfinite(values).all():
+        raise ValueError("probabilities must be finite and non-negative")
+    mass = values.sum(axis=1, keepdims=True)
+    if np.any(mass <= 0):
+        raise ValueError("each probability row needs positive mass")
+    values = values / mass
+    count, num_types = values.shape
+    if selection.accepted.shape != (count,) or selection.labels.shape != (count,):
+        raise ValueError("anchor selection must align to probabilities")
+    if np.any(selection.labels < 0) or np.any(selection.labels >= num_types):
+        raise ValueError("selected labels are outside the cell-type ontology")
+    if not 0.0 <= min_probability <= 1.0:
+        raise ValueError("min_probability must lie in [0, 1]")
+    if hysteresis_probability is None:
+        hysteresis_probability = max(0.0, min_probability - 0.10)
+    if not 0.0 <= hysteresis_probability <= min_probability:
+        raise ValueError("hysteresis_probability must lie in [0, min_probability]")
+    if additional_rejection is None:
+        extra_rejection = np.zeros(count, dtype=bool)
+    else:
+        extra_rejection = np.asarray(additional_rejection, dtype=bool)
+        if extra_rejection.shape != (count,):
+            raise ValueError("additional_rejection must align to cells")
+
+    hard_rejection = (
+        selection.rejected_ood
+        | selection.rejected_segmentation
+        | selection.rejected_disagreement
+        | selection.rejected_unsupported
+        | extra_rejection
+    )
+    state = _empty_lifecycle(count) if previous is None else previous.copy()
+    _validate_lifecycle(state, count, num_types)
+    status = state.status
+    labels = state.labels
+    confidence = state.confidence
+    agreement_rounds = state.agreement_rounds
+    contradiction_labels = state.contradiction_labels
+    contradiction_rounds = state.contradiction_rounds
+
+    for index in range(count):
+        old_status = AnchorStatus(int(status[index]))
+        old_label = int(labels[index])
+        current_label = int(selection.labels[index])
+        current_probability = float(values[index, current_label])
+        old_probability = 0.0 if old_label < 0 else float(values[index, old_label])
+
+        # Confidence is a property of this round, including for challenged or
+        # revoked anchors retained for audit purposes.
+        confidence[index] = old_probability if old_label >= 0 else current_probability
+        if hard_rejection[index]:
+            if old_status != AnchorStatus.UNASSIGNED:
+                status[index] = AnchorStatus.REVOKED
+                agreement_rounds[index] = 0
+                contradiction_labels[index] = -1
+                contradiction_rounds[index] = 0
+            continue
+
+        if old_status in {AnchorStatus.UNASSIGNED, AnchorStatus.REVOKED}:
+            if selection.accepted[index]:
+                status[index] = AnchorStatus.PROVISIONAL
+                labels[index] = current_label
+                confidence[index] = current_probability
+                agreement_rounds[index] = 1
+                contradiction_labels[index] = -1
+                contradiction_rounds[index] = 0
+            continue
+
+        if selection.accepted[index] and current_label == old_label:
+            agreeing = min(int(agreement_rounds[index]) + 1, np.iinfo(np.uint8).max)
+            agreement_rounds[index] = agreeing
+            status[index] = AnchorStatus.TRUSTED if agreeing >= 2 else AnchorStatus.PROVISIONAL
+            confidence[index] = old_probability
+            contradiction_labels[index] = -1
+            contradiction_rounds[index] = 0
+            continue
+
+        if selection.accepted[index] and current_label != old_label:
+            if (
+                old_status == AnchorStatus.CHALLENGED
+                and int(contradiction_labels[index]) == current_label
+            ):
+                contradictions = min(
+                    int(contradiction_rounds[index]) + 1,
+                    np.iinfo(np.uint8).max,
+                )
+            else:
+                contradictions = 1
+            if contradictions >= 2:
+                status[index] = AnchorStatus.PROVISIONAL
+                labels[index] = current_label
+                confidence[index] = current_probability
+                agreement_rounds[index] = 1
+                contradiction_labels[index] = -1
+                contradiction_rounds[index] = 0
+            else:
+                status[index] = AnchorStatus.CHALLENGED
+                confidence[index] = old_probability
+                contradiction_labels[index] = current_label
+                contradiction_rounds[index] = contradictions
+            continue
+
+        if old_status != AnchorStatus.CHALLENGED and old_probability >= hysteresis_probability:
+            # Retain the label through a modest confidence dip, but use the
+            # newly recomputed posterior as its training weight.
+            confidence[index] = old_probability
+            contradiction_labels[index] = -1
+            contradiction_rounds[index] = 0
+            continue
+
+        status[index] = AnchorStatus.REVOKED
+        agreement_rounds[index] = 0
+        contradiction_labels[index] = -1
+        contradiction_rounds[index] = 0
+
+    return AnchorLifecycle(
+        status=status,
+        labels=labels,
+        confidence=confidence.astype(np.float32, copy=False),
+        agreement_rounds=agreement_rounds,
+        contradiction_labels=contradiction_labels,
+        contradiction_rounds=contradiction_rounds,
+    )
 
 
 def select_anchors(

@@ -11,6 +11,8 @@ from torch.autograd import Function
 from .graph import GraphContextConfig, GraphContextEncoder
 from .rna import RNAVAE, RNADecoder, RNAVAEConfig
 
+_HEIR_CHECKPOINT_SCHEMA = "heir.model.v2"
+
 
 def _positive_dims(values: Sequence[int], name: str) -> Tuple[int, ...]:
     dims = tuple(int(value) for value in values)
@@ -75,6 +77,10 @@ class HEIRConfig:
     num_domains: int = 0
     domain_gradient_scale: float = 1.0
     prototype_type_cost_weight: float = 1.0
+    prototype_abundance_logit_weight: float = 0.0
+    prototype_variance_floor: float = 1.0e-4
+    covariance_aware_uot: bool = True
+    legacy_independent_prototype_query: bool = False
     scgpt_embedding_dim: int = 0
 
     def __post_init__(self) -> None:
@@ -96,6 +102,10 @@ class HEIRConfig:
             raise ValueError("domain_gradient_scale must be non-negative")
         if self.prototype_type_cost_weight < 0:
             raise ValueError("prototype_type_cost_weight must be non-negative")
+        if self.prototype_abundance_logit_weight < 0:
+            raise ValueError("prototype_abundance_logit_weight must be non-negative")
+        if self.prototype_variance_floor <= 0:
+            raise ValueError("prototype_variance_floor must be positive")
         if self.scgpt_embedding_dim < 0:
             raise ValueError("scgpt_embedding_dim must be non-negative")
         object.__setattr__(
@@ -170,8 +180,10 @@ class HEIROutput:
     prototype_cost: Tensor
     prototype_logits: Tensor
     prototype_probabilities: Tensor
+    conditional_prototype_probabilities: Tensor
     prototype_types: Tensor
     prototype_weights: Tensor
+    prototype_variances: Tensor
     prototype_mask: Tensor
     prototype_latent: Tensor
     residual_mu: Tensor
@@ -290,17 +302,19 @@ class HEIRModel(nn.Module):
         num_cells: int,
         reference: Tensor,
         prototype_means: Optional[Tensor],
+        prototype_variances: Optional[Tensor],
         prototype_types: Optional[Tensor],
         prototype_weights: Optional[Tensor],
         prototype_mask: Optional[Tensor],
         sample_index: Optional[Tensor],
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         if prototype_means is None:
             empty_means = reference.new_empty((num_cells, 0, self.config.latent_dim))
+            empty_variances = reference.new_empty((num_cells, 0, self.config.latent_dim))
             empty_types = torch.empty((num_cells, 0), dtype=torch.long, device=reference.device)
             empty_weights = reference.new_empty((num_cells, 0))
             empty_mask = torch.empty((num_cells, 0), dtype=torch.bool, device=reference.device)
-            return empty_means, empty_types, empty_weights, empty_mask
+            return empty_means, empty_variances, empty_types, empty_weights, empty_mask
         if prototype_means.device != reference.device or not torch.is_floating_point(
             prototype_means
         ):
@@ -310,6 +324,7 @@ class HEIRModel(nn.Module):
         if not torch.isfinite(prototype_means).all():
             raise ValueError("prototype_means must be finite")
 
+        expected_meta_shape: Tuple[int, ...]
         if prototype_means.ndim == 2:
             samples = 1
             prototypes = prototype_means.shape[0]
@@ -335,6 +350,25 @@ class HEIRModel(nn.Module):
             expected_meta_shape = (samples, prototypes)
         else:
             raise ValueError("prototype_means must have shape (P, L) or (S, P, L)")
+
+        if prototype_variances is None:
+            variances = torch.ones_like(means)
+        else:
+            if prototype_variances.device != reference.device or not torch.is_floating_point(
+                prototype_variances
+            ):
+                raise ValueError(
+                    "prototype_variances must be floating point on the morphology device"
+                )
+            if prototype_variances.shape != prototype_means.shape:
+                raise ValueError("prototype_variances must align to prototype_means")
+            if prototype_means.ndim == 2:
+                variances = prototype_variances.unsqueeze(0).expand(num_cells, -1, -1)
+            else:
+                variances = prototype_variances.index_select(0, cell_samples)
+            if not torch.isfinite(variances).all() or bool((variances <= 0).any()):
+                raise ValueError("prototype_variances must be finite and positive")
+            variances = variances.to(reference.dtype)
 
         def metadata(value: Optional[Tensor], name: str, default: Tensor) -> Tensor:
             if value is None:
@@ -372,7 +406,7 @@ class HEIRModel(nn.Module):
             raise ValueError("prototype_weights must be finite and nonnegative")
         if mask.dtype != torch.bool:
             raise TypeError("prototype_mask must have dtype torch.bool")
-        return means, types, weights.to(reference.dtype), mask & (weights > 0)
+        return means, variances, types, weights.to(reference.dtype), mask & (weights > 0)
 
     def _prototype_compatibility(
         self,
@@ -441,7 +475,7 @@ class HEIRModel(nn.Module):
         known_logits: Tensor,
         known_mask: Tensor,
         unknown_logits: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         masked = known_logits.masked_fill(~known_mask, -torch.inf)
         if masked.shape[1]:
             maximum = torch.maximum(masked.max(dim=1).values, unknown_logits)
@@ -451,7 +485,30 @@ class HEIRModel(nn.Module):
         known_exp = torch.where(known_mask, known_exp, torch.zeros_like(known_exp))
         unknown_exp = torch.exp(unknown_logits - maximum)
         denominator = known_exp.sum(dim=1) + unknown_exp
-        return known_exp / denominator.unsqueeze(1), unknown_exp / denominator
+        unconditional = known_exp / denominator.unsqueeze(1)
+        unknown = unknown_exp / denominator
+        if not masked.shape[1]:
+            return unconditional, unknown, known_exp
+
+        # Compute the conditional known-state simplex independently of the
+        # unknown logit. Dividing unconditional probabilities by ``1-u`` is
+        # mathematically equivalent but becomes unstable when u approaches one.
+        has_known = known_mask.any(dim=1)
+        known_maximum = torch.where(
+            has_known,
+            masked.max(dim=1).values,
+            torch.zeros_like(unknown_logits),
+        )
+        conditional_exp = torch.exp(masked - known_maximum.unsqueeze(1))
+        conditional_exp = torch.where(
+            known_mask,
+            conditional_exp,
+            torch.zeros_like(conditional_exp),
+        )
+        conditional = conditional_exp / conditional_exp.sum(dim=1, keepdim=True).clamp_min(
+            torch.finfo(conditional_exp.dtype).eps
+        )
+        return unconditional, unknown, conditional
 
     def forward(
         self,
@@ -460,6 +517,7 @@ class HEIRModel(nn.Module):
         edge_weight: Optional[Tensor] = None,
         *,
         prototype_means: Optional[Tensor] = None,
+        prototype_variances: Optional[Tensor] = None,
         prototype_types: Optional[Tensor] = None,
         prototype_weights: Optional[Tensor] = None,
         prototype_mask: Optional[Tensor] = None,
@@ -486,17 +544,45 @@ class HEIRModel(nn.Module):
             None if parent_logits is None else torch.softmax(parent_logits, dim=-1)
         )
 
-        means, types, weights, mask = self._prepare_prototypes(
+        means, variances, types, weights, mask = self._prepare_prototypes(
             morphology.shape[0],
             morphology,
             prototype_means,
+            prototype_variances,
             prototype_types,
             prototype_weights,
             prototype_mask,
             sample_index,
         )
-        query = self.prototype_query_head(embedding)
-        cost = (query.unsqueeze(1) - means).square().mean(dim=-1)
+        # For new checkpoints this head predicts the absolute molecular latent
+        # mean.  The residual is then the exact difference from the selected
+        # measured-prototype mixture.  This keeps local routing, UOT, and the
+        # decoded expression latent tied to one representation while retaining
+        # the historical module name/state-dict key.
+        image_latent_mu = self.residual_mu_head(embedding)
+        residual_logvar = self.residual_logvar_head(embedding).clamp(
+            min=self.config.logvar_min,
+            max=self.config.logvar_max,
+        )
+        # Old checkpoints retain the independent query module for strict state-dict
+        # compatibility. New models route from the absolute molecular latent mean,
+        # so there is no second freely trainable representation.
+        routing_query = (
+            self.prototype_query_head(embedding)
+            if self.config.legacy_independent_prototype_query
+            else image_latent_mu
+        )
+        routing_cost = (routing_query.unsqueeze(1) - means).square().mean(dim=-1)
+        if self.config.covariance_aware_uot and means.shape[1]:
+            total_variance = residual_logvar.exp().unsqueeze(1) + variances.clamp_min(
+                self.config.prototype_variance_floor
+            )
+            molecular_cost = 0.5 * (
+                (image_latent_mu.unsqueeze(1) - means).square() / total_variance
+                + total_variance.log()
+            ).mean(dim=-1)
+        else:
+            molecular_cost = routing_cost
         compatibility, compatible_mask = self._prototype_compatibility(
             type_probabilities,
             hierarchy_parent,
@@ -504,28 +590,32 @@ class HEIRModel(nn.Module):
             mask,
             cell_type_constraints,
         )
-        known_logits = -cost / self.config.prototype_temperature
-        known_logits = known_logits + weights.clamp_min(1e-12).log()
+        known_logits = -molecular_cost / self.config.prototype_temperature
+        known_logits = known_logits + (
+            self.config.prototype_abundance_logit_weight * weights.clamp_min(1e-12).log()
+        )
         known_logits = known_logits + compatibility.clamp_min(1e-12).log()
         unknown_logits = self.unknown_head(embedding).squeeze(-1)
         unknown_logits = unknown_logits + self.config.unknown_logit_bias
-        prototype_probabilities, unknown_probability = self._masked_prototype_softmax(
+        (
+            prototype_probabilities,
+            unknown_probability,
+            conditional_prototype_probabilities,
+        ) = self._masked_prototype_softmax(
             known_logits,
             compatible_mask,
             unknown_logits,
         )
-        # Export the real-prototype cost, including the hierarchical type
-        # term. HEIRTrainer applies the paired Bernoulli real/dustbin gate at
-        # the UOT boundary so both mutually exclusive outcomes stay coherent.
-        transport_cost = (
-            cost - self.config.prototype_type_cost_weight * compatibility.clamp_min(1e-12).log()
+        mixture_probabilities = (
+            prototype_probabilities
+            if self.config.legacy_independent_prototype_query
+            else conditional_prototype_probabilities
         )
-        prototype_latent = (prototype_probabilities.unsqueeze(-1) * means).sum(dim=1)
-
-        residual_mu = self.residual_mu_head(embedding)
-        residual_logvar = self.residual_logvar_head(embedding).clamp(
-            min=self.config.logvar_min,
-            max=self.config.logvar_max,
+        prototype_latent = (mixture_probabilities.unsqueeze(-1) * means).sum(dim=1)
+        residual_mu = (
+            image_latent_mu
+            if self.config.legacy_independent_prototype_query
+            else image_latent_mu - prototype_latent
         )
         should_sample = self.training if sample_latent is None else sample_latent
         if should_sample:
@@ -537,6 +627,20 @@ class HEIRModel(nn.Module):
         latent_mu = prototype_latent + residual_mu
         latent = prototype_latent + residual
         expression = self.expression_decoder(latent)
+
+        # UOT now acts on the same posterior mean decoded into expression. The
+        # diagonal Gaussian cost incorporates both image and RNA-state uncertainty.
+        if self.config.covariance_aware_uot and means.shape[1]:
+            transport_base_cost = molecular_cost
+            transport_query = latent_mu
+        else:
+            transport_base_cost = routing_cost
+            transport_query = routing_query
+        # HEIRTrainer applies the paired Bernoulli real/dustbin gate at the UOT
+        # boundary so both mutually exclusive outcomes stay coherent.
+        transport_cost = transport_base_cost - (
+            self.config.prototype_type_cost_weight * compatibility.clamp_min(1e-12).log()
+        )
 
         eps = torch.finfo(type_probabilities.dtype).tiny
         type_entropy = -(type_probabilities * type_probabilities.clamp_min(eps).log()).sum(
@@ -578,12 +682,14 @@ class HEIRModel(nn.Module):
             parent_type_logits=parent_logits,
             parent_type_probabilities=parent_probabilities,
             hierarchy_parent_probabilities=hierarchy_parent,
-            prototype_query=query,
+            prototype_query=transport_query,
             prototype_cost=transport_cost,
             prototype_logits=known_logits,
             prototype_probabilities=prototype_probabilities,
+            conditional_prototype_probabilities=conditional_prototype_probabilities,
             prototype_types=types,
             prototype_weights=weights,
+            prototype_variances=variances,
             prototype_mask=compatible_mask,
             prototype_latent=prototype_latent,
             residual_mu=residual_mu,
@@ -625,7 +731,11 @@ class HEIRModel(nn.Module):
     def checkpoint(self) -> Dict[str, Any]:
         """Create a self-describing checkpoint."""
 
-        return {"config": self.config.to_dict(), "state_dict": self.state_dict()}
+        return {
+            "schema": _HEIR_CHECKPOINT_SCHEMA,
+            "config": self.config.to_dict(),
+            "state_dict": self.state_dict(),
+        }
 
     @classmethod
     def from_checkpoint(
@@ -637,7 +747,18 @@ class HEIRModel(nn.Module):
 
         if "config" not in checkpoint or "state_dict" not in checkpoint:
             raise KeyError("checkpoint must contain config and state_dict")
-        model = cls(HEIRConfig.from_dict(checkpoint["config"]))
+        schema = checkpoint.get("schema")
+        if schema not in {None, _HEIR_CHECKPOINT_SCHEMA}:
+            raise ValueError("unsupported HEIR model checkpoint schema")
+        config_values = dict(checkpoint["config"])
+        if schema is None:
+            # v1 checkpoints predate the tied absolute-latent formulation.
+            # Preserve their abundance-weighted local routing, independent
+            # query, unconditioned known mixture, and Euclidean UOT exactly.
+            config_values.setdefault("prototype_abundance_logit_weight", 1.0)
+            config_values.setdefault("covariance_aware_uot", False)
+            config_values.setdefault("legacy_independent_prototype_query", True)
+        model = cls(HEIRConfig.from_dict(config_values))
         model.load_state_dict(checkpoint["state_dict"], strict=strict)
         return model
 

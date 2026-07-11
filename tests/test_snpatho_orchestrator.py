@@ -84,6 +84,33 @@ def test_v02_config_binds_final_all_visium_panel():
     )
 
 
+def test_external_checkpoint_resolution_precedence(tmp_path, monkeypatch):
+    config_path = ROOT / "configs" / "experiments" / "snpatho_v0_2.yaml"
+    direct = tmp_path / "direct.pt"
+    external_root = tmp_path / "pretrained"
+    cli = tmp_path / "cli.pt"
+    monkeypatch.setenv("HEIR_OMICLIP_CHECKPOINT", str(direct))
+    monkeypatch.setenv("HEIR_PRETRAINED_DIR", str(external_root))
+
+    def load(override=None):
+        return ORCHESTRATOR.Settings.load(
+            repository=ROOT,
+            config_path=config_path,
+            artifact_root=None,
+            panel_override=None,
+            spaceranger_override=None,
+            omiclip_checkpoint_override=override,
+        )
+
+    assert load(cli).omiclip_checkpoint == cli.resolve()
+    assert load().omiclip_checkpoint == direct.resolve()
+    monkeypatch.delenv("HEIR_OMICLIP_CHECKPOINT")
+    assert load().omiclip_checkpoint == (external_root / "omiclip_loki/checkpoint.pt").resolve()
+    monkeypatch.delenv("HEIR_PRETRAINED_DIR")
+    configured = Path(yaml.safe_load(config_path.read_text())["pathology_features"]["checkpoint"])
+    assert load().omiclip_checkpoint == configured.expanduser().resolve()
+
+
 def test_v02_config_uses_evaluator_metric_and_baseline_identifiers():
     config_path = ROOT / "configs" / "experiments" / "snpatho_v0_2.yaml"
     payload = yaml.safe_load(config_path.read_text())

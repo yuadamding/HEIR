@@ -1,0 +1,16 @@
+{
+  "schema": "heir.refinement_development_plan.v1",
+  "analysis_role": "development",
+  "refinement_rounds": 3,
+  "stages": [
+    {"name": "train", "command": ["heir", "train", "--help"], "outputs": ["outputs/development/train/heir.pt"]},
+    {"name": "predict_round_0", "command": ["heir", "predict", "--help"], "outputs": ["outputs/development/round0/predictions.npz"]},
+    {"name": "refine_round_1", "command": ["heir", "refine", "--help"], "outputs": ["outputs/development/round1/heir_refined.pt"]},
+    {"name": "predict_round_1", "command": ["heir", "predict", "--help"], "outputs": ["outputs/development/round1/predictions.npz"]},
+    {"name": "refine_round_2", "command": ["heir", "refine", "--help"], "outputs": ["outputs/development/round2/heir_refined.pt"]},
+    {"name": "predict_round_2", "command": ["heir", "predict", "--help"], "outputs": ["outputs/development/round2/predictions.npz"]},
+    {"name": "refine_round_3", "command": ["heir", "refine", "--help"], "outputs": ["outputs/development/round3/heir_refined.pt"]},
+    {"name": "predict_round_3", "command": ["heir", "predict", "--help"], "outputs": ["outputs/development/round3/predictions.npz"]},
+    {"name": "development_spatial_evaluation", "command": ["heir", "evaluate-spatial", "--help"], "outputs": ["outputs/development/evaluation.json"]}
+  ]
+}

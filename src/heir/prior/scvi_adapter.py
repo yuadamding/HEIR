@@ -11,6 +11,9 @@ from ..expression import EXPRESSION_SPACE_ID, EXPRESSION_TARGET_SUM
 from ..models.rna import RNAVAE, RNAVAEConfig
 from ..utils import optional_import_error, resolve_device
 
+SCVI_DISTILLED_DECODER_SCHEMA = "heir.scvi_distilled_decoder.v2"
+SCVI_EXPRESSION_NORMALIZATION_CONTRACT = "full_library_10000_then_panel_log1p_v2"
+
 
 class SCVIAdapter:
     """Fit the blueprint's default count model when ``scvi-tools`` is installed.
@@ -32,7 +35,7 @@ class SCVIAdapter:
     @staticmethod
     def _module() -> Any:
         try:
-            import scvi
+            import scvi  # type: ignore[import-not-found]
         except ImportError as error:
             raise optional_import_error("scvi-tools", "science") from error
         return scvi
@@ -110,6 +113,12 @@ class SCVIAdapter:
         gene_list: Optional[Sequence[str]] = None,
         transform_batch: Optional[Sequence[object]] = None,
     ) -> np.ndarray:
+        """Return panel expression normalized against the full decoded library.
+
+        scVI performs its 10,000-count scaling before selecting ``gene_list``.
+        HEIR preserves that denominator and applies only ``log1p`` here.
+        """
+
         if self.model is None:
             raise RuntimeError("fit or load the RNA model first")
         if transform_batch is None or len(transform_batch) == 0:
@@ -153,13 +162,10 @@ class SCVIAdapter:
                 matrix = matrix[:, [lookup[name] for name in genes]]
         if matrix.ndim != 2 or not np.isfinite(matrix).all() or np.any(matrix < 0):
             raise ValueError("scVI returned invalid normalized expression")
-        # scVI scales the full transcriptome before applying gene_list. HEIR's
-        # RNAReference is panel-filtered first, so renormalize the selected
-        # panel itself to keep the two targets in the same immutable space.
-        panel_mass = matrix.sum(axis=1, keepdims=True)
-        if np.any(panel_mass <= 0):
-            raise ValueError("scVI selected panel has a zero-expression cell")
-        matrix = matrix * (EXPRESSION_TARGET_SUM / panel_mass)
+        # scVI applies ``library_size`` to the complete decoded transcriptome
+        # before selecting ``gene_list``.  Keep that full-library denominator:
+        # renormalizing the selected columns would put scVI-derived targets on
+        # a different scale from RNAReference and locked spatial truth.
         return np.log1p(matrix).astype(np.float32)
 
     def distill_transferable_decoder(
@@ -304,11 +310,20 @@ class SCVIAdapter:
         )
         checkpoint = model.checkpoint()
         checkpoint["metadata"] = {
-            "schema": "heir.scvi_distilled_decoder.v1",
+            "schema": SCVI_DISTILLED_DECODER_SCHEMA,
             "gene_names": [str(value) for value in gene_list],
             "training_donors": donors,
             "latent_space_id": latent_space_id,
             "expression_space_id": EXPRESSION_SPACE_ID,
+            "expression_normalization_contract": SCVI_EXPRESSION_NORMALIZATION_CONTRACT,
+            "expression_normalization": {
+                "method": "scvi.get_normalized_expression",
+                "library_size": EXPRESSION_TARGET_SUM,
+                "library_basis": "full-transcriptome",
+                "gene_selection": "after-library-normalization",
+                "transform": "log1p",
+                "version": 2,
+            },
             "transform_batch": list(reference_batches),
             "decoder_only": True,
         }

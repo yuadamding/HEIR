@@ -14,6 +14,7 @@ from heir.training import (
     HEIRTrainer,
     HEIRTrainingBatch,
     TrainingStage,
+    aggregate_to_spots,
     spatial_block_split_masks,
     subset_histology_bag,
 )
@@ -110,6 +111,87 @@ def test_bernoulli_uot_gate_clamps_endpoint_probabilities_in_float32() -> None:
     assert base_cost.grad is not None and torch.isfinite(base_cost.grad).all()
     assert unknown_probability.grad is not None
     assert torch.isfinite(unknown_probability.grad).all()
+
+
+def test_anchor_constraints_mask_local_routing_and_uot_responsibilities() -> None:
+    trainer = _trainer()
+    with torch.no_grad():
+        trainer.model.unknown_head.weight.zero_()
+        trainer.model.unknown_head.bias.fill_(-20.0)
+    batch = replace(
+        _patch(3, "anchors", 0.0),
+        anchor_labels=torch.tensor([0, -100, 1]),
+        anchor_weights=torch.tensor([1.0, 0.0, 1.0]),
+    )
+    output = trainer._forward_output(batch)
+
+    assert output.prototype_mask[0].tolist() == [True, False]
+    assert output.prototype_mask[2].tolist() == [False, True]
+    assert output.prototype_probabilities[0, 1] == 0
+    assert output.prototype_probabilities[2, 0] == 0
+    responsibilities, result = trainer.transport_responsibilities(batch, output)
+    assert not responsibilities.requires_grad
+    assert responsibilities[0, 1] == 0
+    assert responsibilities[2, 0] == 0
+    torch.testing.assert_close(responsibilities.sum(dim=1), torch.ones(3))
+    assert result.plan.shape == (3, 3)  # two measured states plus dustbin
+
+
+def test_prototype_responsibilities_are_aggregated_to_detached_type_targets() -> None:
+    responsibilities = torch.tensor(
+        [[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]],
+        requires_grad=True,
+    )
+    types = torch.tensor([0, 0, 1])
+    result = HEIRTrainer._type_responsibilities(responsibilities, types, 2)
+
+    torch.testing.assert_close(result, torch.tensor([[0.5, 0.5], [0.7, 0.3]]))
+    assert not result.requires_grad
+
+
+def test_uot_unknown_mass_is_sample_estimated_with_prior_shrinkage() -> None:
+    trainer = _trainer()
+    trainer.uot_unknown_mass = 0.1
+    trainer.uot_unknown_prior_strength = 2.0
+    batch = replace(
+        _patch(2, "unknown-mass", 0.0),
+        unknown_targets=torch.tensor([0.0, 1.0]),
+    )
+    output = trainer._forward_output(batch)
+
+    estimate = trainer._estimated_uot_unknown_mass(batch, output)
+    # Beta-style prior contributes mass 2 * 0.1, then two observed cells
+    # contribute one unknown-equivalent cell.
+    torch.testing.assert_close(estimate, torch.tensor(0.3))
+
+
+def test_uot_responsibilities_preserve_dustbin_row_mass() -> None:
+    trainer = _trainer()
+    trainer.uot_unknown_prior_strength = 0.01
+    batch = _patch(3, "unknown-routing", 0.0)
+    with torch.no_grad():
+        trainer.model.unknown_head.weight.zero_()
+        trainer.model.unknown_head.bias.fill_(20.0)
+    output = trainer._forward_output(batch)
+    responsibilities, result = trainer.transport_responsibilities(batch, output)
+
+    assert result.plan.shape[1] == responsibilities.shape[1] + 1
+    assert torch.all(responsibilities.sum(dim=1) < 0.05)
+    assert bool(result.converged)
+    assert result.iterations_run <= trainer.uot_iterations
+
+
+def test_spot_aggregation_supports_known_and_rna_mass_weighting() -> None:
+    expression = torch.log1p(torch.tensor([[9.0, 1.0], [1.0, 5.0]]))
+    assignment = torch.ones((1, 2))
+    equal = aggregate_to_spots(expression, assignment)
+    weighted = aggregate_to_spots(
+        expression,
+        assignment,
+        cell_rna_mass=torch.tensor([1.0, 3.0]),
+    )
+    torch.testing.assert_close(equal, torch.log1p(torch.tensor([[5.0, 3.0]])))
+    torch.testing.assert_close(weighted, torch.log1p(torch.tensor([[3.0, 4.0]])))
 
 
 def test_sample_losses_are_computed_once_after_graph_patch_merge() -> None:

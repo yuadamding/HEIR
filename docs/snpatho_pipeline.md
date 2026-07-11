@@ -42,8 +42,10 @@ same ordered panel and their embedded provenance:
 - `artifacts/snpatho/prior500/rna_decoder.pt`, trained on that exact transform
   and panel;
 - `artifacts/snpatho/prior/omiclip_ood.npz`, fit on B1 OmiCLIP features only;
-- `/storage/HE_GPT/Loki/checkpoint.pt`, the hash-bound OmiCLIP/Loki visual
-  checkpoint.
+- the hash-bound OmiCLIP/Loki visual checkpoint. Store it outside HEIR under
+  `$HEIR_PRETRAINED_DIR/omiclip_loki/checkpoint.pt`, pass
+  `--omiclip-checkpoint`, or use the historical path recorded in the frozen
+  config. `scripts/manage_pretrained_assets.py verify` checks its committed hash.
 
 The preflight loads these contracts. A stale transform or decoder stops
 `--execute`; it is not silently accepted.
@@ -101,3 +103,7 @@ The completed seed-17 result is summarized in
 [`benchmark_report.md`](benchmark_report.md). The primary median-gene spatial
 correlation endpoint is negative; the same locked cohort must not be used for
 post-hoc model tuning and a replacement success claim.
+
+This pipeline intentionally remains the historical one-pass `train → predict`
+benchmark and does not call `heir refine`. Refinement development belongs in
+`scripts/run_refinement_development.py` on a separate development cohort.

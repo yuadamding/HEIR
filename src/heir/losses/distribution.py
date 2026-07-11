@@ -1,5 +1,6 @@
 """Distributional weak-supervision losses, including unbalanced transport."""
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -215,7 +216,14 @@ def dirichlet_composition_prior_loss(
 
 @dataclass
 class UnbalancedSinkhornResult:
-    """Transport plan, objective, and marginal diagnostics."""
+    """Transport plan, objective, and numerical diagnostics.
+
+    ``plan`` is the optimized source-by-target coupling (including the final
+    dustbin column when requested).  The dual residuals report the maximum
+    absolute change in the log-domain source and target scalings during the
+    final Sinkhorn iteration.  They diagnose fixed-point convergence; marginal
+    errors instead quantify the deliberately relaxed UOT marginal mismatch.
+    """
 
     loss: Tensor
     plan: Tensor
@@ -228,17 +236,32 @@ class UnbalancedSinkhornResult:
     source_marginal_error: Tensor
     target_marginal_error: Tensor
     unassigned_mass: Tensor
+    source_dual_residual: Optional[Tensor] = None
+    target_dual_residual: Optional[Tensor] = None
+    dual_residual: Optional[Tensor] = None
+    iterations_run: int = 0
+    converged: Optional[Tensor] = None
 
     def diagnostics(self) -> Dict[str, Tensor]:
         """Return scalar tensors suitable for structured logging."""
 
-        return {
+        diagnostics = {
             "uot/transport_cost": self.transport_cost.mean(),
             "uot/entropy": self.entropy.mean(),
             "uot/source_marginal_error": self.source_marginal_error.mean(),
             "uot/target_marginal_error": self.target_marginal_error.mean(),
             "uot/unassigned_mass": self.unassigned_mass.mean(),
+            "uot/iterations": self.loss.new_tensor(float(self.iterations_run)),
         }
+        if self.source_dual_residual is not None:
+            diagnostics["uot/source_dual_residual"] = self.source_dual_residual.mean()
+        if self.target_dual_residual is not None:
+            diagnostics["uot/target_dual_residual"] = self.target_dual_residual.mean()
+        if self.dual_residual is not None:
+            diagnostics["uot/dual_residual"] = self.dual_residual.mean()
+        if self.converged is not None:
+            diagnostics["uot/converged_fraction"] = self.converged.to(self.loss.dtype).mean()
+        return diagnostics
 
 
 def _as_batched(value: Tensor, dimensions: int, name: str) -> Tuple[Tensor, bool]:
@@ -267,6 +290,7 @@ def unbalanced_sinkhorn(
     epsilon: float = 0.1,
     marginal_relaxation: float = 1.0,
     iterations: int = 80,
+    convergence_tolerance: Optional[float] = None,
     unknown_mass: Union[float, Tensor] = 0.05,
     unknown_cost: Union[float, Tensor] = 1.0,
     add_unknown: bool = True,
@@ -277,18 +301,25 @@ def unbalanced_sinkhorn(
     ``cost`` is ``(sources, prototypes)`` or batched.  When ``add_unknown`` is
     true, a dustbin prototype is appended; transport into its final column is
     reported as unassigned mass.  KL-relaxed marginals permit reference capture
-    bias and unmatched molecular states without producing invalid plans.
+    bias and unmatched molecular states without producing invalid plans.  Set
+    ``convergence_tolerance`` to stop once every batch's maximum source/target
+    log-scaling update is at or below that threshold.  The default ``None``
+    preserves the fixed ``iterations`` behavior.
     """
 
     if epsilon <= 0 or marginal_relaxation <= 0 or eps <= 0:
         raise ValueError("epsilon, marginal_relaxation, and eps must be positive")
     if iterations <= 0:
         raise ValueError("iterations must be positive")
+    if convergence_tolerance is not None and (
+        not math.isfinite(convergence_tolerance) or convergence_tolerance <= 0
+    ):
+        raise ValueError("convergence_tolerance must be finite and positive")
     if not isinstance(unknown_cost, Tensor) and unknown_cost < 0:
         raise ValueError("unknown_cost must be nonnegative")
     _require_float("cost", cost)
-    if not torch.isfinite(cost).all() or bool((cost < 0).any()):
-        raise ValueError("cost must be finite and nonnegative")
+    if not torch.isfinite(cost).all():
+        raise ValueError("cost must be finite")
     batched_cost, squeezed = _as_batched(cost, 3, "cost")
     batch, sources, targets = batched_cost.shape
     work_dtype = (
@@ -408,8 +439,13 @@ def unbalanced_sinkhorn(
     log_target = target.clamp_min(eps).log()
     log_u = work_cost.new_zeros((batch, sources))
     log_v = work_cost.new_zeros((batch, target.shape[1]))
+    source_dual_residual = work_cost.new_full((batch,), torch.inf)
+    target_dual_residual = work_cost.new_full((batch,), torch.inf)
+    dual_residual = work_cost.new_full((batch,), torch.inf)
+    iterations_run = 0
     exponent = marginal_relaxation / (marginal_relaxation + epsilon)
-    for _ in range(iterations):
+    for iteration in range(iterations):
+        check_residual = convergence_tolerance is not None or iteration + 1 == iterations
         # logsumexp over an all -inf row/column has undefined gradients even
         # when a later torch.where masks its output. Insert a finite dummy
         # reduction only for zero-mass sources/targets; those updates are then
@@ -419,13 +455,41 @@ def unbalanced_sinkhorn(
         )
         kernel_v = torch.logsumexp(source_update_kernel + log_v.unsqueeze(-2), dim=-1)
         updated_u = exponent * (log_source - kernel_v)
+        previous_u = log_u
         log_u = torch.where(scalable_source, updated_u, torch.zeros_like(updated_u))
+        if check_residual:
+            source_delta = (log_u.detach() - previous_u.detach()).abs()
+            source_dual_residual = torch.where(
+                scalable_source,
+                source_delta,
+                torch.zeros_like(source_delta),
+            ).amax(dim=-1)
         target_update_kernel = torch.where(
             scalable_target.unsqueeze(-2), log_kernel, torch.zeros_like(log_kernel)
         )
         kernel_u = torch.logsumexp(target_update_kernel + log_u.unsqueeze(-1), dim=-2)
         updated_v = exponent * (log_target - kernel_u)
+        previous_v = log_v
         log_v = torch.where(scalable_target, updated_v, torch.zeros_like(updated_v))
+        if check_residual:
+            target_delta = (log_v.detach() - previous_v.detach()).abs()
+            target_dual_residual = torch.where(
+                scalable_target,
+                target_delta,
+                torch.zeros_like(target_delta),
+            ).amax(dim=-1)
+            dual_residual = torch.maximum(source_dual_residual, target_dual_residual)
+        iterations_run = iteration + 1
+        if convergence_tolerance is not None and bool(
+            (dual_residual.detach() <= convergence_tolerance).all()
+        ):
+            break
+
+    converged = (
+        dual_residual <= convergence_tolerance
+        if convergence_tolerance is not None
+        else torch.zeros(batch, dtype=torch.bool, device=work_cost.device)
+    )
 
     log_plan = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(-2)
     plan = torch.exp(log_plan)
@@ -457,6 +521,10 @@ def unbalanced_sinkhorn(
         source_error = source_error.squeeze(0)
         target_error = target_error.squeeze(0)
         unassigned = unassigned.squeeze(0)
+        source_dual_residual = source_dual_residual.squeeze(0)
+        target_dual_residual = target_dual_residual.squeeze(0)
+        dual_residual = dual_residual.squeeze(0)
+        converged = converged.squeeze(0)
     else:
         desired_source = source
         desired_target = target
@@ -472,6 +540,11 @@ def unbalanced_sinkhorn(
         source_marginal_error=source_error,
         target_marginal_error=target_error,
         unassigned_mass=unassigned,
+        source_dual_residual=source_dual_residual,
+        target_dual_residual=target_dual_residual,
+        dual_residual=dual_residual,
+        iterations_run=iterations_run,
+        converged=converged,
     )
 
 

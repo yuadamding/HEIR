@@ -1,7 +1,7 @@
 """Controlled broad-to-fine refinement coordinator with auditable stopping."""
 
 from dataclasses import dataclass, replace
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -10,7 +10,12 @@ from ..config import RefinementConfig
 from ..training.batch import HEIRTrainingBatch
 from ..training.trainer import HEIRTrainer, HEIRTrainingResult
 from ..utils import resolve_device
-from .anchors import select_anchors
+from .anchors import (
+    AnchorLifecycle,
+    AnchorStatus,
+    select_anchors,
+    update_anchor_lifecycle,
+)
 from .ema import EMATeacher
 from .priors import update_measured_prior
 
@@ -28,6 +33,14 @@ class RefinementRound:
     validation_composition: float
     validation_calibration: float
     objective_relative_change: float
+    provisional: int = 0
+    trusted: int = 0
+    challenged: int = 0
+    revoked: int = 0
+    assignment_entropy: float = 0.0
+    uot_marginal_residual: float = 0.0
+    prior_total_variation: float = 0.0
+    committed: bool = True
 
 
 @dataclass(frozen=True)
@@ -51,6 +64,20 @@ class IterativeRefiner:
         self.config = config
         self.device = resolve_device(device)
 
+    @staticmethod
+    def _model_state(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+        return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+
+    @classmethod
+    def _teacher_state(cls, teacher: EMATeacher) -> Dict[str, Any]:
+        return {"decay": teacher.decay, "model": cls._model_state(teacher.model)}
+
+    @staticmethod
+    def _anchor_states(
+        values: Mapping[Tuple[str, str, str, str], AnchorLifecycle],
+    ) -> Dict[Tuple[str, str, str, str], AnchorLifecycle]:
+        return {key: value.copy() for key, value in values.items()}
+
     @torch.no_grad()
     def _teacher_probabilities(
         self,
@@ -63,6 +90,7 @@ class IterativeRefiner:
             values.edge_index,
             values.edge_weight,
             prototype_means=values.prototype_means,
+            prototype_variances=values.prototype_variances,
             prototype_types=values.prototype_types,
             prototype_weights=values.prototype_weights,
             prototype_mask=values.prototype_mask,
@@ -78,6 +106,70 @@ class IterativeRefiner:
                 if output.parent_type_probabilities is None
                 else output.parent_type_probabilities.cpu().numpy()
             ),
+        )
+
+    @torch.no_grad()
+    def _teacher_transport(
+        self,
+        trainer: HEIRTrainer,
+        teacher: EMATeacher,
+        batch: HEIRTrainingBatch,
+        parent_probabilities: Optional[np.ndarray] = None,
+        broad_level: bool = False,
+    ) -> Tuple[np.ndarray, float, float, np.ndarray]:
+        """Run the molecular E-step and return detached UOT responsibilities."""
+
+        values = batch.to(self.device)
+        constraints = trainer._anchor_constraints(values)
+        if broad_level:
+            mapping = teacher.model.config.fine_to_parent
+            if mapping is None or parent_probabilities is None:
+                raise ValueError("broad molecular transport requires parent probabilities")
+            parent_tensor = torch.from_numpy(np.asarray(parent_probabilities)).to(
+                device=self.device,
+                dtype=values.morphology.dtype,
+            )
+            parent_constraints = parent_tensor.index_select(
+                1,
+                torch.tensor(mapping, dtype=torch.long, device=self.device),
+            )
+            constraints = (
+                parent_constraints if constraints is None else constraints * parent_constraints
+            )
+        output = teacher.model(
+            values.morphology,
+            values.edge_index,
+            values.edge_weight,
+            prototype_means=values.prototype_means,
+            prototype_variances=values.prototype_variances,
+            prototype_types=values.prototype_types,
+            prototype_weights=values.prototype_weights,
+            prototype_mask=values.prototype_mask,
+            cell_type_constraints=constraints,
+            sample_latent=False,
+        )
+        responsibilities, result = trainer.transport_responsibilities(values, output)
+        responsibility_array = responsibilities.cpu().numpy()
+        if responsibility_array.shape[1] > 1:
+            row_mass = responsibility_array.sum(axis=1, keepdims=True)
+            valid = row_mass[:, 0] > 0
+            conditional = responsibility_array / np.maximum(row_mass, 1.0e-12)
+            entropy = -(conditional * np.log(np.maximum(conditional, 1.0e-12))).sum(
+                axis=1
+            ) / np.log(responsibility_array.shape[1])
+            assignment_entropy = float(entropy[valid].mean()) if valid.any() else 0.0
+        else:
+            assignment_entropy = 0.0
+        source_error = float(result.source_marginal_error.detach().cpu().mean())
+        target_error = float(result.target_marginal_error.detach().cpu().mean())
+        transported_target_mass = (
+            result.target_marginal.detach().cpu().numpy()[: responsibility_array.shape[1]]
+        )
+        return (
+            responsibility_array,
+            assignment_entropy,
+            source_error + target_error,
+            transported_target_mass,
         )
 
     def fit(
@@ -101,16 +193,17 @@ class IterativeRefiner:
             raise ValueError(
                 "refinement requires independent view predictions when view agreement is enabled"
             )
-        previous_labels: Dict[Tuple[str, str, str, str], np.ndarray] = {}
-        previous_confidence: Dict[Tuple[str, str, str, str], np.ndarray] = {}
+        anchor_states: Dict[Tuple[str, str, str, str], AnchorLifecycle] = {}
         audit: List[RefinementRound] = []
         stable_rounds = 0
         reason = "maximum_rounds"
         working_batches = list(training_batches)
         global_best_loss = float("inf")
-        global_best_state = None
+        global_best_state = self._model_state(trainer.model)
+        global_best_teacher_state = self._teacher_state(teacher)
+        global_best_batches = list(working_batches)
+        global_best_anchors: Dict[Tuple[str, str, str, str], AnchorLifecycle] = {}
         previous_objectives: Optional[np.ndarray] = None
-        final_priors: Dict[str, np.ndarray] = {}
         measured_priors: Dict[Tuple[str, str], np.ndarray] = {}
         for batch in training_batches:
             sample_key = (batch.donor_id, batch.sample_id)
@@ -120,31 +213,81 @@ class IterativeRefiner:
             ):
                 raise ValueError("all bags of a sample must share the measured RNA prior")
             measured_priors[sample_key] = values.copy()
-        global_best_priors: Dict[str, np.ndarray] = {}
+        committed_priors = {"%s::%s" % key: value.copy() for key, value in measured_priors.items()}
+        global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
         for round_id in range(self.config.maximum_rounds):
             refined_batches: List[HEIRTrainingBatch] = []
+            candidate_anchor_states = dict(anchor_states)
             accepted_total = 0
             cell_total = 0
             changed_total = 0
             previous_total = 0
-            predictions = [
-                (batch, *self._teacher_probabilities(teacher, batch)) for batch in working_batches
-            ]
+            provisional_total = 0
+            trusted_total = 0
+            challenged_total = 0
+            revoked_total = 0
+            predictions = []
+            for batch in working_batches:
+                teacher_values = self._teacher_probabilities(teacher, batch)
+                parent_probabilities = teacher_values[-1]
+                broad_transport = bool(
+                    parent_probabilities is not None
+                    and parent_probabilities.shape[1] >= 2
+                    and round_id < self.config.broad_refinement_rounds
+                )
+                (
+                    responsibilities,
+                    assignment_entropy,
+                    marginal_residual,
+                    transported_target_mass,
+                ) = self._teacher_transport(
+                    trainer,
+                    teacher,
+                    batch,
+                    parent_probabilities=parent_probabilities,
+                    broad_level=broad_transport,
+                )
+                predictions.append(
+                    (
+                        batch,
+                        *teacher_values,
+                        responsibilities,
+                        assignment_entropy,
+                        marginal_residual,
+                        transported_target_mass,
+                    )
+                )
             sample_prior_sums: Dict[Tuple[str, str], np.ndarray] = {}
-            sample_prior_counts: Dict[Tuple[str, str], float] = {}
             sample_reference_priors: Dict[Tuple[str, str], np.ndarray] = {}
             sample_reference_ids: Dict[Tuple[str, str], Tuple[str, ...]] = {}
             sample_reference_types: Dict[Tuple[str, str], np.ndarray] = {}
             sample_reference_means: Dict[Tuple[str, str], np.ndarray] = {}
             sample_bag_counts: Dict[Tuple[str, str], int] = {}
-            for batch, _, prototype_probabilities, _, _, _ in predictions:
+            entropy_sum = 0.0
+            marginal_residual_sum = 0.0
+            for (
+                batch,
+                _,
+                _,
+                _,
+                _,
+                _,
+                responsibilities,
+                entropy,
+                marginal_residual,
+                transported_target_mass,
+            ) in predictions:
                 sample_key = (batch.donor_id, batch.sample_id)
                 cell_weights = (
-                    np.ones(len(prototype_probabilities), dtype=np.float64)
+                    np.ones(len(responsibilities), dtype=np.float64)
                     if batch.cell_weights is None
                     else batch.cell_weights.detach().cpu().numpy().astype(np.float64)
                 )
-                current = (prototype_probabilities * cell_weights[:, None]).sum(axis=0)
+                # Update only from the actual transported target marginal, not
+                # from the image model's local softmax or row-normalized plan.
+                # Sinkhorn normalizes each bag's source mass, so restore its
+                # effective cell mass before combining graph bags.
+                current = transported_target_mass * float(cell_weights.sum())
                 current_types = batch.prototype_types.detach().cpu().numpy()
                 current_means = batch.prototype_means.detach().cpu().numpy()
                 if sample_key in sample_prior_sums:
@@ -162,13 +305,12 @@ class IterativeRefiner:
                     sample_reference_ids[sample_key] = batch.prototype_ids
                     sample_reference_types[sample_key] = current_types.copy()
                     sample_reference_means[sample_key] = current_means.copy()
-                sample_prior_counts[sample_key] = sample_prior_counts.get(sample_key, 0.0) + float(
-                    cell_weights.sum()
-                )
                 sample_bag_counts[sample_key] = sample_bag_counts.get(sample_key, 0) + 1
+                entropy_sum += float(entropy) * len(responsibilities)
+                marginal_residual_sum += float(marginal_residual)
             updated_priors: Dict[Tuple[str, str], np.ndarray] = {}
             for sample_key, summed in sample_prior_sums.items():
-                predicted_prior = summed / max(sample_prior_counts[sample_key], 1)
+                predicted_prior = summed
                 if predicted_prior.sum() <= 0:
                     updated_priors[sample_key] = sample_reference_priors[sample_key]
                 else:
@@ -178,7 +320,20 @@ class IterativeRefiner:
                         old_weight=self.config.prior_old_weight,
                         maximum_total_variation=self.config.maximum_prior_total_variation,
                     )
-            final_priors = {"%s::%s" % key: value.copy() for key, value in updated_priors.items()}
+            candidate_priors = {
+                "%s::%s" % key: value.copy() for key, value in updated_priors.items()
+            }
+            prior_total_variation = max(
+                (
+                    0.5 * np.abs(updated_priors[key] - sample_reference_priors[key]).sum()
+                    for key in updated_priors
+                ),
+                default=0.0,
+            )
+            mean_assignment_entropy = entropy_sum / max(
+                sum(len(item[0].morphology) for item in predictions), 1
+            )
+            mean_marginal_residual = marginal_residual_sum / max(len(predictions), 1)
             for (
                 batch,
                 probabilities,
@@ -186,6 +341,10 @@ class IterativeRefiner:
                 model_abstain,
                 unknown_probability,
                 parent_probabilities,
+                responsibilities,
+                _,
+                _,
+                _,
             ) in predictions:
                 sample_key = (batch.donor_id, batch.sample_id)
                 broad_level = bool(
@@ -281,37 +440,41 @@ class IterativeRefiner:
                 # The model's own composite abstention remains an additional
                 # gate, distinct from the calibrated pathology-feature OOD flag.
                 if broad_level:
-                    accepted = selection.accepted & (
-                        unknown_probability < teacher.model.config.abstain_threshold
+                    model_rejection = unknown_probability >= (
+                        teacher.model.config.abstain_threshold
                     )
                 else:
-                    accepted = selection.accepted & ~model_abstain
-                selection = replace(selection, accepted=accepted)
-                if batch_key in previous_labels:
-                    retained = previous_labels[batch_key] >= 0
-                    shared_new = selection.accepted & retained
-                    changed_labels = (
-                        selection.labels[shared_new] != previous_labels[batch_key][shared_new]
+                    model_rejection = model_abstain
+                selection = replace(
+                    selection,
+                    accepted=selection.accepted & ~model_rejection,
+                )
+                previous_state = anchor_states.get(batch_key)
+                lifecycle = update_anchor_lifecycle(
+                    selection,
+                    anchor_probabilities,
+                    previous_state,
+                    min_probability=self.config.min_probability,
+                    additional_rejection=model_rejection,
+                )
+                candidate_anchor_states[batch_key] = lifecycle
+                if previous_state is not None:
+                    previous_accepted = previous_state.accepted
+                    current_accepted = lifecycle.accepted
+                    shared = previous_accepted & current_accepted
+                    changed_total += int((previous_accepted ^ current_accepted).sum())
+                    changed_total += int(
+                        (previous_state.labels[shared] != lifecycle.labels[shared]).sum()
                     )
-                    changed_total += int((selection.accepted ^ retained).sum())
-                    changed_total += int(changed_labels.sum())
-                    previous_total += int((selection.accepted | retained).sum())
-                    retained_labels = previous_labels[batch_key]
-                    labels_for_selection = selection.labels.copy()
-                    labels_for_selection[retained] = retained_labels[retained]
-                    accepted = selection.accepted | retained
-                    confidence_for_selection = selection.confidence.copy()
-                    confidence_for_selection[retained] = previous_confidence[batch_key][retained]
-                    selection = replace(
-                        selection,
-                        accepted=accepted,
-                        labels=labels_for_selection,
-                        confidence=confidence_for_selection,
-                    )
+                    previous_total += int((previous_accepted | current_accepted).sum())
+                # Only twice-confirmed anchors enter the hard label/routing
+                # interface. Provisional anchors remain auditable state until
+                # a second independent teacher round confirms them.
+                training_anchors = lifecycle.status == AnchorStatus.TRUSTED
                 labels = np.full(len(probabilities), -100, dtype=np.int64)
-                labels[selection.accepted] = selection.labels[selection.accepted]
+                labels[training_anchors] = lifecycle.labels[training_anchors]
                 weights = np.zeros(len(probabilities), dtype=np.float32)
-                weights[selection.accepted] = selection.confidence[selection.accepted]
+                weights[training_anchors] = lifecycle.confidence[training_anchors]
                 fine_labels = labels if not broad_level else np.full_like(labels, -100)
                 fine_weights = weights if not broad_level else np.zeros_like(weights)
                 parent_labels = (
@@ -343,25 +506,19 @@ class IterativeRefiner:
                         parent_anchor_weights=(
                             None if parent_weights is None else torch.from_numpy(parent_weights)
                         ),
+                        molecular_responsibilities=torch.from_numpy(responsibilities).to(
+                            dtype=batch.morphology.dtype
+                        ),
                         prototype_weights=torch.from_numpy(updated_priors[sample_key]),
                     )
                 )
-                accepted_total += int(selection.accepted.sum())
+                accepted_total += int(training_anchors.sum())
                 cell_total += len(probabilities)
-                stored = np.full(len(probabilities), -1, dtype=np.int64)
-                stored[selection.accepted] = selection.labels[selection.accepted]
-                previous_labels[batch_key] = stored
-                previous_confidence[batch_key] = selection.confidence.copy()
+                provisional_total += int((lifecycle.status == AnchorStatus.PROVISIONAL).sum())
+                trusted_total += int((lifecycle.status == AnchorStatus.TRUSTED).sum())
+                challenged_total += int((lifecycle.status == AnchorStatus.CHALLENGED).sum())
+                revoked_total += int((lifecycle.status == AnchorStatus.REVOKED).sum())
             result: HEIRTrainingResult = trainer.fit(refined_batches, validation_batches)
-            teacher.update(trainer.model)
-            working_batches = refined_batches
-            if result.best_validation_loss < global_best_loss:
-                global_best_loss = result.best_validation_loss
-                global_best_state = {
-                    name: value.detach().cpu().clone()
-                    for name, value in trainer.model.state_dict().items()
-                }
-                global_best_priors = {key: value.copy() for key, value in final_priors.items()}
             changed_fraction = changed_total / max(previous_total, 1)
             history_row = result.history[result.best_epoch] if result.history else {}
             objective_values = np.asarray(
@@ -383,7 +540,17 @@ class IterativeRefiner:
                     np.abs(previous_objectives), 1.0e-8
                 )
                 objective_relative_change = float(relative.max(initial=0.0))
-            previous_objectives = objective_values
+            validation_loss = float(result.best_validation_loss)
+            # Reuse the configured absolute objective tolerance as the
+            # trust-region delta to preserve the public configuration API.
+            round_committed = bool(
+                np.isfinite(validation_loss)
+                and (
+                    not np.isfinite(global_best_loss)
+                    or validation_loss
+                    <= global_best_loss + self.config.objective_stability_tolerance
+                )
+            )
             audit.append(
                 RefinementRound(
                     round_id=round_id,
@@ -397,8 +564,40 @@ class IterativeRefiner:
                     validation_composition=float(objective_values[2]),
                     validation_calibration=float(objective_values[3]),
                     objective_relative_change=objective_relative_change,
+                    provisional=provisional_total,
+                    trusted=trusted_total,
+                    challenged=challenged_total,
+                    revoked=revoked_total,
+                    assignment_entropy=mean_assignment_entropy,
+                    uot_marginal_residual=mean_marginal_residual,
+                    prior_total_variation=float(prior_total_variation),
+                    committed=round_committed,
                 )
             )
+            if not round_committed:
+                # The candidate batches, priors, and lifecycle state were kept
+                # local until validation.  Restore the complete best snapshot
+                # immediately and never expose the failed student to the EMA.
+                trainer.model.load_state_dict(global_best_state)
+                teacher.load_state_dict(global_best_teacher_state)
+                working_batches = list(global_best_batches)
+                anchor_states = self._anchor_states(global_best_anchors)
+                committed_priors = {key: value.copy() for key, value in global_best_priors.items()}
+                reason = "validation_degraded_rollback"
+                break
+
+            teacher.update(trainer.model)
+            working_batches = refined_batches
+            anchor_states = candidate_anchor_states
+            committed_priors = {key: value.copy() for key, value in candidate_priors.items()}
+            if validation_loss <= global_best_loss:
+                global_best_loss = validation_loss
+                global_best_state = self._model_state(trainer.model)
+                global_best_teacher_state = self._teacher_state(teacher)
+                global_best_batches = list(working_batches)
+                global_best_anchors = self._anchor_states(anchor_states)
+                global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
+            previous_objectives = objective_values
             objectives_stable = (
                 objective_relative_change <= self.config.objective_stability_tolerance
             )
@@ -409,6 +608,5 @@ class IterativeRefiner:
             if stable_rounds >= self.config.stable_rounds_required:
                 reason = "accepted_labels_stable"
                 break
-        if global_best_state is not None:
-            trainer.model.load_state_dict(global_best_state)
+        trainer.model.load_state_dict(global_best_state)
         return RefinementResult(tuple(audit), reason, global_best_priors)

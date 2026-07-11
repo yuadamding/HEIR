@@ -750,6 +750,9 @@ def predict_cells(
     prototype_weights = torch.from_numpy(
         np.array(prototypes.weights, dtype=np.float32, copy=True)
     ).to(target)
+    prototype_variances = torch.from_numpy(
+        np.array(prototypes.variances, dtype=np.float32, copy=True)
+    ).to(target)
 
     with torch.autocast(
         device_type=target.type,
@@ -761,15 +764,16 @@ def predict_cells(
             edge_tensor,
             weight_tensor,
             prototype_means=prototype_means,
+            prototype_variances=prototype_variances,
             prototype_types=prototype_types,
             prototype_weights=prototype_weights,
             sample_latent=False,
         )
     latent_draws = []
     expression_draws = []
-    # Graph/context/prototype routing is deterministic at inference. Reuse it
-    # and vectorize only the Gaussian residual draws + decoder, which removes
-    # `latent_samples` redundant graph passes and keeps CUDA tensor cores busy.
+    # Graph context is deterministic at inference. Reuse it while sampling the
+    # detached molecular-state mixture, prototype covariance, and morphology
+    # residual. This captures between-state as well as within-state uncertainty.
     if mc_chunk_size is None:
         elements_per_draw = max(
             1,
@@ -779,15 +783,51 @@ def predict_cells(
     else:
         resolved_chunk_size = min(latent_samples, mc_chunk_size)
     latent_mu = deterministic.latent_mu
-    latent_std = torch.exp(0.5 * deterministic.residual_logvar)
+    residual_std = torch.exp(0.5 * deterministic.residual_logvar)
+    conditional = deterministic.conditional_prototype_probabilities.float()
+    known_rows = conditional.sum(dim=-1) > torch.finfo(conditional.dtype).eps
+    safe_conditional = conditional
+    if conditional.shape[1]:
+        safe_conditional = conditional.clone()
+        safe_conditional[~known_rows, 0] = 1.0
     for start in range(0, latent_samples, resolved_chunk_size):
         draws = min(resolved_chunk_size, latent_samples - start)
-        noise = torch.randn(
+        residual_noise = torch.randn(
             (draws, latent_mu.shape[0], latent_mu.shape[1]),
             device=target,
             dtype=latent_mu.dtype,
         )
-        sampled_latent = latent_mu.unsqueeze(0) + noise * latent_std.unsqueeze(0)
+        residual_draws = deterministic.residual_mu.unsqueeze(0) + (
+            residual_noise * residual_std.unsqueeze(0)
+        )
+        if conditional.shape[1]:
+            sampled_indices = torch.multinomial(
+                safe_conditional,
+                num_samples=draws,
+                replacement=True,
+            ).transpose(0, 1)
+            sampled_means = prototype_means.index_select(0, sampled_indices.reshape(-1)).reshape(
+                draws,
+                latent_mu.shape[0],
+                latent_mu.shape[1],
+            )
+            sampled_variances = prototype_variances.index_select(
+                0, sampled_indices.reshape(-1)
+            ).reshape_as(sampled_means)
+            prototype_noise = torch.randn_like(sampled_means)
+            prototype_draws = (
+                sampled_means
+                + prototype_noise
+                * sampled_variances.clamp_min(model.config.prototype_variance_floor).sqrt()
+            )
+            prototype_draws = torch.where(
+                known_rows.reshape(1, -1, 1),
+                prototype_draws,
+                deterministic.prototype_latent.unsqueeze(0),
+            )
+        else:
+            prototype_draws = deterministic.prototype_latent.unsqueeze(0).expand(draws, -1, -1)
+        sampled_latent = prototype_draws + residual_draws
         with torch.autocast(
             device_type=target.type,
             dtype=torch.float16 if target.type == "cuda" else torch.bfloat16,

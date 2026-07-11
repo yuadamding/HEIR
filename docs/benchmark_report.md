@@ -24,11 +24,32 @@ Scope: (1) audit the method ("check HEIR"); (2) benchmark it on the local cohort
   premise that matched donor RNA is more informative than a wrong donor or generic
   atlas. It does not rescue the failed image-to-spatial-expression endpoint.
 
+## Retrospective snPATHO-DeepBench-v1
+
+The full attached benchmark plan is now represented by a separate, fail-closed
+retrospective scorer. It preserves `snPATHO-Locked-v0.2`, applies the available
+expanded metrics and RNA-mass aggregation to all three cases, and reports
+unavailable tracks explicitly. The historical round-0 paired Spearman delta
+versus the historical integrated type-mean baseline is **-0.0259** (10,000
+resamples: 95% interval **-0.0829 to 0.0081**), so the retrospective diagnostic
+is also negative.
+
+This is not the plan's requested primary result: the historical references pool
+FFPE snPATHO, frozen SNAP snPATHO/Flex, and frozen 3-prime nuclei; refined and
+five-seed predictions, composition-adjustment inputs, per-spot H&E tissue
+fraction, and the required image/graph shuffles are absent. Target-H&E-derived
+OOD calibration also prevents a Track A1/A2 compliance claim. See
+[snPATHO-DeepBench-v1](snpatho_deepbench.md) for specimen-level results,
+reference composition, spot QC, the readiness matrix, and the reproduction
+command.
+
 ## 0. Locked snPATHO v0.2 benchmark
 
 This was a single prespecified seed-17 proof-of-concept run. It used the
 development-only B1 latent transform and RNA decoder, a three-layer 256-wide graph,
 20 Monte Carlo latent samples, and a target-H&E-only OOD threshold calibration.
+It ran one-pass personalized training followed by prediction; it did **not** call
+the iterative refiner and therefore provides no empirical refinement contrast.
 The latter copied the B1 Mahalanobis mean/precision unchanged and calibrated only
 the scalar 95th-percentile cutoff; every provenance artifact records
 `target_expression_accessed: false`. The run is transductive: target H&E and
@@ -146,8 +167,9 @@ Only triggers on real multi-char IDs, so the synthetic tests missed it.
 2. `src/heir/prior/prototypes.py` `build_sample_prototypes` — sample_ids.
 3. `src/heir/cli.py` refine — refined prototype sample_ids.
 
-Fixed to `dtype="U%d" % max(1, len(value))`. The current suite has 146 passing
-tests, including regression coverage for the completed locked pipeline.
+Fixed to `dtype="U%d" % max(1, len(value))`. The current suite has 181 passing
+tests, including regression coverage for the completed locked pipeline and the
+development-only refinement redesign.
 
 ## 5. Method audit highlights (26-agent adversarial review)
 
@@ -161,8 +183,12 @@ At audit time, the type-mean baseline, donor bootstrap, and decisive expression
 criterion were not yet wired into an end-to-end target benchmark. Section 0
 supersedes that finding: the completed locked runner executes the type-mean
 baseline and donor bootstrap and reports the prespecified expression endpoint.
-Broader framework cautions remain around the generic cohort validator, sticky
-refinement anchors, and claims about unwired atlas shrinkage or residual gating.
+The historical locked implementation had sticky refinement anchors and did not
+run refinement. The current development branch adds revocable anchors,
+transport-derived responsibilities, and immediate rollback, but those changes
+remain unvalidated biologically and do not alter the locked result. Broader
+cautions remain around generic initialization, graph boundaries, residual
+identifiability, and independent cell-level truth.
 
 ## 6. Runnable next steps (infrastructure in place)
 

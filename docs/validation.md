@@ -53,3 +53,9 @@ inputs, requires all three donors by default, and emits donor-bootstrap macro
 confidence intervals. Constant matched-snRNA pseudobulk, spatially shuffled
 HEIR predictions, and matched type means are generated without consulting the
 target Visium values.
+
+Methodology tests additionally exercise identifiable and non-identifiable
+transport, missing-reference-state dustbin routing, revocable wrong anchors,
+parent-to-fine constraints, scVI full-library scale equivalence, final-latent UOT
+consistency, and prototype-mixture uncertainty. These are necessary behavioral
+checks, not substitutes for independent cell-resolution biological validation.

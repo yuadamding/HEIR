@@ -15,7 +15,7 @@ the selected predictions are frozen.
 
 ## What is implemented
 
-The repository contains a runnable HEIR v0.1 core:
+The repository contains a runnable HEIR core and a development-only refinement redesign:
 
 - immutable donor/block/section manifests with leakage checks;
 - exact local NatCommun/MOSAIC and snPATHO cohort mappings;
@@ -26,11 +26,26 @@ The repository contains a runnable HEIR v0.1 core:
 - a graph-aware, hierarchical prototype-plus-residual HEIR model;
 - differentiable unbalanced optimal transport with unknown mass;
 - composition, pseudobulk, marker/program, residual, cycle, hierarchy, graph, anchor, and uncertainty objectives;
-- broad-to-fine generalized-EM refinement with an EMA teacher, independent-view gates, rollback, and exported refined priors;
+- covariance-aware UOT on the decoded molecular latent, detached transport responsibilities, and direct molecular/type M-step supervision;
+- broad-to-fine refinement with an EMA teacher, revocable two-round anchors, independent-view gates, immediate rollback, and audited prior drift;
 - H&E-only distillation, calibration, OOD detection, abstention, inference intervals, biological baselines, and donor-aware metrics;
 - synthetic, unit, and local-data smoke paths.
 
-Large pretrained components are deliberately separate artifact stages. The installed `hne` and `histoplus` environments use incompatible Python/PyTorch versions, and the available RTX 3080 has about 10 GB VRAM. HEIR therefore consumes cached CellViT/HistoPLUS/pathology/scGPT/scVI artifacts instead of forcing every model into one process.
+Large pretrained components are deliberately external assets. HEIR contains the
+source, manifests, hashes, loaders, tests, and orchestration scripts, but not
+multi-gigabyte weights. The default external root is
+`../HEIR_assets/pretrained`, or set `HEIR_PRETRAINED_DIR`. Verify every weight
+against the committed manifest before use:
+
+```bash
+export HEIR_PRETRAINED_DIR=/storage/HE_GPT/HEIR_assets/pretrained
+conda run -n hne python scripts/manage_pretrained_assets.py list
+conda run -n hne python scripts/manage_pretrained_assets.py verify
+```
+
+Generated run artifacts remain under the ignored `artifacts/` path because their
+contracts bind canonical source paths as well as hashes. They are never tracked
+by Git; do not relocate a completed locked run behind a symlink.
 
 ## Quick start
 
@@ -108,7 +123,8 @@ conda run -n hne heir prepare-reference \
 The frozen v0.2 three-sample run is automated by a fail-closed dry-run-first
 orchestrator. Space Ranger is the default segmentation method; OmiCLIP,
 training, and prediction use CUDA mixed precision. No locked Visium expression
-is opened until all selected predictions validate:
+is opened until all selected predictions validate. This historical locked run is
+`train → predict`, not a refinement experiment, and remains unchanged:
 
 ```bash
 conda run -n hne python scripts/run_snpatho_pipeline.py --sample all
@@ -124,6 +140,30 @@ negative: macro median-gene Spearman is -0.0054 and does not beat spatial
 shuffle or the matched type-mean baseline. The repository reports that result
 as-is; it is evidence for further development, not a successful performance
 claim.
+
+The attached comprehensive plan is implemented as the separate retrospective
+[`snPATHO-DeepBench-v1`](docs/snpatho_deepbench.md) scorer. It revalidates the
+immutable locked inputs, applies RNA-mass aggregation and the expanded metric
+panel, writes per-gene and equal-weight specimen summaries, and records every
+unavailable track without substituting weaker evidence. The available
+historical round-0 diagnostic is also negative (paired macro Spearman delta
+versus the historical integrated type mean: -0.0259); the requested refined
+FFPE-snPATHO-only primary endpoint is not yet testable.
+
+For refinement development, use only a development cohort with spatial truth.
+The separate orchestrator enforces the prespecified
+`train → predict-0 → refine/predict rounds → development evaluation` order and
+rejects locked roles:
+
+```bash
+conda run -n hne python scripts/run_refinement_development.py \
+  --plan configs/refinement_development_plan.example.json
+```
+
+Replace the example commands/outputs with cohort-specific, prespecified CLI
+arguments before adding `--execute`. See
+[the refinement redesign](docs/refinement_redesign.md) for the implemented
+algorithm and remaining validation requirements.
 
 After the model, gene panel, and thresholds are frozen, create the separate
 locked Visium truth contract. The command accepts a QC H5AD, a 10x HDF5 file,
@@ -199,8 +239,9 @@ The three snPATHO samples (4066, 4399, 4411) are locked Tier-1 Visium validation
 
 See [data.md](docs/data.md), [method.md](docs/method.md),
 [validation.md](docs/validation.md), and
-[snpatho_pipeline.md](docs/snpatho_pipeline.md) for the scientific and
-engineering contracts.
+[snpatho_pipeline.md](docs/snpatho_pipeline.md), and
+[snpatho_deepbench.md](docs/snpatho_deepbench.md) for the scientific and
+engineering contracts and retrospective benchmark status.
 
 ## Repository map
 

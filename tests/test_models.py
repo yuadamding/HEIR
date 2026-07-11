@@ -62,6 +62,10 @@ class HEIRModelTests(unittest.TestCase):
                 atol=1e-6,
             )
         )
+        torch.testing.assert_close(
+            output.conditional_prototype_probabilities.sum(dim=-1),
+            torch.ones(11),
+        )
         self.assertTrue(
             torch.allclose(
                 output.hierarchy_parent_probabilities.sum(dim=-1),
@@ -186,6 +190,47 @@ class HEIRModelTests(unittest.TestCase):
         self.assertTrue(torch.equal(output.prototype_weights[:3], weights[0].expand(3, -1)))
         self.assertTrue(torch.equal(output.prototype_weights[3:], weights[1].expand(3, -1)))
 
+    def test_local_routing_does_not_double_count_abundance_by_default(self) -> None:
+        model = HEIRModel(small_config(fine_to_parent=None, hard_type_routing=False)).eval()
+        morphology = torch.randn(3, 6)
+        means = torch.zeros(2, 4)
+        types = torch.zeros(2, dtype=torch.long)
+        first = model(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            prototype_weights=torch.tensor([0.99, 0.01]),
+            sample_latent=False,
+        )
+        second = model(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            prototype_weights=torch.tensor([0.01, 0.99]),
+            sample_latent=False,
+        )
+        torch.testing.assert_close(
+            first.conditional_prototype_probabilities,
+            second.conditional_prototype_probabilities,
+        )
+
+        prior_weighted = HEIRModel(
+            small_config(
+                fine_to_parent=None,
+                hard_type_routing=False,
+                prototype_abundance_logit_weight=1.0,
+            )
+        ).eval()
+        prior_weighted.load_state_dict(model.state_dict())
+        weighted = prior_weighted(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            prototype_weights=torch.tensor([0.99, 0.01]),
+            sample_latent=False,
+        )
+        assert torch.all(weighted.conditional_prototype_probabilities[:, 0] > 0.98)
+
     def test_exported_prototype_cost_does_not_preapply_unknown_gate(self) -> None:
         model = HEIRModel(small_config(hard_type_routing=False)).eval()
         morphology = torch.randn(4, 6)
@@ -210,6 +255,63 @@ class HEIRModelTests(unittest.TestCase):
 
         self.assertTrue(torch.all(high_unknown.unknown_probability > neutral.unknown_probability))
         torch.testing.assert_close(high_unknown.prototype_cost, neutral.prototype_cost)
+        torch.testing.assert_close(high_unknown.prototype_latent, neutral.prototype_latent)
+        torch.testing.assert_close(high_unknown.latent_mu, neutral.latent_mu)
+        torch.testing.assert_close(high_unknown.expression, neutral.expression)
+
+    def test_covariance_aware_uot_uses_final_decoded_latent(self) -> None:
+        model = HEIRModel(small_config(hard_type_routing=False)).eval()
+        morphology = torch.randn(4, 6)
+        means = torch.randn(3, 4)
+        variances = torch.rand(3, 4) + 0.2
+        types = torch.tensor([0, 1, 2])
+        with torch.no_grad():
+            output = model(
+                morphology,
+                prototype_means=means,
+                prototype_variances=variances,
+                prototype_types=types,
+                sample_latent=False,
+            )
+            model.prototype_query_head.weight.fill_(1000.0)
+            model.prototype_query_head.bias.fill_(-1000.0)
+            changed_legacy_query = model(
+                morphology,
+                prototype_means=means,
+                prototype_variances=variances,
+                prototype_types=types,
+                sample_latent=False,
+            )
+
+        total_variance = output.residual_logvar.exp().unsqueeze(1) + variances.unsqueeze(0)
+        expected = 0.5 * (
+            (output.latent_mu.unsqueeze(1) - means.unsqueeze(0)).square() / total_variance
+            + total_variance.log()
+        ).mean(dim=-1)
+        compatibility = output.type_probabilities.gather(
+            1, types.unsqueeze(0).expand(len(morphology), -1)
+        )
+        expected = expected - model.config.prototype_type_cost_weight * compatibility.log()
+        expected_local_logits = (
+            -(
+                0.5
+                * (
+                    (output.latent_mu.unsqueeze(1) - means.unsqueeze(0)).square() / total_variance
+                    + total_variance.log()
+                ).mean(dim=-1)
+                / model.config.prototype_temperature
+            )
+            + compatibility.log()
+        )
+        torch.testing.assert_close(output.prototype_query, output.latent_mu)
+        torch.testing.assert_close(
+            output.prototype_latent + output.residual_mu,
+            output.latent_mu,
+        )
+        torch.testing.assert_close(output.prototype_logits, expected_local_logits)
+        torch.testing.assert_close(output.prototype_cost, expected)
+        torch.testing.assert_close(changed_legacy_query.prototype_cost, output.prototype_cost)
+        torch.testing.assert_close(changed_legacy_query.expression, output.expression)
 
     def test_deterministic_inference_and_checkpoint_round_trip(self) -> None:
         model = HEIRModel(small_config()).eval()
@@ -239,6 +341,49 @@ class HEIRModelTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(first.expression, third.expression))
         self.assertTrue(torch.equal(first.type_probabilities, third.type_probabilities))
+
+    def test_unversioned_checkpoint_preserves_legacy_routing_semantics(self) -> None:
+        legacy = HEIRModel(
+            small_config(
+                prototype_abundance_logit_weight=1.0,
+                covariance_aware_uot=False,
+                legacy_independent_prototype_query=True,
+            )
+        ).eval()
+        checkpoint = legacy.checkpoint()
+        checkpoint.pop("schema")
+        for key in (
+            "prototype_abundance_logit_weight",
+            "prototype_variance_floor",
+            "covariance_aware_uot",
+            "legacy_independent_prototype_query",
+        ):
+            checkpoint["config"].pop(key)
+        restored = HEIRModel.from_checkpoint(checkpoint).eval()
+
+        self.assertTrue(restored.config.legacy_independent_prototype_query)
+        self.assertFalse(restored.config.covariance_aware_uot)
+        self.assertEqual(restored.config.prototype_abundance_logit_weight, 1.0)
+        morphology = torch.randn(4, 6)
+        means = torch.randn(3, 4)
+        types = torch.tensor([0, 1, 2])
+        weights = torch.tensor([0.7, 0.2, 0.1])
+        expected = legacy(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            prototype_weights=weights,
+            sample_latent=False,
+        )
+        observed = restored(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            prototype_weights=weights,
+            sample_latent=False,
+        )
+        torch.testing.assert_close(observed.expression, expected.expression)
+        torch.testing.assert_close(observed.prototype_cost, expected.prototype_cost)
 
     def test_no_prototypes_and_empty_graph_route_to_unknown(self) -> None:
         model = HEIRModel(small_config()).eval()

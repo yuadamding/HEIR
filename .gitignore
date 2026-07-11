@@ -9,7 +9,7 @@ build/
 dist/
 .venv/
 outputs/
-artifacts/
+/artifacts
 checkpoints/
 *.ckpt
 *.pt

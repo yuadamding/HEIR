@@ -42,6 +42,7 @@ class OptimizationConfig:
 @dataclass(frozen=True)
 class LossWeightConfig:
     cell_type: float = 1.0
+    molecular_posterior: float = 1.0
     marker: float = 0.2
     uot: float = 1.0
     program: float = 1.0

@@ -1,5 +1,6 @@
 """Configurable composite objective and structured diagnostics for HEIR."""
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -22,6 +23,7 @@ from .biological import (
     unknown_calibration_loss,
 )
 from .distribution import (
+    UnbalancedSinkhornResult,
     dirichlet_composition_prior_loss,
     jensen_shannon_composition_loss,
     soft_composition_bounds_loss,
@@ -51,7 +53,8 @@ class HEIRLossConfig:
     composition_dirichlet_strength: float = 10.0
     uot_epsilon: float = 0.1
     uot_marginal_relaxation: float = 1.0
-    uot_iterations: int = 80
+    uot_iterations: int = 160
+    uot_convergence_tolerance: Optional[float] = None
     uot_unknown_mass: float = 0.05
     uot_unknown_cost: float = 1.0
     pseudobulk_metric: str = "mse"
@@ -88,6 +91,10 @@ class HEIRLossConfig:
             raise ValueError("composition_dirichlet_strength must be positive")
         if self.uot_iterations <= 0 or self.uot_unknown_cost < 0:
             raise ValueError("UOT iterations must be positive and unknown cost nonnegative")
+        if self.uot_convergence_tolerance is not None and (
+            not math.isfinite(self.uot_convergence_tolerance) or self.uot_convergence_tolerance <= 0
+        ):
+            raise ValueError("UOT convergence tolerance must be finite and positive")
         if not 0.0 <= self.uot_unknown_mass < 1.0:
             raise ValueError("uot_unknown_mass must be in [0, 1)")
         if self.graph_power < 1 or self.graph_boundary_margin < 0 or self.eps <= 0:
@@ -174,6 +181,8 @@ class HEIRCompositeLoss(nn.Module):
         *,
         sample_index: Optional[Tensor] = None,
         cell_weights: Optional[Tensor] = None,
+        biological_cell_weights: Optional[Tensor] = None,
+        molecular_type_responsibilities: Optional[Tensor] = None,
         sample_weights: Optional[Tensor] = None,
         target_composition: Optional[Tensor] = None,
         composition_lower: Optional[Tensor] = None,
@@ -186,6 +195,8 @@ class HEIRCompositeLoss(nn.Module):
         uot_target_mask: Optional[Tensor] = None,
         uot_pair_mask: Optional[Tensor] = None,
         uot_unknown_cost: Optional[Tensor] = None,
+        uot_unknown_mass: Optional[Tensor] = None,
+        precomputed_uot: Optional[UnbalancedSinkhornResult] = None,
         target_pseudobulk: Optional[Tensor] = None,
         gene_weights: Optional[Tensor] = None,
         program_matrix: Optional[Tensor] = None,
@@ -220,13 +231,23 @@ class HEIRCompositeLoss(nn.Module):
         terms: Dict[str, Tensor] = {name: base_zero for name in self._TERMS}
         diagnostics: Dict[str, Tensor] = {}
         eps = self.config.eps
+        biological_weights = (
+            cell_weights if biological_cell_weights is None else biological_cell_weights
+        )
+        conditioning_probabilities = (
+            probabilities
+            if molecular_type_responsibilities is None
+            else molecular_type_responsibilities.detach()
+        )
+        if conditioning_probabilities.shape != probabilities.shape:
+            raise ValueError("molecular_type_responsibilities must align to type probabilities")
 
         if target_composition is not None and self.config.composition_weight:
             terms["composition"] = jensen_shannon_composition_loss(
                 probabilities,
                 target_composition,
                 sample_index,
-                cell_weights,
+                biological_weights,
                 sample_weights,
                 eps,
             )
@@ -240,7 +261,7 @@ class HEIRCompositeLoss(nn.Module):
                 composition_lower,
                 composition_upper,
                 sample_index,
-                cell_weights,
+                biological_weights,
                 sample_weights,
                 eps,
             )
@@ -261,7 +282,7 @@ class HEIRCompositeLoss(nn.Module):
                 probabilities,
                 resolved_concentration,
                 sample_index,
-                cell_weights,
+                biological_weights,
                 sample_weights,
                 eps,
             )
@@ -276,7 +297,10 @@ class HEIRCompositeLoss(nn.Module):
                     target_mass = repeated_weights[0]
                 else:
                     target_mass = repeated_weights.new_empty(repeated_weights.shape[1])
-        if (
+        if precomputed_uot is not None and self.config.uot_weight:
+            terms["uot"] = precomputed_uot.loss
+            diagnostics.update(precomputed_uot.diagnostics())
+        elif (
             cost is not None
             and target_mass is not None
             and cost.shape[-1] > 0
@@ -293,12 +317,21 @@ class HEIRCompositeLoss(nn.Module):
                 epsilon=self.config.uot_epsilon,
                 marginal_relaxation=self.config.uot_marginal_relaxation,
                 iterations=self.config.uot_iterations,
-                unknown_mass=self.config.uot_unknown_mass,
+                convergence_tolerance=self.config.uot_convergence_tolerance,
+                unknown_mass=(
+                    self.config.uot_unknown_mass if uot_unknown_mass is None else uot_unknown_mass
+                ),
                 unknown_cost=(
                     self.config.uot_unknown_cost if uot_unknown_cost is None else uot_unknown_cost
                 ),
                 eps=eps,
             )
+            if (
+                self.config.uot_convergence_tolerance is not None
+                and result.converged is not None
+                and not bool(result.converged.all())
+            ):
+                raise FloatingPointError("UOT failed to meet its convergence tolerance")
             terms["uot"] = result.loss
             diagnostics.update(result.diagnostics())
 
@@ -307,7 +340,7 @@ class HEIRCompositeLoss(nn.Module):
                 expression,
                 target_pseudobulk,
                 sample_index,
-                cell_weights,
+                biological_weights,
                 gene_weights,
                 sample_weights,
                 self.config.pseudobulk_metric,
@@ -322,10 +355,10 @@ class HEIRCompositeLoss(nn.Module):
             if target_program_scores.ndim == 2:
                 terms["program"] = type_conditioned_program_score_loss(
                     expression,
-                    probabilities,
+                    conditioning_probabilities,
                     program_matrix,
                     target_program_scores,
-                    cell_weights,
+                    biological_weights,
                     program_weights,
                     metric=self.config.program_metric,
                     eps=eps,
@@ -336,7 +369,7 @@ class HEIRCompositeLoss(nn.Module):
                     program_matrix,
                     target_program_scores,
                     sample_index,
-                    cell_weights,
+                    biological_weights,
                     program_weights,
                     sample_weights,
                     self.config.program_metric,
@@ -346,18 +379,18 @@ class HEIRCompositeLoss(nn.Module):
             if marker_mask is not None:
                 terms["marker"] = marker_ranking_loss(
                     expression,
-                    probabilities,
+                    conditioning_probabilities,
                     marker_mask,
-                    cell_weights,
+                    biological_weights,
                     eps=eps,
                 )
             else:
                 terms["marker"] = marker_centroid_loss(
                     expression,
-                    probabilities,
+                    conditioning_probabilities,
                     marker_centroids,
                     marker_mask,
-                    cell_weights,
+                    biological_weights,
                     marker_type_weights,
                     self.config.marker_metric,
                     eps=eps,
@@ -386,7 +419,7 @@ class HEIRCompositeLoss(nn.Module):
                 residual_precision,
                 resolved_assignments,
                 residual_logvar if residual_precision is None else None,
-                cell_weights,
+                biological_weights,
                 eps,
             )
         residual_mu = _get(output, "residual_mu")
@@ -394,7 +427,7 @@ class HEIRCompositeLoss(nn.Module):
             terms["latent_kl"] = residual_gaussian_kl_loss(
                 residual_mu,
                 residual_logvar,
-                cell_weights,
+                biological_weights,
                 eps,
             )
         if cycle_latent is not None and self.config.cycle_weight:
@@ -402,14 +435,14 @@ class HEIRCompositeLoss(nn.Module):
                 latent,
                 cycle_latent,
                 residual_logvar,
-                cell_weights,
+                biological_weights,
                 eps,
             )
         if edge_index is not None and self.config.graph_weight:
             terms["graph"] = boundary_graph_loss(
                 latent,
                 edge_index,
-                probabilities,
+                conditioning_probabilities,
                 edge_weight,
                 self.config.graph_boundary_margin,
                 self.config.graph_power,
@@ -455,10 +488,10 @@ class HEIRCompositeLoss(nn.Module):
                 raise ValueError("scGPT targets require HEIRConfig.scgpt_embedding_dim > 0")
             terms["scgpt"] = scgpt_representation_loss(
                 scgpt_embedding,
-                probabilities,
+                conditioning_probabilities,
                 scgpt_type_prototypes,
                 scgpt_type_variances,
-                cell_weights,
+                biological_weights,
                 eps=eps,
             )
         parent_probabilities = _get(output, "parent_type_probabilities")

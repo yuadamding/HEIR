@@ -362,6 +362,51 @@ def test_predict_cells_model_abstain_is_opt_in() -> None:
     assert composite_gate.labels[0] == -1
 
 
+def test_predict_cells_intervals_include_prototype_assignment_uncertainty() -> None:
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=2,
+            num_cell_types=2,
+            expression_dim=1,
+            latent_dim=1,
+            graph_hidden_dim=2,
+            graph_output_dim=2,
+            graph_layers=1,
+            trunk_hidden_dims=(2,),
+            decoder_hidden_dims=(2,),
+            dropout=0.0,
+            hard_type_routing=False,
+        )
+    )
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        model.unknown_head.bias.fill_(-20.0)
+        model.residual_logvar_head.bias.fill_(-12.0)
+    prototypes = PrototypeSet(
+        prototype_ids=np.asarray(["left", "right"]),
+        sample_ids=np.asarray(["sample", "sample"]),
+        cell_type_labels=np.asarray(["type0", "type1"]),
+        means=np.asarray([[-5.0], [5.0]], dtype=np.float32),
+        variances=np.full((2, 1), 1.0e-4, dtype=np.float32),
+        weights=np.full(2, 0.5, dtype=np.float32),
+    )
+    torch.manual_seed(17)
+    result = predict_cells(
+        model,
+        np.zeros((1, 2), dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        ["nucleus"],
+        prototypes,
+        ["type0", "type1"],
+        ["gene"],
+        latent_samples=256,
+        device="cpu",
+    )
+
+    assert result.latent_variance[0, 0] > 20.0
+
+
 def test_predict_cells_requires_provenance_for_explicit_ood_scores():
     model = HEIRModel(
         HEIRConfig(

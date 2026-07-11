@@ -32,6 +32,7 @@ class HEIRTrainingBatch:
     target_pseudobulk: Tensor
     prototype_mask: Optional[Tensor] = None
     cell_weights: Optional[Tensor] = None
+    molecular_responsibilities: Optional[Tensor] = None
     anchor_labels: Optional[Tensor] = None
     anchor_weights: Optional[Tensor] = None
     parent_anchor_labels: Optional[Tensor] = None
@@ -68,12 +69,13 @@ class HEIRTrainingBatch:
     molecular_training_donors: Tuple[str, ...] = ()
 
     CONTRACT: ClassVar[str] = "heir.training_batch"
-    CONTRACT_VERSION: ClassVar[int] = 4
+    CONTRACT_VERSION: ClassVar[int] = 5
 
     _OPTIONAL_TENSORS: ClassVar[Tuple[str, ...]] = (
         "edge_weight",
         "prototype_mask",
         "cell_weights",
+        "molecular_responsibilities",
         "anchor_labels",
         "anchor_weights",
         "parent_anchor_labels",
@@ -166,6 +168,21 @@ class HEIRTrainingBatch:
                 raise ValueError("cell_weights must align to cells")
             if not torch.isfinite(self.cell_weights).all() or bool((self.cell_weights < 0).any()):
                 raise ValueError("cell_weights must be finite and non-negative")
+        if self.molecular_responsibilities is not None:
+            responsibilities = self.molecular_responsibilities
+            if responsibilities.shape != (cells, prototypes):
+                raise ValueError("molecular_responsibilities must have shape (cells, prototypes)")
+            if (
+                not torch.is_floating_point(responsibilities)
+                or not torch.isfinite(responsibilities).all()
+                or bool((responsibilities < 0).any())
+            ):
+                raise ValueError("molecular_responsibilities must be finite and non-negative")
+            row_mass = responsibilities.sum(dim=1)
+            if bool((row_mass > 1.0 + 1.0e-4).any()):
+                raise ValueError(
+                    "molecular responsibility rows must contain at most unit known mass"
+                )
         if self.anchor_labels is not None and self.anchor_labels.shape != (cells,):
             raise ValueError("anchor_labels must align to cells")
         if self.anchor_weights is not None:
@@ -437,7 +454,7 @@ class HEIRTrainingBatch:
                         "HEIR training-batch version 1 lacks required provenance; "
                         "regenerate it with assemble-batch"
                     )
-                if version not in {2, 3}:
+                if version not in {2, 3, 4}:
                     raise ValueError("unsupported HEIR training-batch version %d" % version)
             required_metadata = metadata - (
                 {
@@ -461,7 +478,11 @@ class HEIRTrainingBatch:
             for name in cls._OPTIONAL_TENSORS:
                 presence = "__present__%s" % name
                 if presence not in archive:
-                    if name in {"parent_anchor_labels", "parent_anchor_weights"}:
+                    if name in {
+                        "parent_anchor_labels",
+                        "parent_anchor_weights",
+                        "molecular_responsibilities",
+                    }:
                         values[name] = None
                         continue
                     raise ValueError("training-batch artifact lacks presence flag for %s" % name)
