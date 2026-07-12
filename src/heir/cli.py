@@ -936,6 +936,15 @@ def command_build_prototypes(args: argparse.Namespace) -> int:
         latent = reference.latent
         latent_method = "reference"
         latent_space_id = args.latent_space_id or reference.latent_space_id
+        latent_training_donors = reference.latent_training_donors
+        latent_transform_sha256 = reference.latent_transform_sha256
+        if not latent_training_donors and not args.unsafe_allow_legacy_latent_transform:
+            raise ValueError(
+                "precomputed reference latent lacks training-donor provenance; rebuild it or "
+                "use --unsafe-allow-legacy-latent-transform only for an audited migration"
+            )
+        if latent_transform_sha256 and latent_space_id != "sha256:%s" % (latent_transform_sha256):
+            raise ValueError("precomputed reference latent identity differs from its transform")
         if (
             args.latent_space_id
             and reference.latent_space_id
@@ -1028,6 +1037,8 @@ def command_build_prototypes(args: argparse.Namespace) -> int:
                 reference,
                 latent=latent,
                 latent_space_id=latent_space_id,
+                latent_training_donors=latent_training_donors,
+                latent_transform_sha256=latent_transform_sha256,
             )
             enriched.save_npz(args.reference_with_latent)
             emitted_reference_path = str(Path(args.reference_with_latent).expanduser().resolve())
@@ -1101,7 +1112,9 @@ def command_fit_residual_geometry(args: argparse.Namespace) -> int:
         minimum_calibration_cells=args.minimum_calibration_cells,
         latent_space_id=reference.latent_space_id,
         source_reference_sha256=_sha256(args.reference),
-        training_donors=tuple(sorted(set(reference.donor_ids.tolist()))),
+        training_donors=tuple(
+            sorted(set(reference.donor_ids.tolist()) | set(reference.latent_training_donors))
+        ),
         latent_transform_sha256=("" if prototypes is None else prototypes.latent_transform_sha256),
     )
     geometry.to_npz(args.output)
@@ -2448,7 +2461,7 @@ def _load_refinement_views(
             or len(set(view_ids)) != len(view_ids)
             or any(not value.strip() for value in view_ids)
         ):
-            raise ValueError("view_ids must be unique and align to independent views")
+            raise ValueError("view_ids must be unique and align to scale-held-out views")
         if len(view_hashes) != predictions.shape[0] or any(
             len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
             for value in view_hashes
@@ -2489,7 +2502,7 @@ def _load_refinement_views(
         for left in range(predictions.shape[0]):
             for right in range(left + 1, predictions.shape[0]):
                 if np.array_equal(predictions[left], predictions[right]):
-                    raise ValueError("independent view predictions cannot be exact duplicates")
+                    raise ValueError("scale-held-out view predictions cannot be exact duplicates")
         order = np.asarray([lookup[value] for value in batch.nucleus_ids], dtype=np.int64)
         result[key] = predictions[:, order]
     return result

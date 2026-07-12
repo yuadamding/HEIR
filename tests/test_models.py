@@ -84,6 +84,39 @@ class HEIRModelTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(morphology.grad).all())
         self.assertGreater(float(morphology.grad.norm().detach()), 0.0)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for AMP regression")
+    def test_cuda_autocast_end_to_end_forward_backward(self) -> None:
+        model = HEIRModel(small_config(hard_type_routing=False)).cuda()
+        morphology = torch.randn(11, 6, device="cuda", requires_grad=True)
+        edges = torch.tensor(
+            [[0, 1, 2, 3, 4, 6, 7, 8], [1, 2, 3, 4, 5, 7, 8, 9]],
+            dtype=torch.long,
+            device="cuda",
+        )
+        prototype_means = torch.randn(5, 4, device="cuda", requires_grad=True)
+        prototype_types = torch.tensor([0, 0, 1, 2, 2], dtype=torch.long, device="cuda")
+        with torch.autocast("cuda", dtype=torch.float16):
+            output = model(
+                morphology,
+                edges,
+                prototype_means=prototype_means,
+                prototype_types=prototype_types,
+                sample_latent=True,
+            )
+            loss = (
+                output.expression.square().mean()
+                + output.type_probabilities.square().mean()
+                + output.latent.square().mean()
+            )
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss.detach()))
+        self.assertIsNotNone(morphology.grad)
+        self.assertIsNotNone(prototype_means.grad)
+        assert morphology.grad is not None and prototype_means.grad is not None
+        self.assertTrue(torch.isfinite(morphology.grad).all())
+        self.assertTrue(torch.isfinite(prototype_means.grad).all())
+
     def test_graph_projection_before_gather_matches_edge_expanded_reference(self) -> None:
         optimized = GraphMessageLayer(6, 4, dropout=0.0).double()
         reference = copy.deepcopy(optimized)
@@ -404,6 +437,109 @@ class HEIRModelTests(unittest.TestCase):
         torch.testing.assert_close(restored.residual_type_max_norms, maximums)
         assert restored.residual_type_basis is not None
         assert not restored.residual_type_basis.requires_grad
+
+    def test_uncertain_type_defers_residual_and_concentrated_type_selects_one_basis(
+        self,
+    ) -> None:
+        model = HEIRModel(
+            small_config(
+                hard_type_routing=False,
+                residual_rank=1,
+                residual_type_concentration_threshold=0.7,
+            )
+        ).eval()
+        bases = torch.zeros(3, 4, 1)
+        bases[0, 0, 0] = 1.0
+        bases[1, 1, 0] = 1.0
+        bases[2, 2, 0] = 1.0
+        maximums = torch.tensor([0.1, 0.2, 0.3])
+        model.configure_residual_geometry(bases, maximums, freeze_basis=True)
+        assert model.residual_coefficient_head is not None
+        assert model.residual_gate_head is not None
+        with torch.no_grad():
+            model.fine_type_head.weight.zero_()
+            model.fine_type_head.bias.zero_()
+            model.residual_coefficient_head.weight.zero_()
+            model.residual_coefficient_head.bias.fill_(100.0)
+            model.residual_gate_head.weight.zero_()
+            model.residual_gate_head.bias.fill_(100.0)
+        morphology = torch.randn(4, 6)
+        prototypes = torch.randn(3, 4)
+        types = torch.tensor([0, 1, 2])
+
+        uncertain = model(
+            morphology,
+            prototype_means=prototypes,
+            prototype_types=types,
+            sample_latent=False,
+        )
+        torch.testing.assert_close(uncertain.residual_mu, torch.zeros_like(uncertain.residual_mu))
+        assert uncertain.residual_gate is not None
+        torch.testing.assert_close(
+            uncertain.residual_gate, torch.zeros_like(uncertain.residual_gate)
+        )
+
+        with torch.no_grad():
+            model.fine_type_head.bias.copy_(torch.tensor([-30.0, 30.0, -30.0]))
+        concentrated = model(
+            morphology,
+            prototype_means=prototypes,
+            prototype_types=types,
+            sample_latent=False,
+        )
+        assert concentrated.residual_basis is not None
+        torch.testing.assert_close(
+            concentrated.residual_basis,
+            bases[1].expand(len(morphology), -1, -1),
+        )
+        torch.testing.assert_close(
+            concentrated.residual_mu[:, [0, 2, 3]],
+            torch.zeros_like(concentrated.residual_mu[:, [0, 2, 3]]),
+        )
+        self.assertTrue(torch.all(concentrated.residual_mu.norm(dim=-1) <= 0.2 + 1.0e-6))
+
+    def test_residual_sampling_promotes_mixed_precision_geometry(self) -> None:
+        basis = torch.zeros(3, 4, 2, dtype=torch.float32)
+        basis[:, 0, 0] = 1.0
+        basis[:, 1, 1] = 1.0
+        coefficients = torch.full((5, 3, 2), 0.25, dtype=torch.float16)
+        gate = torch.full((3,), 0.5, dtype=torch.float16)
+
+        residual = HEIRModel._bounded_low_rank_residual(basis, coefficients, gate)
+
+        self.assertEqual(residual.dtype, torch.float32)
+        self.assertEqual(residual.shape, (5, 3, 4))
+        self.assertTrue(torch.isfinite(residual).all())
+        self.assertTrue(torch.all(residual.norm(dim=-1) < 0.5))
+
+    def test_legacy_mixed_basis_checkpoint_requires_explicit_migration(self) -> None:
+        model = HEIRModel(small_config(residual_rank=2)).eval()
+        checkpoint = model.checkpoint()
+        checkpoint["config"].pop("residual_type_strategy")
+        checkpoint["config"].pop("residual_type_concentration_threshold")
+        checkpoint["residual_geometry"].pop("type_strategy")
+        checkpoint["residual_geometry"].pop("type_concentration_threshold")
+
+        with self.assertRaisesRegex(ValueError, "allow_legacy_mixed_residual_basis=True"):
+            HEIRModel.from_checkpoint(checkpoint)
+        restored = HEIRModel.from_checkpoint(
+            checkpoint,
+            allow_legacy_mixed_residual_basis=True,
+        )
+        self.assertEqual(restored.config.residual_type_strategy, "legacy_weighted_basis")
+        self.assertEqual(restored.config.residual_type_concentration_threshold, 0.0)
+
+    def test_checkpoint_rejects_residual_strategy_metadata_mismatch(self) -> None:
+        checkpoint = HEIRModel(small_config()).checkpoint()
+        checkpoint["residual_geometry"]["type_strategy"] = "legacy_weighted_basis"
+        with self.assertRaisesRegex(ValueError, "strategy differs"):
+            HEIRModel.from_checkpoint(checkpoint)
+
+    def test_restricted_checkpoint_requires_residual_geometry_contract(self) -> None:
+        checkpoint = HEIRModel(small_config()).checkpoint()
+        checkpoint.pop("residual_geometry")
+        with self.assertRaisesRegex(ValueError, "residual geometry is missing"):
+            HEIRModel.from_checkpoint(checkpoint)
 
     def test_rna_geometry_rejects_nonorthonormal_basis(self) -> None:
         model = HEIRModel(small_config(residual_rank=2))

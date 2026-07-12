@@ -4,7 +4,7 @@
 This evaluator is deliberately separate from the historical DeepBench report.  It
 discovers the canonical native refinement outputs, validates every prediction
 against its inference telemetry checksum, validates the frozen Visium truth and
-native R1 reference against their manifests, and then evaluates every artifact
+native scANVI reference against their manifests, and then evaluates every artifact
 that is present.  Requested artifacts that are absent or invalid are recorded as
 blockers and can never produce a passing strict-ordering result.
 """
@@ -41,7 +41,11 @@ from heir.utils import sha256_file
 REPORT_SCHEMA = "heir.snpatho_refinement_matrix.v1"
 REFINEMENT_RUN_MANIFEST_SCHEMA = "heir.snpatho_refinement_run_manifest.v2"
 TRUTH_MANIFEST_SCHEMA = "heir.snpatho_benchmark_plan.v1"
-NATIVE_MANIFEST_SCHEMA = "heir.snpatho_scanvi_r1_manifest.v1"
+NATIVE_MANIFEST_SCHEMAS = {
+    "r1": "heir.snpatho_scanvi_r1_manifest.v1",
+    "r2": "heir.snpatho_scanvi_r2_manifest.v1",
+}
+NATIVE_MANIFEST_SCHEMA = NATIVE_MANIFEST_SCHEMAS["r1"]
 DEFAULT_SAMPLES = ("4066", "4399", "4411")
 DEFAULT_SAMPLE_SITES = {
     "4066": "primary_breast",
@@ -50,23 +54,30 @@ DEFAULT_SAMPLE_SITES = {
 }
 DEFAULT_SEEDS = (17, 41, 89, 131, 197)
 DEFAULT_CONTROL_SEEDS = (17, 41, 89)
+DEFAULT_PRACTICAL_DELTA_THRESHOLD = 0.002
 DEFAULT_CONTROLS = (
-    "prototype_only",
+    "round0_prototype_only",
+    "refined_prototype_only",
     "image_shuffle",
     "graph_shuffle",
     "no_graph",
-    "wrong_donor",
+    "wrong_prototype_bank",
 )
+LEGACY_CONTROL_ALIASES = {
+    "prototype_only": "refined_prototype_only",
+    "wrong_donor": "wrong_prototype_bank",
+}
 CONTROL_TELEMETRY_KEYS = {
-    "prototype_only": "prototype_only",
+    "round0_prototype_only": "prototype_only",
+    "refined_prototype_only": "prototype_only",
     "image_shuffle": "image_feature_shuffle",
     "graph_shuffle": "graph_node_shuffle",
     "no_graph": "no_graph",
-    "wrong_donor": "wrong_donor",
+    "wrong_prototype_bank": "wrong_donor",
 }
-METHOD = "heir_native_r1_library_size_weighted"
-HARD_BASELINE = "matched_native_r1_hard_type_mean_hard_assigned_mass"
-SOFT_BASELINE = "matched_native_r1_soft_type_mean_expected_mass"
+METHOD = "heir_native_scanvi_library_size_weighted"
+HARD_BASELINE = "matched_native_scanvi_hard_type_mean_hard_assigned_mass"
+SOFT_BASELINE = "matched_native_scanvi_soft_type_mean_expected_mass"
 SUMMARY_METRIC = "median_gene_spearman"
 EVIDENCE_MANIFEST_SCHEMA = "heir.snpatho_refinement_matrix_evidence.v1"
 EVIDENCE_ARTIFACT_SCHEMAS = {
@@ -131,7 +142,7 @@ class ArtifactRequest:
 
 @dataclass(frozen=True)
 class SampleInputs:
-    """Hash-validated truth and native R1 reference for one specimen."""
+    """Hash-validated truth and native scANVI reference for one specimen."""
 
     sample: str
     truth_path: Path
@@ -183,6 +194,17 @@ def _require_digest(value: object, name: str) -> str:
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise ValueError("%s must be a lowercase SHA-256 digest" % name)
     return digest
+
+
+def _native_molecular_generation(payload: Mapping[str, Any]) -> str:
+    schema = str(payload.get("schema", ""))
+    for generation, expected in NATIVE_MANIFEST_SCHEMAS.items():
+        if schema == expected:
+            declared = str(payload.get("molecular_generation", generation))
+            if declared != generation:
+                raise ValueError("native scANVI manifest generation disagrees with its schema")
+            return generation
+    raise ValueError("native scANVI manifest schema is invalid")
 
 
 def _resolve_manifest_path(raw: object, manifest: Path, repository: Path) -> Path:
@@ -241,9 +263,8 @@ def load_sample_inputs(
     if truth_row is None:
         raise ValueError("truth manifest has no case for %s" % sample)
     specimens = native_manifest.get("specimens")
-    if native_manifest.get("schema") != NATIVE_MANIFEST_SCHEMA or not isinstance(
-        specimens, Mapping
-    ):
+    molecular_generation = _native_molecular_generation(native_manifest)
+    if not isinstance(specimens, Mapping):
         raise ValueError("native manifest schema/specimens are invalid")
     specimen = specimens.get(sample)
     if not isinstance(specimen, Mapping):
@@ -261,28 +282,28 @@ def load_sample_inputs(
     reference_digest = _validated_file(
         reference_path,
         specimen.get("latent_reference_sha256"),
-        "native R1 reference %s" % sample,
+        "native %s reference %s" % (molecular_generation.upper(), sample),
     )
     truth = SpatialTruthArtifact.from_npz(truth_path)
     reference = RNAReference.load_npz(reference_path)
     latent_space_id = str(native_manifest.get("latent_space_id", ""))
     expression_space_id = str(native_manifest.get("expression_space_id", ""))
     if not latent_space_id or reference.latent_space_id != latent_space_id:
-        raise ValueError("native R1 reference latent space differs from native manifest")
+        raise ValueError("native scANVI reference latent space differs from native manifest")
     if truth.expression_space_id != expression_space_id:
         raise ValueError("frozen truth expression space differs from native manifest")
     if truth.section_id != sample or truth.specimen_id != sample:
         raise ValueError("frozen truth identity differs from requested specimen")
     if reference.sample_id != sample:
-        raise ValueError("native R1 reference identity differs from requested specimen")
+        raise ValueError("native scANVI reference identity differs from requested specimen")
     if set(np.asarray(reference.sample_ids).astype(str).tolist()) != {sample}:
-        raise ValueError("native R1 reference sample IDs differ from requested specimen")
+        raise ValueError("native scANVI reference sample IDs differ from requested specimen")
     if set(np.asarray(reference.donor_ids).astype(str).tolist()) != {sample}:
-        raise ValueError("native R1 reference donor IDs differ from requested specimen")
+        raise ValueError("native scANVI reference donor IDs differ from requested specimen")
     if tuple(np.asarray(reference.gene_ids).astype(str)) != tuple(
         np.asarray(truth.gene_names).astype(str)
     ):
-        raise ValueError("native R1 reference and frozen truth gene orders differ")
+        raise ValueError("native scANVI reference and frozen truth gene orders differ")
     return SampleInputs(
         sample=sample,
         truth_path=truth_path,
@@ -310,15 +331,20 @@ def build_requests(
 ) -> Tuple[ArtifactRequest, ...]:
     """Build the prespecified primary, trajectory, and control matrix."""
 
+    controls = tuple(LEGACY_CONTROL_ALIASES.get(control, control) for control in controls)
+    if len(set(controls)) != len(controls):
+        raise ValueError("controls contain duplicate canonical cases after legacy alias expansion")
     unsupported = sorted(set(controls) - set(DEFAULT_CONTROLS))
     if unsupported:
         raise ValueError("unsupported controls: %s" % ", ".join(unsupported))
     if wrong_donor_pairings is not None and (
         wrong_donor_target is not None or wrong_donor_source is not None
     ):
-        raise ValueError("supply wrong-donor pairings or a legacy single pairing, not both")
+        raise ValueError(
+            "supply wrong-prototype-bank pairings or a legacy single pairing, not both"
+        )
     if (wrong_donor_target is None) != (wrong_donor_source is None):
-        raise ValueError("legacy wrong-donor target/source must be supplied together")
+        raise ValueError("legacy wrong-donor target/source aliases must be supplied together")
     if wrong_donor_pairings is None:
         if wrong_donor_target is not None and wrong_donor_source is not None:
             pairings = ((str(wrong_donor_target), str(wrong_donor_source)),)
@@ -329,10 +355,12 @@ def build_requests(
     else:
         pairings = tuple((str(target), str(source)) for target, source in wrong_donor_pairings)
     if len(set(pairings)) != len(pairings):
-        raise ValueError("wrong-donor pairings must be unique")
+        raise ValueError("wrong-prototype-bank pairings must be unique")
     sample_set = set(samples)
     if any(target not in sample_set or target == source for target, source in pairings):
-        raise ValueError("wrong-donor pairings require requested targets and non-self sources")
+        raise ValueError(
+            "wrong-prototype-bank pairings require requested targets and non-self sources"
+        )
     donor_sources = {
         target: tuple(source for candidate, source in pairings if candidate == target)
         for target in samples
@@ -382,14 +410,14 @@ def build_requests(
         for seed in control_seeds:
             refined = root / ("model_refinement_r1_v1_seed%d_refined" % seed)
             for control in controls:
-                if control == "wrong_donor":
+                if control == "wrong_prototype_bank":
                     for source in donor_sources[sample]:
                         directory = refined / ("control_wrong_donor_%s" % source)
                         requests.append(
                             ArtifactRequest(
                                 sample,
                                 seed,
-                                "wrong_donor_" + source,
+                                "wrong_prototype_bank_" + source,
                                 "control",
                                 directory / "predictions.npz",
                                 directory / "prediction.telemetry.json",
@@ -404,7 +432,16 @@ def build_requests(
                             )
                         )
                     continue
-                directory = refined / ("control_" + control)
+                if control == "round0_prototype_only":
+                    directory = root / ("model_refinement_r1_v1_seed%d_round0" % seed)
+                    directory = directory / "control_prototype_only"
+                    expected_round = 0
+                elif control == "refined_prototype_only":
+                    directory = refined / "control_prototype_only"
+                    expected_round = 4
+                else:
+                    directory = refined / ("control_" + control)
+                    expected_round = 4
                 requests.append(
                     ArtifactRequest(
                         sample,
@@ -413,7 +450,7 @@ def build_requests(
                         "control",
                         directory / "predictions.npz",
                         directory / "prediction.telemetry.json",
-                        4,
+                        expected_round,
                         control,
                     )
                 )
@@ -440,8 +477,11 @@ def _validate_telemetry(
     if not isinstance(negative, Mapping):
         raise ValueError("prediction telemetry has no negative-control audit")
     expected_control = request.control
-    for control, key in CONTROL_TELEMETRY_KEYS.items():
-        expected = control == expected_control
+    expected_telemetry_key = (
+        None if expected_control is None else CONTROL_TELEMETRY_KEYS[expected_control]
+    )
+    for key in set(CONTROL_TELEMETRY_KEYS.values()):
+        expected = key == expected_telemetry_key
         if negative.get(key) is not expected:
             raise ValueError(
                 "prediction telemetry negative-control flag %s is not %s" % (key, expected)
@@ -449,23 +489,25 @@ def _validate_telemetry(
     if int(negative.get("seed", -1)) != request.seed:
         raise ValueError("prediction telemetry seed differs from requested seed")
     prototype_donor = str(negative.get("prototype_donor_id", ""))
-    if request.control == "wrong_donor":
+    if request.control == "wrong_prototype_bank":
         if (
             request.prototype_donor_id is None
             or prototype_donor != request.prototype_donor_id
             or prototype_donor == request.sample
         ):
-            raise ValueError("wrong-donor telemetry does not identify the requested donor")
+            raise ValueError(
+                "wrong-prototype-bank telemetry does not identify the requested source"
+            )
         if request.prototype_source is None:
-            raise ValueError("wrong-donor request has no resolvable source prototype bank")
+            raise ValueError("wrong-prototype-bank request has no resolvable source prototype bank")
         source_digest = sha256_file(request.prototype_source)
         if prediction.prototype_sha256 != source_digest:
-            raise ValueError("wrong-donor prediction is not bound to its full source bank")
+            raise ValueError("wrong-prototype-bank prediction is not bound to its full source bank")
         source_prototypes = PrototypeSet.load_npz(request.prototype_source)
         if not source_prototypes.donor_id:
-            raise ValueError("wrong-donor source bank lacks donor provenance")
+            raise ValueError("wrong-prototype-bank source lacks donor provenance")
         if source_prototypes.donor_id != request.prototype_donor_id:
-            raise ValueError("wrong-donor source bank donor identity is stale")
+            raise ValueError("wrong-prototype-bank source identity is stale")
         validate_wrong_donor_prototype_filter(
             source_prototypes,
             prediction.type_names.tolist(),
@@ -530,10 +572,10 @@ def _prediction_stage_name(request: ArtifactRequest) -> str:
         return "predict_refined"
     if request.variant in {"round1", "round2", "round3"}:
         return "predict_" + request.variant
-    if request.control == "wrong_donor":
+    if request.control == "wrong_prototype_bank":
         if request.prototype_donor_id is None:
-            raise ValueError("wrong-donor request has no prototype donor")
-        return "wrong_donor_" + request.prototype_donor_id
+            raise ValueError("wrong-prototype-bank request has no prototype source")
+        return "wrong_prototype_bank_" + request.prototype_donor_id
     return request.variant
 
 
@@ -544,6 +586,7 @@ def validate_refinement_run_manifest(
     native_manifest_path: Path,
     native_manifest: Mapping[str, Any],
     requests: Sequence[ArtifactRequest],
+    artifact_root: Optional[Path] = None,
 ) -> RunManifestValidation:
     """Validate the exact run plan, every artifact hash, and recursive stage lineage."""
 
@@ -556,6 +599,9 @@ def validate_refinement_run_manifest(
         )
     if payload.get("native_scanvi_manifest_sha256") != sha256_file(native_manifest_path):
         raise ValueError("refinement run manifest is not bound to the native scANVI manifest")
+    molecular_generation = str(payload.get("molecular_generation", "r1"))
+    if molecular_generation != _native_molecular_generation(native_manifest):
+        raise ValueError("refinement run molecular generation differs from native scANVI")
 
     runner = _load_current_runner(repository)
     current_source = runner.refinement_run_source_identity(repository)
@@ -569,8 +615,13 @@ def validate_refinement_run_manifest(
         samples=runner.SAMPLES,
         seeds=runner.SEEDS,
         controls=True,
+        artifact_root=artifact_root,
+        molecular_generation=molecular_generation,
     )
-    expected_plan = runner.full_matrix_plan_payload(expected_stages)
+    expected_plan = runner.full_matrix_plan_payload(
+        expected_stages,
+        molecular_generation=molecular_generation,
+    )
     if payload.get("plan_sha256") != runner._canonical_sha256(expected_plan):
         raise ValueError("refinement run manifest plan SHA-256 differs from the current exact plan")
     expected_plan_header = {key: value for key, value in expected_plan.items() if key != "stages"}
@@ -753,11 +804,11 @@ def load_prediction(
             str(path) for path in (request.prediction, request.telemetry) if not path.is_file()
         ]
         raise FileNotFoundError("missing requested artifact(s): %s" % ", ".join(missing))
-    if request.control == "wrong_donor" and request.prototype_source is None:
-        raise ValueError("wrong-donor request has no resolvable source prototype bank")
+    if request.control == "wrong_prototype_bank" and request.prototype_source is None:
+        raise ValueError("wrong-prototype-bank request has no resolvable source bank")
     if request.prototype_source is not None and not request.prototype_source.is_file():
         raise FileNotFoundError(
-            "missing requested wrong-donor source prototype: %s" % request.prototype_source
+            "missing requested wrong-prototype-bank source prototype: %s" % request.prototype_source
         )
     prediction_digest = sha256_file(request.prediction)
     prediction = PredictionBundle.from_npz(request.prediction)
@@ -790,7 +841,7 @@ def load_prediction(
     if prediction.refinement_round != request.expected_round:
         raise ValueError("prediction refinement round differs from its matrix position")
     if prediction.latent_space_id != sample_inputs.latent_space_id:
-        raise ValueError("prediction latent space differs from native R1 reference")
+        raise ValueError("prediction latent space differs from native scANVI reference")
     if prediction.expression_space_id != sample_inputs.expression_space_id:
         raise ValueError("prediction expression space differs from frozen truth")
     if not np.array_equal(prediction.nucleus_ids, sample_inputs.truth.nucleus_ids):
@@ -875,7 +926,7 @@ def score_prediction(
     *,
     minimum_nuclei: int,
 ) -> Dict[str, Any]:
-    """Score HEIR and two type-map-matched native R1 baselines."""
+    """Score HEIR and two type-map-matched native scANVI baselines."""
 
     truth = sample_inputs.truth
     reference = sample_inputs.reference
@@ -932,9 +983,9 @@ def score_prediction(
         "prototype_donor_id": request.prototype_donor_id,
         "prediction": dict(provenance),
         "aggregation": {
-            "method": "native_r1_expected_type_median_library_size_mass",
-            "hard_baseline": "native_r1_hard_type_median_library_size_mass",
-            "soft_baseline": "native_r1_expected_type_median_library_size_mass",
+            "method": "native_scanvi_expected_type_median_library_size_mass",
+            "hard_baseline": "native_scanvi_hard_type_median_library_size_mass",
+            "soft_baseline": "native_scanvi_expected_type_median_library_size_mass",
             "type_map_source": "this_prediction_artifact",
             "minimum_nuclei_per_spot": minimum_nuclei,
             "spots_total": int(len(truth.spot_ids)),
@@ -2216,6 +2267,24 @@ def _cross_case_contrast(
     }
 
 
+def _practical_delta_status(value: float, threshold: float) -> str:
+    """Classify a paired delta using a prespecified practical equivalence interval."""
+
+    if value >= threshold:
+        return "pass"
+    if value <= -threshold:
+        return "fail"
+    return "tie"
+
+
+def _raw_sign_status(value: float) -> str:
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "zero"
+
+
 def _order_check(
     name: str,
     sample: str,
@@ -2225,6 +2294,7 @@ def _order_check(
     *,
     left_method: str = METHOD,
     right_method: str = METHOD,
+    practical_delta_threshold: float = DEFAULT_PRACTICAL_DELTA_THRESHOLD,
 ) -> Dict[str, Any]:
     if left is None or right is None:
         return {
@@ -2239,6 +2309,8 @@ def _order_check(
             "right_method": right_method,
             "left_value": None,
             "right_value": None,
+            "raw_sign_status": "blocked",
+            "practical_delta_threshold": practical_delta_threshold,
         }
     left_value = _summary_value(left, left_method)
     right_value = _summary_value(right, right_method)
@@ -2250,11 +2322,16 @@ def _order_check(
     if left_value is None or right_value is None or paired_median_delta is None:
         status = "blocked"
         reason = "paired per-gene Spearman delta is not evaluable"
+        raw_sign = "blocked"
     else:
-        status = "pass" if paired_median_delta > 0 else "fail"
-        reason = (
-            "" if status == "pass" else "paired median per-gene Spearman delta was not positive"
-        )
+        paired_median_delta = float(paired_median_delta)
+        status = _practical_delta_status(paired_median_delta, practical_delta_threshold)
+        raw_sign = _raw_sign_status(paired_median_delta)
+        reason = {
+            "pass": "",
+            "tie": "paired delta falls inside the prespecified practical equivalence interval",
+            "fail": "paired delta is at or below the negative practical margin",
+        }[status]
     return {
         "name": name,
         "sample": sample,
@@ -2268,6 +2345,9 @@ def _order_check(
         "left_value": left_value,
         "right_value": right_value,
         "paired_median_per_gene_spearman_delta": paired_median_delta,
+        "raw_sign_status": raw_sign,
+        "raw_sign_pass": None if raw_sign == "blocked" else raw_sign == "positive",
+        "practical_delta_threshold": practical_delta_threshold,
     }
 
 
@@ -2331,6 +2411,48 @@ def _macro_summaries(
     return {"variants": variants, "contrasts": contrast_macros}
 
 
+def _residual_routing_decomposition(
+    contrasts: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    components = (
+        "round0_residual_effect",
+        "refined_residual_effect",
+        "routing_refinement_effect",
+        "total_refinement_effect",
+    )
+    lookup = {
+        (str(row["sample"]), int(row["seed"]), str(row["name"])): row
+        for row in contrasts
+        if row.get("name") in components
+    }
+    identities = sorted({(sample, seed) for sample, seed, _ in lookup})
+    cases = []
+    for sample, seed in identities:
+        rows: Dict[str, Any] = {}
+        for component in components:
+            contrast = lookup.get((sample, seed, component))
+            rows[component] = (
+                None
+                if contrast is None
+                else {
+                    "left_case_id": contrast["left_case_id"],
+                    "right_case_id": contrast["right_case_id"],
+                    "summary": contrast["summary"],
+                }
+            )
+        cases.append({"sample": sample, "seed": seed, "components": rows})
+    return {
+        "component_definitions": {
+            "round0_residual_effect": "round0 residual-on minus round0 residual-off",
+            "refined_residual_effect": "refined residual-on minus refined residual-off",
+            "routing_refinement_effect": ("refined residual-off minus round0 residual-off"),
+            "total_refinement_effect": "refined residual-on minus round0 residual-on",
+        },
+        "case_count": len(cases),
+        "cases": cases,
+    }
+
+
 def _build_comparisons(
     *,
     cases: Sequence[Mapping[str, Any]],
@@ -2340,12 +2462,21 @@ def _build_comparisons(
     control_seeds: Sequence[int],
     trajectory_seed: int,
     wrong_donor_pairings: Sequence[Tuple[str, str]],
+    practical_delta_threshold: float,
 ) -> Tuple[list, list]:
     lookup = {
         (str(case["sample"]), int(case["seed"]), str(case["variant"])): case for case in cases
     }
     contrasts = []
     checks = []
+
+    def order_check(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return _order_check(
+            *args,
+            **kwargs,
+            practical_delta_threshold=practical_delta_threshold,
+        )
+
     for sample in samples:
         trajectory_cases = [
             lookup.get((sample, trajectory_seed, variant))
@@ -2370,8 +2501,8 @@ def _build_comparisons(
                 contrasts.append(_cross_case_contrast("refined_minus_round0", refined, round0))
             checks.extend(
                 (
-                    _order_check("refined_gt_round0", sample, seed, refined, round0),
-                    _order_check(
+                    order_check("refined_gt_round0", sample, seed, refined, round0),
+                    order_check(
                         "refined_gt_hard_baseline",
                         sample,
                         seed,
@@ -2379,7 +2510,7 @@ def _build_comparisons(
                         refined,
                         right_method=HARD_BASELINE,
                     ),
-                    _order_check(
+                    order_check(
                         "refined_gt_soft_baseline",
                         sample,
                         seed,
@@ -2392,31 +2523,97 @@ def _build_comparisons(
         for seed in control_seeds:
             refined = lookup.get((sample, seed, "refined"))
             round0 = lookup.get((sample, seed, "round0"))
-            if "prototype_only" in controls:
-                prototype = lookup.get((sample, seed, "prototype_only"))
-                if round0 is not None and prototype is not None:
+            round0_prototype = lookup.get((sample, seed, "round0_prototype_only"))
+            refined_prototype = lookup.get((sample, seed, "refined_prototype_only"))
+            if "round0_prototype_only" in controls:
+                if round0 is not None and round0_prototype is not None:
                     contrasts.append(
-                        _cross_case_contrast("round0_minus_prototype_only", round0, prototype)
+                        _cross_case_contrast(
+                            "round0_residual_effect",
+                            round0,
+                            round0_prototype,
+                        )
                     )
                 checks.append(
-                    _order_check("round0_gt_prototype_only", sample, seed, round0, prototype)
+                    order_check(
+                        "round0_residual_on_gt_off",
+                        sample,
+                        seed,
+                        round0,
+                        round0_prototype,
+                    )
+                )
+            if "refined_prototype_only" in controls:
+                if refined is not None and refined_prototype is not None:
+                    contrasts.append(
+                        _cross_case_contrast(
+                            "refined_residual_effect",
+                            refined,
+                            refined_prototype,
+                        )
+                    )
+                checks.append(
+                    order_check(
+                        "refined_residual_on_gt_off",
+                        sample,
+                        seed,
+                        refined,
+                        refined_prototype,
+                    )
+                )
+            if {
+                "round0_prototype_only",
+                "refined_prototype_only",
+            }.issubset(controls):
+                if round0_prototype is not None and refined_prototype is not None:
+                    contrasts.append(
+                        _cross_case_contrast(
+                            "routing_refinement_effect",
+                            refined_prototype,
+                            round0_prototype,
+                        )
+                    )
+                checks.append(
+                    order_check(
+                        "routing_refinement_gt_zero",
+                        sample,
+                        seed,
+                        refined_prototype,
+                        round0_prototype,
+                    )
+                )
+            if refined is not None and round0 is not None:
+                contrasts.append(
+                    _cross_case_contrast(
+                        "total_refinement_effect",
+                        refined,
+                        round0,
+                    )
                 )
             for control in controls:
-                if control == "wrong_donor":
+                if control in {"round0_prototype_only", "refined_prototype_only"}:
+                    continue
+                if control == "wrong_prototype_bank":
                     for target, source in wrong_donor_pairings:
                         if target != sample:
                             continue
-                        controlled = lookup.get((sample, seed, "wrong_donor_" + source))
+                        controlled = lookup.get((sample, seed, "wrong_prototype_bank_" + source))
                         if refined is not None:
                             if controlled is not None:
                                 contrasts.append(
                                     _cross_case_contrast(
-                                        "refined_minus_wrong_donor", refined, controlled
+                                        "refined_minus_wrong_prototype_bank",
+                                        refined,
+                                        controlled,
                                     )
                                 )
                         checks.append(
-                            _order_check(
-                                "refined_gt_wrong_donor", sample, seed, refined, controlled
+                            order_check(
+                                "refined_gt_wrong_prototype_bank",
+                                sample,
+                                seed,
+                                refined,
+                                controlled,
                             )
                         )
                     continue
@@ -2426,7 +2623,7 @@ def _build_comparisons(
                         _cross_case_contrast("refined_minus_" + control, refined, controlled)
                     )
                 checks.append(
-                    _order_check("refined_gt_" + control, sample, seed, refined, controlled)
+                    order_check("refined_gt_" + control, sample, seed, refined, controlled)
                 )
     return contrasts, checks
 
@@ -2440,18 +2637,18 @@ def _wrong_donor_summary(
     sample_sites: Mapping[str, str],
     wrong_donor_pairings: Sequence[Tuple[str, str]],
 ) -> Dict[str, Any]:
-    """Summarize all directed wrong-donor contrasts without hiding the worst donor."""
+    """Summarize wrong-prototype-bank contrasts without hiding the worst source."""
 
     expected_pairings = tuple(wrong_donor_pairings)
     wrong_cases = {
         (str(case["sample"]), int(case["seed"]), str(case.get("prototype_donor_id"))): case
         for case in cases
-        if case.get("control") == "wrong_donor"
+        if case.get("control") == "wrong_prototype_bank"
     }
     check_lookup = {
         (str(check["sample"]), int(check["seed"]), str(check.get("right_case_id"))): check
         for check in checks
-        if check.get("name") == "refined_gt_wrong_donor"
+        if check.get("name") == "refined_gt_wrong_prototype_bank"
     }
     rows = []
     for target, source in expected_pairings:
@@ -2484,14 +2681,19 @@ def _wrong_donor_summary(
             for row in selected
             if row.get("paired_median_per_gene_spearman_delta") is not None
         ]
+        statuses = [str(row.get("status", "blocked")) for row in selected]
+        raw_all_positive = bool(len(values) == len(selected) and all(value > 0 for value in values))
         return {
             "expected_case_count": len(selected),
             "evaluable_case_count": len(values),
             "mean_paired_median_delta": float(np.mean(values)) if values else None,
             "worst_paired_median_delta": float(np.min(values)) if values else None,
-            "all_positive": bool(
-                len(values) == len(selected) and all(value > 0 for value in values)
-            ),
+            "practical_status_counts": {
+                status: statuses.count(status) for status in ("pass", "tie", "fail", "blocked")
+            },
+            "all_practical_pass": bool(statuses and all(status == "pass" for status in statuses)),
+            "all_positive_raw_sign": raw_all_positive,
+            "all_positive": raw_all_positive,
         }
 
     by_target_seed = []
@@ -2541,12 +2743,15 @@ def evaluate_matrix(
     sample_sites: Optional[Mapping[str, str]] = None,
     minimum_nuclei: int = 3,
     run_manifest_path: Optional[Path] = None,
+    practical_delta_threshold: float = DEFAULT_PRACTICAL_DELTA_THRESHOLD,
 ) -> Dict[str, Any]:
     """Evaluate every available requested artifact and retain all blockers."""
 
     samples = tuple(dict.fromkeys(str(value) for value in samples))
     seeds = tuple(dict.fromkeys(int(value) for value in seeds))
-    controls = tuple(dict.fromkeys(str(value) for value in controls))
+    controls = tuple(
+        dict.fromkeys(LEGACY_CONTROL_ALIASES.get(str(value), str(value)) for value in controls)
+    )
     control_seeds = tuple(dict.fromkeys(int(value) for value in control_seeds))
     if sample_sites is None:
         sample_sites = {
@@ -2558,6 +2763,9 @@ def evaluate_matrix(
         sample_sites = {str(sample): str(site) for sample, site in sample_sites.items()}
     if not samples or not seeds:
         raise ValueError("at least one sample and seed are required")
+    practical_delta_threshold = float(practical_delta_threshold)
+    if not np.isfinite(practical_delta_threshold) or practical_delta_threshold < 0:
+        raise ValueError("practical_delta_threshold must be finite and non-negative")
     if any(seed not in seeds for seed in control_seeds):
         raise ValueError("control seeds must be included in the primary seed matrix")
     if trajectory_seed not in seeds:
@@ -2567,9 +2775,8 @@ def evaluate_matrix(
     truth_manifest_path = truth_manifest_path.expanduser().resolve()
     native_manifest_path = native_manifest_path.expanduser().resolve()
     truth_manifest = _json_object(truth_manifest_path, "frozen truth manifest")
-    native_manifest = _json_object(native_manifest_path, "native R1 manifest")
-    if native_manifest.get("schema") != NATIVE_MANIFEST_SCHEMA:
-        raise ValueError("native R1 manifest schema is invalid")
+    native_manifest = _json_object(native_manifest_path, "native scANVI manifest")
+    molecular_generation = _native_molecular_generation(native_manifest)
     blockers = []
     sample_inputs: Dict[str, SampleInputs] = {}
     for sample in samples:
@@ -2602,20 +2809,21 @@ def evaluate_matrix(
         tuple(
             (request.sample, str(request.prototype_donor_id))
             for request in requests
-            if request.control == "wrong_donor" and request.seed == control_seeds[0]
+            if request.control == "wrong_prototype_bank" and request.seed == control_seeds[0]
         )
         if control_seeds
         else ()
     )
     if (
-        "wrong_donor" in controls
+        "wrong_prototype_bank" in controls
         and len(samples) > 1
         and (set(requested_wrong_donor_pairings) != set(expected_wrong_donor_pairings))
     ):
         blockers.append(
             _blocker(
-                "incomplete_wrong_donor_pairing_plan",
-                "wrong-donor controls must cover both alternative donors for every specimen",
+                "incomplete_wrong_prototype_bank_pairing_plan",
+                "wrong-prototype-bank controls must cover both alternative sources for every "
+                "specimen",
             )
         )
     comparison_wrong_donor_pairings = (
@@ -2639,6 +2847,7 @@ def evaluate_matrix(
                 native_manifest_path=native_manifest_path,
                 native_manifest=native_manifest,
                 requests=requests,
+                artifact_root=artifact_root,
             )
         except (OSError, TypeError, ValueError) as error:
             execution_provenance_blockers.append(
@@ -2706,6 +2915,7 @@ def evaluate_matrix(
         control_seeds=control_seeds,
         trajectory_seed=trajectory_seed,
         wrong_donor_pairings=comparison_wrong_donor_pairings,
+        practical_delta_threshold=practical_delta_threshold,
     )
     wrong_donor_summary = _wrong_donor_summary(
         cases,
@@ -2718,7 +2928,7 @@ def evaluate_matrix(
     check_statuses = [str(check["status"]) for check in checks]
     if blockers or "blocked" in check_statuses:
         strict_status = "blocked"
-    elif "fail" in check_statuses:
+    elif any(status in {"tie", "fail"} for status in check_statuses):
         strict_status = "fail"
     else:
         strict_status = "pass"
@@ -2746,7 +2956,7 @@ def evaluate_matrix(
                 "sha256": value.truth_sha256,
                 "hash_validation": "matched_frozen_truth_manifest",
             },
-            "native_r1_reference": {
+            "native_scanvi_reference": {
                 "path": str(value.reference_path),
                 "sha256": value.reference_sha256,
                 "hash_validation": "matched_native_scanvi_manifest",
@@ -2787,7 +2997,9 @@ def evaluate_matrix(
         "execution_provenance_verified": execution_provenance_verified,
         "execution_transform_hash_verified": execution_transform_hash_verified,
         "strict_ordering_status": strict_status,
+        "practical_delta_threshold": practical_delta_threshold,
         "analysis_role": "native_scanvi_published_integrated_annotation_sensitivity",
+        "molecular_generation": molecular_generation,
         "annotation_provenance": native_manifest.get("annotation_provenance"),
         "request": {
             "samples": list(samples),
@@ -2795,6 +3007,20 @@ def evaluate_matrix(
             "trajectory_seed": trajectory_seed,
             "controls": list(controls),
             "control_seeds": list(control_seeds),
+            "practical_delta_threshold": practical_delta_threshold,
+            "wrong_prototype_bank_pairings": [
+                {"target": target, "source": source}
+                for target, source in requested_wrong_donor_pairings
+            ],
+            "requested_wrong_prototype_bank_pairings": [
+                {"target": target, "source": source}
+                for target, source in requested_wrong_donor_pairings
+            ],
+            "expected_in_cohort_wrong_prototype_bank_pairings": [
+                {"target": target, "source": source}
+                for target, source in expected_wrong_donor_pairings
+            ],
+            # Deprecated aliases retained for existing report consumers and CLI users.
             "wrong_donor_pairings": [
                 {"target": target, "source": source}
                 for target, source in requested_wrong_donor_pairings
@@ -2815,9 +3041,10 @@ def evaluate_matrix(
                 "path": str(truth_manifest_path),
                 "sha256": sha256_file(truth_manifest_path),
             },
-            "native_r1": {
+            "native_scanvi": {
                 "path": str(native_manifest_path),
                 "sha256": sha256_file(native_manifest_path),
+                "molecular_generation": molecular_generation,
             },
             "additional_evidence": evidence_manifest_provenance,
             "refinement_run": (
@@ -2853,17 +3080,33 @@ def evaluate_matrix(
         "cases": cases,
         "trajectory": trajectory,
         "paired_gene_spearman_contrasts": contrasts,
+        "residual_routing_decomposition": _residual_routing_decomposition(contrasts),
+        "wrong_prototype_bank_contrasts": wrong_donor_summary,
+        # Deprecated report-key alias.
         "wrong_donor_contrasts": wrong_donor_summary,
         "macro_summaries": _macro_summaries(cases, contrasts),
         "strict_ordering_checks": checks,
         "strict_ordering_summary": {
             "status": strict_status,
             "pass_count": check_statuses.count("pass"),
+            "tie_count": check_statuses.count("tie"),
             "fail_count": check_statuses.count("fail"),
             "blocked_count": check_statuses.count("blocked"),
+            "practical_delta_threshold": practical_delta_threshold,
+            "raw_sign_diagnostics": {
+                "positive_count": sum(
+                    check.get("raw_sign_status") == "positive" for check in checks
+                ),
+                "zero_count": sum(check.get("raw_sign_status") == "zero" for check in checks),
+                "negative_count": sum(
+                    check.get("raw_sign_status") == "negative" for check in checks
+                ),
+                "blocked_count": sum(check.get("raw_sign_status") == "blocked" for check in checks),
+            },
             "required_policy": (
-                "refined > round0 > prototype_only and refined > both matched native R1 "
-                "baselines and every requested control, using median gene Spearman"
+                "Every required paired median per-gene Spearman delta must meet the "
+                "prespecified positive practical margin; nested round0/refined residual-on/off "
+                "controls decompose residual, routing, and total refinement effects"
             ),
         },
     }
@@ -2880,6 +3123,8 @@ def _tsv(report: Mapping[str, Any]) -> str:
         "metric",
         "value",
         "status",
+        "raw_sign_status",
+        "practical_delta_threshold",
         "case_id",
     )
     handle = io.StringIO()
@@ -2927,20 +3172,22 @@ def _tsv(report: Mapping[str, Any]) -> str:
                 "metric": "paired_median_per_gene_spearman_delta",
                 "value": check.get("paired_median_per_gene_spearman_delta", ""),
                 "status": check["status"],
+                "raw_sign_status": check.get("raw_sign_status", ""),
+                "practical_delta_threshold": check.get("practical_delta_threshold", ""),
                 "case_id": check["left_case_id"] or "",
             }
         )
-    wrong_donor = report["wrong_donor_contrasts"]
+    wrong_donor = report["wrong_prototype_bank_contrasts"]
     for scope in ("all_directed", "site_matched"):
         row = wrong_donor[scope]
         for metric in ("mean_paired_median_delta", "worst_paired_median_delta"):
             writer.writerow(
                 {
-                    "row_type": "wrong_donor_aggregate",
+                    "row_type": "wrong_prototype_bank_aggregate",
                     "sample": scope,
                     "seed": "",
-                    "variant": "wrong_donor",
-                    "method_or_contrast": "refined_minus_wrong_donor",
+                    "variant": "wrong_prototype_bank",
+                    "method_or_contrast": "refined_minus_wrong_prototype_bank",
                     "metric": metric,
                     "value": "" if row[metric] is None else row[metric],
                     "status": "complete" if wrong_donor["coverage_complete"] else "blocked",
@@ -2971,6 +3218,10 @@ def _markdown(report: Mapping[str, Any]) -> str:
         "Scored %d of %d requested artifacts."
         % (report["scored_artifact_count"], report["requested_artifact_count"]),
         "",
+        "Practical paired-delta threshold: **%.6f**. Values inside (-threshold, "
+        "+threshold) are practical ties; raw signs remain separate diagnostics."
+        % report["practical_delta_threshold"],
+        "",
     ]
     blockers = report["blockers"]
     lines.extend(("## Blockers", ""))
@@ -2989,24 +3240,24 @@ def _markdown(report: Mapping[str, Any]) -> str:
     lines.extend(
         (
             "",
-            "## Wrong-donor coverage and aggregates",
+            "## Wrong-prototype-bank coverage and aggregates",
             "",
             "Coverage: **%d/%d** directed target/source/seed cases; complete: **%s**."
             % (
-                report["wrong_donor_contrasts"]["observed_case_count"],
-                report["wrong_donor_contrasts"]["required_case_count"],
-                str(bool(report["wrong_donor_contrasts"]["coverage_complete"])).lower(),
+                report["wrong_prototype_bank_contrasts"]["observed_case_count"],
+                report["wrong_prototype_bank_contrasts"]["required_case_count"],
+                str(bool(report["wrong_prototype_bank_contrasts"]["coverage_complete"])).lower(),
             ),
             "",
             "| Scope | Evaluable / expected | Mean paired delta | "
-            "Worst paired delta | All positive |",
-            "|---|---:|---:|---:|---|",
+            "Worst paired delta | All practical pass | Raw all-positive |",
+            "|---|---:|---:|---:|---|---|",
         )
     )
     for scope in ("all_directed", "site_matched"):
-        row = report["wrong_donor_contrasts"][scope]
+        row = report["wrong_prototype_bank_contrasts"][scope]
         lines.append(
-            "| %s | %d / %d | %s | %s | %s |"
+            "| %s | %d / %d | %s | %s | %s | %s |"
             % (
                 scope,
                 row["evaluable_case_count"],
@@ -3017,7 +3268,8 @@ def _markdown(report: Mapping[str, Any]) -> str:
                 "NA"
                 if row["worst_paired_median_delta"] is None
                 else "%.6f" % row["worst_paired_median_delta"],
-                str(bool(row["all_positive"])).lower(),
+                str(bool(row["all_practical_pass"])).lower(),
+                str(bool(row["all_positive_raw_sign"])).lower(),
             )
         )
     lines.extend(
@@ -3045,21 +3297,23 @@ def _markdown(report: Mapping[str, Any]) -> str:
             "",
             "## Strict ordering checks",
             "",
-            "Pass/fail and delta both use the paired median across per-gene Spearman differences.",
+            "Pass/tie/fail uses the practical threshold; raw sign is reported independently. "
+            "Both use the paired median across per-gene Spearman differences.",
             "",
-            "| Check | Sample | Seed | Status | Paired delta |",
-            "|---|---|---:|---|---:|",
+            "| Check | Sample | Seed | Practical status | Raw sign | Paired delta |",
+            "|---|---|---:|---|---|---:|",
         )
     )
     for check in report["strict_ordering_checks"]:
         delta = check.get("paired_median_per_gene_spearman_delta")
         lines.append(
-            "| %s | %s | %d | %s | %s |"
+            "| %s | %s | %d | %s | %s | %s |"
             % (
                 check["name"],
                 check["sample"],
                 check["seed"],
                 check["status"],
+                check.get("raw_sign_status", "blocked"),
                 "NA" if delta is None else "%.6f" % delta,
             )
         )
@@ -3120,9 +3374,15 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, default=repository)
     parser.add_argument(
+        "--molecular-generation",
+        choices=tuple(NATIVE_MANIFEST_SCHEMAS),
+        default="r2",
+        help="R2 preserves specimen biology; use r1 only for historical reproduction",
+    )
+    parser.add_argument(
         "--artifact-root",
         type=Path,
-        default=repository / "artifacts" / "snpatho" / "r1_scanvi",
+        default=None,
     )
     parser.add_argument(
         "--truth-manifest",
@@ -3136,12 +3396,12 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--native-manifest",
         type=Path,
-        default=repository / "reports" / "snpatho_scanvi_r1_manifest.json",
+        default=None,
     )
     parser.add_argument(
         "--run-manifest",
         type=Path,
-        default=repository / "reports" / "snpatho_refinement_v1_five_seed_manifest.json",
+        default=None,
         help="Exact-plan v2 execution/adoption manifest produced by the refinement runner",
     )
     parser.add_argument(
@@ -3155,17 +3415,33 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--sample", action="append")
     parser.add_argument("--seed", action="append", type=int)
     parser.add_argument("--trajectory-seed", type=int, default=17)
-    parser.add_argument("--control", action="append", choices=DEFAULT_CONTROLS)
+    parser.add_argument(
+        "--control",
+        action="append",
+        choices=(*DEFAULT_CONTROLS, *LEGACY_CONTROL_ALIASES),
+    )
     parser.add_argument("--control-seed", action="append", type=int)
     parser.add_argument(
         "--wrong-donor-target",
-        help="Legacy single-pair diagnostic only; the default evaluates every directed pairing",
+        help=(
+            "Legacy CLI alias for one wrong-prototype-bank target; the default evaluates "
+            "every directed pairing"
+        ),
     )
     parser.add_argument(
         "--wrong-donor-source",
-        help="Legacy single-pair diagnostic only; the default evaluates every directed pairing",
+        help=(
+            "Legacy CLI alias for one wrong-prototype-bank source; the default evaluates "
+            "every directed pairing"
+        ),
     )
     parser.add_argument("--minimum-nuclei", type=int, default=3)
+    parser.add_argument(
+        "--practical-delta-threshold",
+        type=float,
+        default=DEFAULT_PRACTICAL_DELTA_THRESHOLD,
+        help="Prespecified |paired median gene-Spearman delta| practical margin",
+    )
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--tsv-output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path, required=True)
@@ -3174,6 +3450,32 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _arguments(argv)
+    repository = args.repository.expanduser().resolve()
+    artifact_root = (
+        repository / "artifacts" / "snpatho" / (args.molecular_generation + "_scanvi")
+        if args.artifact_root is None
+        else args.artifact_root
+    )
+    native_manifest = (
+        repository
+        / (
+            "reports/snpatho_scanvi_r1_manifest.json"
+            if args.molecular_generation == "r1"
+            else "artifacts/snpatho/r2_scanvi/native_manifest.json"
+        )
+        if args.native_manifest is None
+        else args.native_manifest
+    )
+    run_manifest = (
+        repository
+        / (
+            "reports/snpatho_refinement_v1_five_seed_manifest.json"
+            if args.molecular_generation == "r1"
+            else "artifacts/snpatho/r2_scanvi/refinement_run_manifest.json"
+        )
+        if args.run_manifest is None
+        else args.run_manifest
+    )
     samples = tuple(args.sample) if args.sample else DEFAULT_SAMPLES
     seeds = tuple(args.seed) if args.seed else DEFAULT_SEEDS
     controls = tuple(args.control) if args.control else DEFAULT_CONTROLS
@@ -3183,10 +3485,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else tuple(seed for seed in DEFAULT_CONTROL_SEEDS if seed in seeds)
     )
     report = evaluate_matrix(
-        repository=args.repository,
-        artifact_root=args.artifact_root,
+        repository=repository,
+        artifact_root=artifact_root,
         truth_manifest_path=args.truth_manifest,
-        native_manifest_path=args.native_manifest,
+        native_manifest_path=native_manifest,
         evidence_manifest_path=args.evidence_manifest,
         samples=samples,
         seeds=seeds,
@@ -3196,7 +3498,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         wrong_donor_target=args.wrong_donor_target,
         wrong_donor_source=args.wrong_donor_source,
         minimum_nuclei=args.minimum_nuclei,
-        run_manifest_path=args.run_manifest,
+        run_manifest_path=run_manifest,
+        practical_delta_threshold=args.practical_delta_threshold,
     )
     write_report(
         report,

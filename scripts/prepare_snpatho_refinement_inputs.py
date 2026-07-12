@@ -19,10 +19,14 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+import numpy as np
 
 from heir.data import HistologyBag, PrototypeSet, RNAReference
+from heir.expression import EXPRESSION_SPACE_ID
 from heir.prior import RNAResidualGeometry
+from heir.prior.scvi_adapter import SCVI_EXPRESSION_NORMALIZATION_CONTRACT
 from heir.training import HEIRTrainingBatch, TrainingStage
 from heir.uncertainty import MahalanobisOOD
 
@@ -126,12 +130,151 @@ def _declared_file(record: object, expected: Path, label: str) -> Mapping[str, o
     return record
 
 
+def _decoder_metadata(path: Path, label: str) -> Mapping[str, object]:
+    import torch
+
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        raise ValueError("%s cannot be parsed" % label) from error
+    if not isinstance(checkpoint, Mapping) or not isinstance(checkpoint.get("metadata"), Mapping):
+        raise ValueError("%s lacks checkpoint metadata" % label)
+    return checkpoint["metadata"]
+
+
+def _validate_decoder_metadata(
+    metadata: Mapping[str, object],
+    *,
+    label: str,
+    genes: Sequence[str],
+    latent_space_id: str,
+    correction_mode: object,
+    transform_batch: object,
+    training_donors: Sequence[str],
+) -> None:
+    if metadata.get("schema") != "heir.scvi_distilled_decoder.v3":
+        raise ValueError("%s does not use the R2 decoder schema" % label)
+    expected = {
+        "gene_names": list(genes),
+        "latent_space_id": latent_space_id,
+        "batch_correction_mode": correction_mode,
+        "transform_batch": transform_batch,
+        "training_donors": sorted(training_donors),
+        "decoder_only": True,
+    }
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            raise ValueError("%s %s differs from R2 provenance" % (label, key))
+    samples = metadata.get("posterior_samples")
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples <= 1:
+        raise ValueError("%s lacks MC-averaged expression targets" % label)
+    for key in (
+        "distillation_latent_sha256",
+        "distillation_target_sha256",
+        "validation_mask_sha256",
+    ):
+        value = metadata.get(key)
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError("%s lacks %s" % (label, key))
+
+
+def _validate_r2_decoder_family(
+    provenance: Mapping[str, object],
+    *,
+    decoder: Path,
+    genes: Sequence[str],
+) -> Tuple[Mapping[str, object], Tuple[Mapping[str, object], ...]]:
+    design = provenance["molecular_design"]
+    validation = provenance["decoder_validation"]
+    assert isinstance(design, Mapping) and isinstance(validation, Mapping)
+    policy = str(validation["policy"])
+    correction_mode = design.get("batch_correction_mode")
+    transform_batch = design.get("transform_batch")
+    canonical_donors = (
+        SAMPLES
+        if policy == "donor_rotated_audit_plus_stratified_deployment_split"
+        else tuple(
+            sample for sample in SAMPLES if sample != str(validation.get("single_donor_sample"))
+        )
+    )
+    deployed = _decoder_metadata(decoder, "deployed R2 decoder")
+    _validate_decoder_metadata(
+        deployed,
+        label="deployed R2 decoder",
+        genes=genes,
+        latent_space_id=str(provenance["latent_space_id"]),
+        correction_mode=correction_mode,
+        transform_batch=transform_batch,
+        training_donors=canonical_donors,
+    )
+    declared_contract = provenance.get("decoder_contract")
+    if not isinstance(declared_contract, Mapping):
+        raise ValueError("native scANVI R2 provenance lacks its embedded decoder contract")
+    for key in (
+        "schema",
+        "batch_correction_mode",
+        "posterior_samples",
+        "distillation_latent_sha256",
+        "distillation_target_sha256",
+        "validation_mask_sha256",
+    ):
+        if declared_contract.get(key) != deployed.get(key):
+            raise ValueError("native scANVI R2 decoder contract is stale for %s" % key)
+
+    raw_rotations = validation.get("rotations")
+    rotations: List[Mapping[str, object]] = []
+    if policy.startswith("donor_rotated"):
+        if not isinstance(raw_rotations, list) or len(raw_rotations) != len(SAMPLES):
+            raise ValueError("native scANVI donor-rotation audit is incomplete")
+        seen_paths = set()
+        for row in raw_rotations:
+            if not isinstance(row, Mapping):
+                raise ValueError("native scANVI donor rotation record is invalid")
+            held_out = str(row.get("held_out_sample", ""))
+            path = Path(str(row.get("path", ""))).expanduser().resolve()
+            if held_out not in SAMPLES or path in seen_paths or not path.is_file():
+                raise ValueError("native scANVI donor rotation identity is invalid")
+            seen_paths.add(path)
+            if row.get("sha256") != _sha256(path):
+                raise ValueError("native scANVI donor rotation SHA-256 is stale")
+            metadata = _decoder_metadata(path, "%s donor-rotation decoder" % held_out)
+            _validate_decoder_metadata(
+                metadata,
+                label="%s donor-rotation decoder" % held_out,
+                genes=genes,
+                latent_space_id=str(provenance["latent_space_id"]),
+                correction_mode=correction_mode,
+                transform_batch=transform_batch,
+                training_donors=[sample for sample in SAMPLES if sample != held_out],
+            )
+            for key in ("distillation_latent_sha256", "distillation_target_sha256"):
+                if metadata.get(key) != deployed.get(key):
+                    raise ValueError("donor rotations do not share one frozen %s" % key)
+            metrics = row.get("validation")
+            if not isinstance(metrics, Mapping) or int(metrics.get("cells", 0)) <= 0:
+                raise ValueError("native scANVI donor rotation metrics are incomplete")
+            if any(
+                not np.isfinite(float(metrics.get(key, np.nan)))
+                for key in ("smooth_l1", "median_absolute_error")
+            ):
+                raise ValueError("native scANVI donor rotation metrics are non-finite")
+            rotations.append(
+                {"held_out_sample": held_out, "path": str(path), "sha256": _sha256(path)}
+            )
+        if {str(row["held_out_sample"]) for row in rotations} != set(SAMPLES):
+            raise ValueError("native scANVI donor-rotation audit is incomplete")
+    elif raw_rotations not in ([], None):
+        raise ValueError("single-donor decoder sensitivity cannot declare rotation artifacts")
+    return deployed, tuple(rotations)
+
+
 @dataclass(frozen=True)
 class SamplePaths:
     sample: str
     source: Path
     scanvi: Path
     scanvi_input: Path
+    molecular_generation: str = "r2"
 
     @property
     def reference(self) -> Path:
@@ -147,7 +290,9 @@ class SamplePaths:
 
     @property
     def geometry(self) -> Path:
-        return self.scanvi / "residual_geometry_rare_complete.npz"
+        # Keep v2 geometry beside, rather than overwriting, the historical v1
+        # artifact used by the reported R1 benchmark.
+        return self.scanvi / "residual_geometry_rare_complete_v2.npz"
 
     def histology(self, role: str) -> Path:
         return self.source / ("histology_%s.npz" % role)
@@ -168,6 +313,78 @@ class SamplePaths:
         return self.scanvi / ("batch_%s_rare_complete.npz" % role)
 
 
+def _native_r2_manifest(
+    *,
+    repository: Path,
+    provenance: Mapping[str, object],
+    samples: Mapping[str, SamplePaths],
+    gene_panel: Path,
+) -> Dict[str, object]:
+    """Build the scorer-facing R2 manifest after every derived input validates."""
+
+    if provenance.get("schema") != "heir.snpatho_scanvi_r2.v1":
+        raise ValueError("R2 native manifest requires R2 scANVI provenance")
+    latent_outputs = provenance.get("latent_outputs")
+    if not isinstance(latent_outputs, Mapping):
+        raise ValueError("R2 scANVI provenance lacks latent outputs")
+    decoder_contract = provenance.get("decoder_contract")
+    if not isinstance(decoder_contract, Mapping):
+        raise ValueError("R2 scANVI provenance lacks its decoder contract")
+    native_model = Path(str(provenance.get("native_model", ""))).expanduser().resolve()
+    decoder = Path(str(provenance.get("decoder", ""))).expanduser().resolve()
+    specimen_rows: Dict[str, object] = {}
+    for sample in SAMPLES:
+        paths = samples[sample]
+        latent = _record(paths.reference, repository)
+        prototypes = _record(paths.prototypes, repository)
+        geometry = _record(paths.geometry, repository)
+        declared = latent_outputs.get(sample)
+        if not isinstance(declared, Mapping) or int(declared.get("cells", 0)) <= 0:
+            raise ValueError("R2 scANVI provenance lacks %s cell count" % sample)
+        specimen_rows[sample] = {
+            "cells": int(declared["cells"]),
+            "latent_reference": latent["path"],
+            "latent_reference_sha256": latent["sha256"],
+            "rare_complete_prototypes": prototypes["path"],
+            "rare_complete_prototypes_sha256": prototypes["sha256"],
+            "residual_geometry": geometry["path"],
+            "residual_geometry_sha256": geometry["sha256"],
+        }
+    return {
+        "schema": "heir.snpatho_scanvi_r2_manifest.v1",
+        "molecular_generation": "r2",
+        "status": provenance.get("status"),
+        "workflow_filter": provenance.get("workflow_filter"),
+        "annotation_provenance": provenance.get("annotation_provenance"),
+        "expression_space_id": EXPRESSION_SPACE_ID,
+        "expression_transform": SCVI_EXPRESSION_NORMALIZATION_CONTRACT,
+        "gene_panel": _path_name(gene_panel, repository),
+        "gene_panel_sha256": _sha256(gene_panel),
+        "latent_space_id": provenance.get("latent_space_id"),
+        "native_model": {
+            "external_path": _path_name(native_model, repository),
+            "sha256": provenance.get("native_model_sha256"),
+            "scvi_tools_version": provenance.get("scvi_tools_version"),
+            "scvi_epochs": provenance.get("scvi_epochs"),
+            "scanvi_epochs": provenance.get("scanvi_epochs"),
+            "latent_dim": provenance.get("latent_dim"),
+            "cuda": provenance.get("cuda"),
+            "molecular_design": provenance.get("molecular_design"),
+        },
+        "distilled_decoder": {
+            "external_path": _path_name(decoder, repository),
+            "sha256": provenance.get("decoder_sha256"),
+            "distillation_epochs": provenance.get("decoder_epochs"),
+            "posterior_samples": provenance.get("decoder_posterior_samples"),
+            "contract": dict(decoder_contract),
+            "validation": provenance.get("decoder_validation"),
+        },
+        "molecular_design": provenance.get("molecular_design"),
+        "decoder_validation": provenance.get("decoder_validation"),
+        "specimens": specimen_rows,
+    }
+
+
 @dataclass(frozen=True)
 class Stage:
     sample: str
@@ -185,16 +402,95 @@ def _validate_upstream(
     scanvi_root: Path,
     scanvi_input_root: Path,
     provenance_path: Path,
+    expected_molecular_generation: str,
 ) -> Tuple[Mapping[str, object], Dict[str, SamplePaths], Dict[str, object]]:
     provenance = _json(provenance_path)
-    if provenance.get("schema") != "heir.snpatho_scanvi_r1.v1":
+    provenance_schema = provenance.get("schema")
+    if provenance_schema not in {
+        "heir.snpatho_scanvi_r1.v1",
+        "heir.snpatho_scanvi_r2.v1",
+    }:
         raise ValueError("native scANVI provenance schema is invalid")
+    expected_schema = {
+        "r1": "heir.snpatho_scanvi_r1.v1",
+        "r2": "heir.snpatho_scanvi_r2.v1",
+    }.get(expected_molecular_generation)
+    if expected_schema is None:
+        raise ValueError("expected molecular generation must be r1 or r2")
+    if provenance_schema != expected_schema:
+        raise ValueError(
+            "native scANVI provenance is %s but --molecular-generation requested %s"
+            % (provenance_schema, expected_molecular_generation)
+        )
     if tuple(provenance.get("samples", ())) != SAMPLES:
         raise ValueError("native scANVI provenance must contain the three frozen samples")
     if provenance.get("seed") != 17 or provenance.get("cuda") is not True:
         raise ValueError("native scANVI provenance differs from the frozen CUDA/seed recipe")
     if provenance.get("latent_dim") != 32:
         raise ValueError("native scANVI provenance latent width is not 32")
+    if provenance_schema == "heir.snpatho_scanvi_r2.v1":
+        molecular_design = provenance.get("molecular_design")
+        decoder_validation = provenance.get("decoder_validation")
+        if not isinstance(molecular_design, Mapping):
+            raise ValueError("native scANVI v2 provenance lacks its molecular design")
+        design_name = molecular_design.get("name")
+        correction_mode = molecular_design.get("batch_correction_mode")
+        transform_batch = molecular_design.get("transform_batch")
+        if design_name == "no_specimen_correction":
+            if (
+                molecular_design.get("model_batch_key") is not None
+                or correction_mode != "none"
+                or transform_batch != []
+            ):
+                raise ValueError("no-specimen-correction provenance is internally inconsistent")
+        elif design_name == "technical_batch_only":
+            technical_key = molecular_design.get("technical_batch_key")
+            contingency = molecular_design.get("technical_batch_contingency")
+            if (
+                not isinstance(technical_key, str)
+                or not technical_key
+                or technical_key == "section_id"
+                or molecular_design.get("model_batch_key") != technical_key
+                or correction_mode != "reference_batch_marginalization"
+                or not isinstance(transform_batch, list)
+                or not transform_batch
+                or not isinstance(contingency, Mapping)
+            ):
+                raise ValueError("technical-batch-only provenance is internally inconsistent")
+            try:
+                crossed = all(
+                    all(int(contingency[sample][level]) > 0 for level in transform_batch)
+                    for sample in SAMPLES
+                )
+            except (KeyError, TypeError, ValueError):
+                crossed = False
+            if not crossed:
+                raise ValueError("technical-batch contingency is not crossed across specimens")
+        elif design_name == "specimen_batch_sensitivity":
+            if (
+                molecular_design.get("model_batch_key") != "section_id"
+                or correction_mode != "reference_batch_marginalization"
+                or transform_batch != list(SAMPLES)
+            ):
+                raise ValueError("specimen-batch sensitivity provenance is internally inconsistent")
+        else:
+            raise ValueError("native scANVI v2 provenance names an unsupported molecular design")
+        if molecular_design.get("specimen_identity_is_biological") is not True:
+            raise ValueError("native scANVI v2 provenance must identify specimen as biological")
+        if not isinstance(decoder_validation, Mapping):
+            raise ValueError("native scANVI v2 provenance lacks decoder validation")
+        validation_policy = decoder_validation.get("policy")
+        if validation_policy not in {
+            "donor_rotated_audit_plus_stratified_deployment_split",
+            "single_donor_sensitivity",
+        }:
+            raise ValueError("native scANVI v2 decoder validation policy is unsupported")
+        rotations = decoder_validation.get("rotations")
+        if validation_policy.startswith("donor_rotated"):
+            if not isinstance(rotations, list) or {
+                row.get("held_out_sample") for row in rotations if isinstance(row, Mapping)
+            } != set(SAMPLES):
+                raise ValueError("native scANVI donor-rotation audit is incomplete")
 
     panel = (repository / "manifests" / "gene_panel_snpatho_500.tsv").resolve()
     if provenance.get("gene_panel_sha256") != _sha256(panel):
@@ -231,6 +527,20 @@ def _validate_upstream(
     )
     if len(genes) != len(set(genes)) or not genes:
         raise ValueError("frozen gene panel is empty or contains duplicates")
+    if provenance_schema == "heir.snpatho_scanvi_r2.v1":
+        decoder_metadata, decoder_rotations = _validate_r2_decoder_family(
+            provenance,
+            decoder=decoder,
+            genes=genes,
+        )
+        input_records["decoder_contract"] = {
+            "schema": decoder_metadata["schema"],
+            "batch_correction_mode": decoder_metadata["batch_correction_mode"],
+            "posterior_samples": decoder_metadata["posterior_samples"],
+            "distillation_latent_sha256": decoder_metadata["distillation_latent_sha256"],
+            "distillation_target_sha256": decoder_metadata["distillation_target_sha256"],
+        }
+        input_records["decoder_rotations"] = list(decoder_rotations)
 
     for sample in SAMPLES:
         paths = SamplePaths(
@@ -238,6 +548,9 @@ def _validate_upstream(
             source=(source_root / sample).resolve(),
             scanvi=(scanvi_root / sample).resolve(),
             scanvi_input=(scanvi_input_root / sample).resolve(),
+            molecular_generation=(
+                "r2" if provenance_schema == "heir.snpatho_scanvi_r2.v1" else "r1"
+            ),
         )
         samples[sample] = paths
         _declared_file(latent_outputs.get(sample), paths.reference, "%s latent reference" % sample)
@@ -255,6 +568,13 @@ def _validate_upstream(
             raise ValueError("%s native RNA reference has the wrong latent shape" % sample)
         if reference.latent_space_id != provenance["latent_space_id"]:
             raise ValueError("%s native RNA reference has a foreign latent identity" % sample)
+        expected_latent_donors = SAMPLES if paths.molecular_generation == "r2" else ()
+        expected_latent_transform = model_hash if paths.molecular_generation == "r2" else ""
+        if (
+            reference.latent_training_donors != expected_latent_donors
+            or reference.latent_transform_sha256 != expected_latent_transform
+        ):
+            raise ValueError("%s native RNA latent-training provenance is invalid" % sample)
         if reference.source_count_sha256 != h5ad_hashes[sample]:
             raise ValueError("%s native RNA reference is bound to a different H5AD" % sample)
         if tuple(reference.gene_ids.tolist()) != genes:
@@ -359,8 +679,8 @@ def _validate_prototypes(output: Path, paths: SamplePaths) -> None:
         or prototypes.block_id != paths.sample + "_FFPE"
         or prototypes.source_reference_sha256 != _sha256(paths.reference)
         or prototypes.latent_space_id != reference.latent_space_id
-        or prototypes.latent_training_donors
-        or prototypes.latent_transform_sha256
+        or prototypes.latent_training_donors != reference.latent_training_donors
+        or prototypes.latent_transform_sha256 != reference.latent_transform_sha256
     ):
         raise ValueError("prototype provenance differs from the native RNA reference")
 
@@ -374,8 +694,9 @@ def _validate_geometry(output: Path, paths: SamplePaths) -> None:
         or geometry.rank != RECIPE["residual_geometry"]["rank"]
         or geometry.latent_space_id != reference.latent_space_id
         or geometry.source_reference_sha256 != _sha256(paths.reference)
-        or geometry.training_donors != (paths.sample,)
-        or geometry.latent_transform_sha256
+        or geometry.training_donors
+        != tuple(sorted(set((paths.sample, *reference.latent_training_donors))))
+        or geometry.latent_transform_sha256 != reference.latent_transform_sha256
     ):
         raise ValueError("RNA residual geometry provenance or ontology is invalid")
 
@@ -414,7 +735,8 @@ def _validate_batch(output: Path, paths: SamplePaths, role: str) -> None:
         or tuple(batch.type_names) != tuple(sorted(set(reference.cell_type_labels.tolist())))
         or tuple(batch.gene_names) != tuple(reference.gene_ids.tolist())
         or tuple(batch.prototype_ids) != tuple(prototypes.prototype_ids.tolist())
-        or batch.molecular_training_donors != detector.training_donors
+        or batch.molecular_training_donors
+        != tuple(sorted(set(prototypes.latent_training_donors) | set(detector.training_donors)))
     ):
         raise ValueError("training batch identity, ontology, or feature provenance is invalid")
 
@@ -423,13 +745,14 @@ def build_stages(
     *,
     samples: Mapping[str, SamplePaths],
     heir_command: str,
+    unsafe_allow_legacy_latent: bool = False,
 ) -> Tuple[Stage, ...]:
     stages = []
     for sample in SAMPLES:
         paths = samples[sample]
 
         def prototype_command(output: Path, p: SamplePaths = paths) -> Tuple[str, ...]:
-            return (
+            command = (
                 heir_command,
                 "build-prototypes",
                 "--reference",
@@ -446,6 +769,9 @@ def build_stages(
                 "--seed",
                 "17",
             )
+            if unsafe_allow_legacy_latent:
+                command += ("--unsafe-allow-legacy-latent-transform",)
+            return command
 
         stages.append(
             Stage(
@@ -483,7 +809,7 @@ def build_stages(
         stages.append(
             Stage(
                 sample,
-                "residual_geometry",
+                "residual_geometry_v2",
                 (("reference", paths.reference), ("prototypes", paths.prototypes)),
                 paths.geometry,
                 geometry_command,
@@ -661,10 +987,17 @@ def _run_stage(
 def _parser(repository: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=repository / "artifacts/snpatho")
+    parser.add_argument(
+        "--molecular-generation",
+        choices=("r1", "r2"),
+        default="r2",
+        help="R2 preserves specimen biology; use r1 only for historical reproduction",
+    )
     parser.add_argument("--scanvi-root", type=Path, default=None)
     parser.add_argument("--scanvi-input-root", type=Path, default=None)
     parser.add_argument("--scanvi-provenance", type=Path, default=None)
     parser.add_argument("--manifest-output", type=Path, default=None)
+    parser.add_argument("--native-manifest-output", type=Path, default=None)
     parser.add_argument("--heir-command", default="heir")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
@@ -680,7 +1013,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser(repository).parse_args(argv)
     source_root = args.source_root.expanduser().resolve()
     scanvi_root = (
-        (source_root / "r1_scanvi").resolve()
+        (source_root / ("%s_scanvi" % args.molecular_generation)).resolve()
         if args.scanvi_root is None
         else args.scanvi_root.expanduser().resolve()
     )
@@ -699,14 +1032,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.manifest_output is None
         else args.manifest_output.expanduser().resolve()
     )
+    native_manifest_output = (
+        scanvi_root / "native_manifest.json"
+        if args.native_manifest_output is None
+        else args.native_manifest_output.expanduser().resolve()
+    )
     provenance, samples, input_records = _validate_upstream(
         repository=repository,
         source_root=source_root,
         scanvi_root=scanvi_root,
         scanvi_input_root=scanvi_input_root,
         provenance_path=provenance_path,
+        expected_molecular_generation=args.molecular_generation,
     )
-    stages = build_stages(samples=samples, heir_command=args.heir_command)
+    validated_generation = (
+        "r2" if provenance["schema"] == "heir.snpatho_scanvi_r2.v1" else "r1"
+    )
+    stages = build_stages(
+        samples=samples,
+        heir_command=args.heir_command,
+        unsafe_allow_legacy_latent=validated_generation == "r1",
+    )
     receipt_root = scanvi_root / ".preparation_receipts"
     statuses = []
     for stage in stages:
@@ -729,13 +1075,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }
             for sample, paths in samples.items()
         }
+        native_manifest_record = None
+        if validated_generation == "r2":
+            gene_panel = (repository / "manifests" / "gene_panel_snpatho_500.tsv").resolve()
+            native_manifest = _native_r2_manifest(
+                repository=repository,
+                provenance=provenance,
+                samples=samples,
+                gene_panel=gene_panel,
+            )
+            if native_manifest_output.exists():
+                if _json(native_manifest_output) != native_manifest:
+                    raise RuntimeError(
+                        "existing native R2 manifest is stale: %s" % native_manifest_output
+                    )
+            else:
+                _atomic_json(native_manifest_output, native_manifest)
+            native_manifest_record = _record(native_manifest_output, repository)
         manifest = {
             "schema": SCHEMA,
             "status": "complete",
+            "molecular_generation": validated_generation,
             "latent_space_id": provenance["latent_space_id"],
             "recipe": RECIPE,
             "inputs": input_records,
             "outputs": outputs,
+            "native_manifest": native_manifest_record,
         }
         if manifest_output.exists():
             if _json(manifest_output) != manifest:

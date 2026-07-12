@@ -1,0 +1,66 @@
+{
+  "biological_success_claimed": false,
+  "blockers": [
+    "plan status is labels_pending",
+    "snpatho_4066_broad: task snpatho_4066_broad section 4066 independent labels.sha256 must contain 64 hexadecimal characters",
+    "snpatho_liver_metastases_broad: task snpatho_liver_metastases_broad section 4399 independent labels.sha256 must contain 64 hexadecimal characters",
+    "snpatho_liver_metastases_broad: task snpatho_liver_metastases_broad section 4411 independent labels.sha256 must contain 64 hexadecimal characters"
+  ],
+  "execution_contract": {
+    "graph_used": false,
+    "labels_generated_by_pipeline": false,
+    "minimum_seed_count": 3,
+    "molecular_residual_used": false
+  },
+  "plan": {
+    "path": "/storage/HE_GPT/HEIR/configs/broad_type_supervised_gate.example.json",
+    "sha256": "d6608eacfa8beabef90b12a7c0b76d9cd7780c11fc2af961fc19048b44aacc39"
+  },
+  "ready_to_run": false,
+  "schema_version": "heir.broad_type_supervised_inspection.v1",
+  "status": "blocked_evidence",
+  "tasks": [
+    {
+      "blockers": [
+        "task snpatho_4066_broad section 4066 independent labels.sha256 must contain 64 hexadecimal characters"
+      ],
+      "datasets": [
+        {
+          "blockers": [
+            "task snpatho_4066_broad section 4066 independent labels.sha256 must contain 64 hexadecimal characters"
+          ],
+          "ready": false,
+          "section_id": "4066"
+        }
+      ],
+      "ready": false,
+      "split_policy": "grouped_roi",
+      "task_id": "snpatho_4066_broad"
+    },
+    {
+      "blockers": [
+        "task snpatho_liver_metastases_broad section 4399 independent labels.sha256 must contain 64 hexadecimal characters",
+        "task snpatho_liver_metastases_broad section 4411 independent labels.sha256 must contain 64 hexadecimal characters"
+      ],
+      "datasets": [
+        {
+          "blockers": [
+            "task snpatho_liver_metastases_broad section 4399 independent labels.sha256 must contain 64 hexadecimal characters"
+          ],
+          "ready": false,
+          "section_id": "4399"
+        },
+        {
+          "blockers": [
+            "task snpatho_liver_metastases_broad section 4411 independent labels.sha256 must contain 64 hexadecimal characters"
+          ],
+          "ready": false,
+          "section_id": "4411"
+        }
+      ],
+      "ready": false,
+      "split_policy": "leave_one_donor_out",
+      "task_id": "snpatho_liver_metastases_broad"
+    }
+  ]
+}

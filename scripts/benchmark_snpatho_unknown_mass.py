@@ -56,6 +56,8 @@ load_prediction = _MATRIX.load_prediction
 load_sample_inputs = _MATRIX.load_sample_inputs
 score_prediction = _MATRIX.score_prediction
 _paired_spearman_delta = _MATRIX._paired_spearman_delta
+_practical_delta_status = _MATRIX._practical_delta_status
+_raw_sign_status = _MATRIX._raw_sign_status
 
 
 def _load_runner_helpers() -> Any:
@@ -97,6 +99,7 @@ CONTRASTS = (
     "heir_minus_soft_baseline",
 )
 _DIRECTION_EPSILON = 1.0e-12
+DEFAULT_PRACTICAL_DELTA_THRESHOLD = _MATRIX.DEFAULT_PRACTICAL_DELTA_THRESHOLD
 
 
 def _scorer_source_identity() -> Dict[str, Any]:
@@ -108,25 +111,12 @@ def _scorer_source_identity() -> Dict[str, Any]:
         "scripts/run_snpatho_refinement_benchmark.py",
     )
     source_repository = Path(__file__).resolve().parents[1]
-    files = []
-    for relative in relative_paths:
-        path = (source_repository / relative).resolve()
-        if not path.is_file():
-            raise FileNotFoundError("unknown-mass scorer source is absent: %s" % path)
-        files.append(
-            {
-                "relative_path": relative,
-                "path": str(path),
-                "sha256": sha256_file(path),
-            }
+    return dict(
+        _RUNNER._source_identity(
+            source_repository,
+            _RUNNER._runtime_source_files(source_repository, relative_paths),
         )
-    return {
-        "schema": "heir.source_identity.v1",
-        "files": files,
-        "aggregate_sha256": _RUNNER._canonical_sha256(
-            [{"relative_path": row["relative_path"], "sha256": row["sha256"]} for row in files]
-        ),
-    }
+    )
 
 
 def _mass_label(value: float) -> str:
@@ -165,7 +155,9 @@ def _validate_run_manifest(
     path: Path,
     *,
     repository: Path,
+    artifact_root: Path,
     samples: Sequence[str],
+    molecular_generation: str,
 ) -> Dict[str, Any]:
     """Validate the exact canonical grid, commands, source, and all output hashes."""
 
@@ -179,6 +171,8 @@ def _validate_run_manifest(
         raise ValueError("unknown-mass run manifest samples differ from the scoring request")
     if payload.get("seed") != SEED:
         raise ValueError("unknown-mass run manifest seed is not 17")
+    if payload.get("molecular_generation", "r1") != molecular_generation:
+        raise ValueError("unknown-mass run manifest molecular generation is stale")
     if payload.get("unknown_masses") != list(UNKNOWN_MASSES):
         raise ValueError("unknown-mass run manifest does not contain the exact fixed mass grid")
     if payload.get("stage_names") != list(_RUNNER.UNKNOWN_MASS_STAGE_NAMES):
@@ -189,8 +183,14 @@ def _validate_run_manifest(
         samples=samples,
         seeds=(SEED,),
         unknown_mass_sensitivity=True,
+        artifact_root=artifact_root,
+        molecular_generation=molecular_generation,
     )
-    plan = _RUNNER.unknown_mass_plan_payload(plan_stages, samples=samples)
+    plan = _RUNNER.unknown_mass_plan_payload(
+        plan_stages,
+        samples=samples,
+        molecular_generation=molecular_generation,
+    )
     if payload.get("plan_sha256") != _RUNNER._canonical_sha256(plan):
         raise ValueError("unknown-mass run manifest plan SHA-256 is stale")
     if payload.get("validation_recipe_source_identity") != (
@@ -223,6 +223,21 @@ def _validate_run_manifest(
                 )
         if row.get("status") not in {"completed", "skipped_valid"}:
             raise ValueError("unknown-mass run manifest contains an unvalidated stage")
+        inputs = row.get("inputs")
+        if not isinstance(inputs, list) or len(inputs) != len(expected["inputs"]):
+            raise ValueError("unknown-mass run manifest stage inputs are incomplete")
+        for expected_input, observed_input in zip(expected["inputs"], inputs):
+            if not isinstance(observed_input, Mapping):
+                raise ValueError("unknown-mass run manifest input row is not an object")
+            input_path = _resolved_path(observed_input.get("path"), "manifest stage input")
+            if (
+                observed_input.get("role") != expected_input["role"]
+                or input_path != Path(expected_input["path"]).resolve()
+            ):
+                raise ValueError("unknown-mass run manifest input identity is non-canonical")
+            input_hash = _require_file(input_path, "manifested stage input")
+            if observed_input.get("sha256") != input_hash:
+                raise ValueError("unknown-mass run manifest input SHA-256 is stale")
         outputs = row.get("outputs")
         if not isinstance(outputs, list) or len(outputs) != len(expected["outputs"]):
             raise ValueError("unknown-mass run manifest stage outputs are incomplete")
@@ -359,6 +374,7 @@ def _validate_lineage(
     repository: Path,
     sample_inputs: SampleInputs,
     run_binding: Mapping[str, Any],
+    molecular_generation: str,
 ) -> Tuple[
     PredictionBundle,
     Dict[str, Any],
@@ -379,7 +395,9 @@ def _validate_lineage(
     parent_path = round0 / "heir.pt"
     view_path = round0 / "refinement_views.npz"
     prototype_path = refined / "prototypes" / ("%s__%s.npz" % (sample, sample))
-    native_prototype_path = artifact_root / sample / "prototypes_rare_complete.npz"
+    native_prototype_path = repository / "artifacts" / "snpatho" / (
+        molecular_generation + "_scanvi"
+    ) / sample / "prototypes_rare_complete.npz"
     histology_path = repository / "artifacts" / "snpatho" / sample / "histology_full.npz"
     ood_path = repository / "artifacts" / "snpatho" / sample / "ood_target_calibrated.npz"
     validated_hashes = run_binding["validated_output_hashes"]
@@ -470,7 +488,7 @@ def _validate_lineage(
     if prototype.donor_id != sample or set(prototype.sample_ids.tolist()) != {sample}:
         raise ValueError("refined prototype specimen provenance is stale")
     if prototype.latent_space_id != sample_inputs.latent_space_id:
-        raise ValueError("refined prototype latent space differs from native R1")
+        raise ValueError("refined prototype latent space differs from native scANVI")
 
     if _resolved_path(metadata.get("parent_checkpoint"), "parent checkpoint") != (
         parent_path.resolve()
@@ -530,6 +548,7 @@ def _validate_lineage(
     }
     manifest_provenance = {
         endpoint: {
+            "run_manifest_stage_bound": True,
             "run_manifest_stage_index": int(row["stage_index"]),
             "run_manifest_stage_status": str(row["status"]),
             "run_manifest_command_sha256": _RUNNER._canonical_sha256(row["command"]),
@@ -597,6 +616,7 @@ def _compact_case(
     refined_prediction: PredictionBundle,
     round0_prediction: PredictionBundle,
     mass: float,
+    practical_delta_threshold: float,
 ) -> Dict[str, Any]:
     """Compact two fully scored endpoints after constructing paired per-gene deltas."""
 
@@ -628,6 +648,14 @@ def _compact_case(
         deltas[name]["median_delta"] is None for name in CONTRASTS
     ):
         raise ValueError("case lacks an evaluable median gene-Spearman conclusion")
+    for delta in deltas.values():
+        value = float(delta["median_delta"])
+        delta["practical_status"] = _practical_delta_status(
+            value,
+            practical_delta_threshold,
+        )
+        delta["raw_sign_status"] = _raw_sign_status(value)
+        delta["practical_delta_threshold"] = practical_delta_threshold
     return {
         "case_id": refined_scored["case_id"],
         "sample": refined_scored["sample"],
@@ -655,6 +683,7 @@ def _compact_case(
         },
         "metrics": methods,
         "paired_gene_spearman_deltas": deltas,
+        "practical_delta_threshold": practical_delta_threshold,
     }
 
 
@@ -666,11 +695,16 @@ def _direction(value: float) -> str:
     return "tie"
 
 
-def _stability(cases: Sequence[Mapping[str, Any]], samples: Sequence[str]) -> Dict[str, Any]:
+def _stability(
+    cases: Sequence[Mapping[str, Any]],
+    samples: Sequence[str],
+    practical_delta_threshold: float = DEFAULT_PRACTICAL_DELTA_THRESHOLD,
+) -> Dict[str, Any]:
     expected = len(samples) * len(UNKNOWN_MASSES)
     if len(cases) != expected:
         return {
             "status": "blocked",
+            "practical_status_stable_across_masses": None,
             "direction_stable_across_masses": None,
             "refined_beats_round0_at_every_mass": None,
             "heir_beats_both_baselines_at_every_mass": None,
@@ -678,8 +712,10 @@ def _stability(cases: Sequence[Mapping[str, Any]], samples: Sequence[str]) -> Di
             "per_sample": {},
             "policy": (
                 "blocked unless all 15 canonical cases validate; otherwise compare the signs "
-                "of paired median per-gene Spearman deltas at all five masses"
+                "and practical pass/tie/fail classifications of paired median per-gene "
+                "Spearman deltas at all five masses"
             ),
+            "practical_delta_threshold": practical_delta_threshold,
         }
     per_sample: Dict[str, Any] = {}
     for sample in samples:
@@ -690,7 +726,9 @@ def _stability(cases: Sequence[Mapping[str, Any]], samples: Sequence[str]) -> Di
         if [float(row["unknown_mass"]) for row in rows] != list(UNKNOWN_MASSES):
             raise ValueError("validated case grid is incomplete or duplicated for %s" % sample)
         directions: Dict[str, Dict[str, str]] = {}
+        practical_statuses: Dict[str, Dict[str, str]] = {}
         contrast_stability: Dict[str, bool] = {}
+        practical_contrast_stability: Dict[str, bool] = {}
         for name in CONTRASTS:
             values = {
                 row["unknown_mass_label"]: _direction(
@@ -700,22 +738,41 @@ def _stability(cases: Sequence[Mapping[str, Any]], samples: Sequence[str]) -> Di
             }
             directions[name] = values
             contrast_stability[name] = len(set(values.values())) == 1
+            practical_values = {
+                row["unknown_mass_label"]: _practical_delta_status(
+                    float(row["paired_gene_spearman_deltas"][name]["median_delta"]),
+                    practical_delta_threshold,
+                )
+                for row in rows
+            }
+            practical_statuses[name] = practical_values
+            practical_contrast_stability[name] = len(set(practical_values.values())) == 1
         refined_beats_round0 = all(
-            float(row["paired_gene_spearman_deltas"]["refined_minus_round0"]["median_delta"])
-            > _DIRECTION_EPSILON
+            _practical_delta_status(
+                float(row["paired_gene_spearman_deltas"]["refined_minus_round0"]["median_delta"]),
+                practical_delta_threshold,
+            )
+            == "pass"
             for row in rows
         )
         beats_both = all(
             all(
-                float(row["paired_gene_spearman_deltas"][name]["median_delta"]) > _DIRECTION_EPSILON
+                _practical_delta_status(
+                    float(row["paired_gene_spearman_deltas"][name]["median_delta"]),
+                    practical_delta_threshold,
+                )
+                == "pass"
                 for name in ("heir_minus_hard_baseline", "heir_minus_soft_baseline")
             )
             for row in rows
         )
         per_sample[sample] = {
             "direction_by_mass": directions,
+            "practical_status_by_mass": practical_statuses,
             "contrast_direction_stable": contrast_stability,
+            "contrast_practical_status_stable": practical_contrast_stability,
             "direction_stable_across_masses": all(contrast_stability.values()),
+            "practical_status_stable_across_masses": all(practical_contrast_stability.values()),
             "refined_beats_round0_at_every_mass": refined_beats_round0,
             "heir_beats_both_baselines_at_every_mass": beats_both,
             "refined_beats_all_comparators_at_every_mass": (refined_beats_round0 and beats_both),
@@ -723,25 +780,29 @@ def _stability(cases: Sequence[Mapping[str, Any]], samples: Sequence[str]) -> Di
                 row["unknown_mass_label"]: int(row["refinement_round"]) for row in rows
             },
         }
-    stable = all(row["direction_stable_across_masses"] for row in per_sample.values())
+    raw_stable = all(row["direction_stable_across_masses"] for row in per_sample.values())
+    stable = all(row["practical_status_stable_across_masses"] for row in per_sample.values())
     refined_beats_round0 = all(
         row["refined_beats_round0_at_every_mass"] for row in per_sample.values()
     )
     beats_both = all(row["heir_beats_both_baselines_at_every_mass"] for row in per_sample.values())
     return {
         "status": "stable" if stable else "unstable",
-        "direction_stable_across_masses": stable,
+        "practical_status_stable_across_masses": stable,
+        "direction_stable_across_masses": raw_stable,
         "refined_beats_round0_at_every_mass": refined_beats_round0,
         "heir_beats_both_baselines_at_every_mass": beats_both,
         "refined_beats_all_comparators_at_every_mass": refined_beats_round0 and beats_both,
         "per_sample": per_sample,
         "direction_epsilon": _DIRECTION_EPSILON,
+        "practical_delta_threshold": practical_delta_threshold,
         "policy": (
             "For each specimen and comparator (round zero, hard baseline, and soft "
-            "baseline), the sign of the paired median per-gene Spearman delta must be "
-            "identical at 0, 0.01, 0.05, 0.10, and 0.20. "
-            "Sign stability does not imply benefit; benefit requires refined-minus-round0 "
-            "and both refined-minus-baseline deltas > epsilon at every mass."
+            "baseline), practical pass/tie/fail status under the prespecified delta margin "
+            "must be identical at 0, 0.01, 0.05, 0.10, and 0.20. Raw sign stability is "
+            "reported separately and does not imply benefit; benefit requires practical-pass "
+            "status for refined-minus-round0 and both refined-minus-baseline deltas at every "
+            "mass."
         ),
     }
 
@@ -769,7 +830,9 @@ def evaluate_unknown_mass(
     truth_manifest_path: Path,
     native_manifest_path: Path,
     samples: Sequence[str] = DEFAULT_SAMPLES,
+    molecular_generation: str = "r1",
     minimum_nuclei: int = 3,
+    practical_delta_threshold: float = DEFAULT_PRACTICAL_DELTA_THRESHOLD,
 ) -> Dict[str, Any]:
     """Validate and score the complete fixed unknown-mass grid."""
 
@@ -781,16 +844,22 @@ def evaluate_unknown_mass(
     samples = tuple(dict.fromkeys(str(sample) for sample in samples))
     if not samples:
         raise ValueError("at least one sample is required")
-    canonical_artifact_root = repository / "artifacts" / "snpatho" / "r1_scanvi"
-    if artifact_root != canonical_artifact_root:
-        raise ValueError("unknown-mass scoring requires the canonical runner artifact root")
+    if molecular_generation not in _RUNNER.MOLECULAR_GENERATIONS:
+        raise ValueError("molecular_generation must be r1 or r2")
+    practical_delta_threshold = float(practical_delta_threshold)
+    if not np.isfinite(practical_delta_threshold) or practical_delta_threshold < 0:
+        raise ValueError("practical_delta_threshold must be finite and non-negative")
     run_binding = _validate_run_manifest(
         run_manifest_path,
         repository=repository,
+        artifact_root=artifact_root,
         samples=samples,
+        molecular_generation=molecular_generation,
     )
     truth_manifest = _json_object(truth_manifest_path, "frozen truth manifest")
-    native_manifest = _json_object(native_manifest_path, "native R1 manifest")
+    native_manifest = _json_object(native_manifest_path, "native scANVI manifest")
+    if _MATRIX._native_molecular_generation(native_manifest) != molecular_generation:
+        raise ValueError("native scANVI manifest differs from requested molecular generation")
 
     blockers = []
     sample_inputs: Dict[str, SampleInputs] = {}
@@ -837,6 +906,7 @@ def evaluate_unknown_mass(
                     repository=repository,
                     sample_inputs=inputs,
                     run_binding=run_binding,
+                    molecular_generation=molecular_generation,
                 )
                 refined_scored = score_prediction(
                     refined_request,
@@ -859,12 +929,17 @@ def evaluate_unknown_mass(
                         refined_prediction,
                         round0_prediction,
                         mass,
+                        practical_delta_threshold,
                     )
                 )
             except (OSError, TypeError, ValueError) as error:
                 blockers.append(_blocker(sample, mass, error))
 
-    stability = _stability(cases, samples) if not blockers else _stability((), samples)
+    stability = (
+        _stability(cases, samples, practical_delta_threshold)
+        if not blockers
+        else _stability((), samples, practical_delta_threshold)
+    )
     return {
         "schema": REPORT_SCHEMA,
         "requirement": "unknown_mass_sweep",
@@ -872,16 +947,22 @@ def evaluate_unknown_mass(
             "requirement": "unknown_mass_sweep",
             "samples": list(samples),
             "seed": SEED,
+            "molecular_generation": molecular_generation,
             "unknown_masses": list(UNKNOWN_MASSES),
+            "practical_delta_threshold": practical_delta_threshold,
             "expected_case_count": len(samples) * len(UNKNOWN_MASSES),
             "expected_prediction_count": len(samples) * len(UNKNOWN_MASSES) * 2,
         },
         "status": "blocked" if blockers else "complete",
         "analysis_role": "native_scanvi_published_integrated_annotation_sensitivity",
+        "molecular_generation": molecular_generation,
         "request": {
             "samples": list(samples),
             "seed": SEED,
+            "molecular_generation": molecular_generation,
+            "artifact_root": str(artifact_root),
             "unknown_masses": list(UNKNOWN_MASSES),
+            "practical_delta_threshold": practical_delta_threshold,
             "minimum_nuclei": minimum_nuclei,
             "expected_case_count": len(samples) * len(UNKNOWN_MASSES),
             "expected_prediction_count": len(samples) * len(UNKNOWN_MASSES) * 2,
@@ -899,9 +980,10 @@ def evaluate_unknown_mass(
                 "path": str(truth_manifest_path),
                 "sha256": sha256_file(truth_manifest_path),
             },
-            "native_r1": {
+            "native_scanvi": {
                 "path": str(native_manifest_path),
                 "sha256": sha256_file(native_manifest_path),
+                "molecular_generation": molecular_generation,
             },
         },
         "annotation_provenance": native_manifest.get("annotation_provenance"),
@@ -913,6 +995,7 @@ def evaluate_unknown_mass(
         ),
         "scored_case_count": len(cases),
         "scored_prediction_count": len(cases) * 2,
+        "practical_delta_threshold": practical_delta_threshold,
         "blockers": blockers,
         "cases": cases,
         "stability": stability,
@@ -930,6 +1013,9 @@ def _tsv(report: Mapping[str, Any]) -> str:
         "median_gene_spearman",
         "paired_median_gene_spearman_delta",
         "direction",
+        "raw_sign_status",
+        "practical_status",
+        "practical_delta_threshold",
         "report_status",
     )
     handle = io.StringIO()
@@ -971,6 +1057,17 @@ def _tsv(report: Mapping[str, Any]) -> str:
                     "median_gene_spearman": metric_source["median_gene_spearman"],
                     "paired_median_gene_spearman_delta": "" if delta is None else delta,
                     "direction": "" if delta is None else _direction(float(delta)),
+                    "raw_sign_status": (
+                        ""
+                        if delta is None
+                        else case["paired_gene_spearman_deltas"][contrast]["raw_sign_status"]
+                    ),
+                    "practical_status": (
+                        ""
+                        if delta is None
+                        else case["paired_gene_spearman_deltas"][contrast]["practical_status"]
+                    ),
+                    "practical_delta_threshold": report["practical_delta_threshold"],
                     "report_status": report["status"],
                 }
             )
@@ -988,6 +1085,9 @@ def _markdown(report: Mapping[str, Any]) -> str:
         "Scored %d of %d required seed-17 cases."
         % (report["scored_case_count"], report["request"]["expected_case_count"]),
         "",
+        "Practical paired-delta threshold: **%.6f**; raw signs are retained separately."
+        % report["practical_delta_threshold"],
+        "",
     ]
     if report["blockers"]:
         lines.extend(("## Blockers", ""))
@@ -1001,13 +1101,13 @@ def _markdown(report: Mapping[str, Any]) -> str:
             "## Compact results",
             "",
             "| Sample | Mass | Round | Round0 rho | Refined rho | "
-            "Refined-round0 | Refined-hard | Refined-soft |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "Refined-round0 | Status | Refined-hard | Status | Refined-soft | Status |",
+            "|---|---:|---:|---:|---:|---:|---|---:|---|---:|---|",
         )
     )
     for case in report["cases"]:
         lines.append(
-            "| %s | %.2f | %d | %.6f | %.6f | %.6f | %.6f | %.6f |"
+            "| %s | %.2f | %d | %.6f | %.6f | %.6f | %s | %.6f | %s | %.6f | %s |"
             % (
                 case["sample"],
                 case["unknown_mass"],
@@ -1015,8 +1115,11 @@ def _markdown(report: Mapping[str, Any]) -> str:
                 case["endpoints"]["round0"]["metrics"]["median_gene_spearman"],
                 case["metrics"][METHOD]["median_gene_spearman"],
                 case["paired_gene_spearman_deltas"]["refined_minus_round0"]["median_delta"],
+                case["paired_gene_spearman_deltas"]["refined_minus_round0"]["practical_status"],
                 case["paired_gene_spearman_deltas"]["heir_minus_hard_baseline"]["median_delta"],
+                case["paired_gene_spearman_deltas"]["heir_minus_hard_baseline"]["practical_status"],
                 case["paired_gene_spearman_deltas"]["heir_minus_soft_baseline"]["median_delta"],
+                case["paired_gene_spearman_deltas"]["heir_minus_soft_baseline"]["practical_status"],
             )
         )
     lines.extend(
@@ -1048,9 +1151,11 @@ def _markdown(report: Mapping[str, Any]) -> str:
     lines.extend(("", "## Stability interpretation", "", stability["policy"], ""))
     if stability["status"] != "blocked":
         lines.append(
-            "Direction stable across masses: **%s**; refined beats round zero at every "
+            "Practical status stable across masses: **%s**; raw direction stable across "
+            "masses: **%s**; refined beats round zero by the practical margin at every "
             "mass: **%s**; refined beats both baselines at every mass: **%s**."
             % (
+                str(stability["practical_status_stable_across_masses"]).lower(),
                 str(stability["direction_stable_across_masses"]).lower(),
                 str(stability["refined_beats_round0_at_every_mass"]).lower(),
                 str(stability["heir_beats_both_baselines_at_every_mass"]).lower(),
@@ -1111,9 +1216,15 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, default=repository)
     parser.add_argument(
+        "--molecular-generation",
+        choices=_RUNNER.MOLECULAR_GENERATIONS,
+        default="r2",
+        help="R2 preserves specimen biology; use r1 only for historical reproduction",
+    )
+    parser.add_argument(
         "--artifact-root",
         type=Path,
-        default=repository / "artifacts" / "snpatho" / "r1_scanvi",
+        default=None,
     )
     parser.add_argument(
         "--truth-manifest",
@@ -1127,19 +1238,21 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--native-manifest",
         type=Path,
-        default=repository / "reports" / "snpatho_scanvi_r1_manifest.json",
+        default=None,
     )
     parser.add_argument(
         "--run-manifest",
         type=Path,
-        default=repository
-        / "artifacts"
-        / "snpatho"
-        / "unknown_mass_sensitivity_v1"
-        / "run_manifest.json",
+        default=None,
         help="required hash-bound manifest emitted by the hardened sensitivity runner",
     )
     parser.add_argument("--minimum-nuclei", type=int, default=3)
+    parser.add_argument(
+        "--practical-delta-threshold",
+        type=float,
+        default=DEFAULT_PRACTICAL_DELTA_THRESHOLD,
+        help="Prespecified |paired median gene-Spearman delta| practical margin",
+    )
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--tsv-output", type=Path, required=True)
     parser.add_argument("--markdown-output", type=Path, required=True)
@@ -1148,14 +1261,45 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _arguments(argv)
+    repository = args.repository.expanduser().resolve()
+    artifact_root = (
+        repository / "artifacts" / "snpatho" / (args.molecular_generation + "_scanvi")
+        if args.artifact_root is None
+        else args.artifact_root
+    )
+    native_manifest = (
+        repository
+        / (
+            "reports/snpatho_scanvi_r1_manifest.json"
+            if args.molecular_generation == "r1"
+            else "artifacts/snpatho/r2_scanvi/native_manifest.json"
+        )
+        if args.native_manifest is None
+        else args.native_manifest
+    )
+    run_manifest = (
+        repository
+        / "artifacts"
+        / "snpatho"
+        / (
+            "unknown_mass_sensitivity_v1"
+            if args.molecular_generation == "r1"
+            else "unknown_mass_sensitivity_r2_v1"
+        )
+        / "run_manifest.json"
+        if args.run_manifest is None
+        else args.run_manifest
+    )
     report = evaluate_unknown_mass(
-        repository=args.repository,
-        artifact_root=args.artifact_root,
-        run_manifest_path=args.run_manifest,
+        repository=repository,
+        artifact_root=artifact_root,
+        run_manifest_path=run_manifest,
         truth_manifest_path=args.truth_manifest,
-        native_manifest_path=args.native_manifest,
+        native_manifest_path=native_manifest,
         samples=DEFAULT_SAMPLES,
+        molecular_generation=args.molecular_generation,
         minimum_nuclei=args.minimum_nuclei,
+        practical_delta_threshold=args.practical_delta_threshold,
     )
     write_report(
         report,

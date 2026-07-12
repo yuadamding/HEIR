@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "heir.broad_type_supervised_report.v1",
+  "title": "HEIR supervised broad-cell-type development report",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "status",
+    "biological_success_claimed",
+    "plan",
+    "label_contract",
+    "overall_gate"
+  ],
+  "properties": {
+    "schema_version": {"const": "heir.broad_type_supervised_report.v1"},
+    "status": {"enum": ["complete", "blocked_evidence"]},
+    "biological_success_claimed": {"const": false},
+    "plan": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": ["string", "null"]}
+      }
+    },
+    "label_contract": {
+      "type": "object",
+      "required": [
+        "schema",
+        "independent_of_heir_predictions_required",
+        "reviewer_confidence_required",
+        "reviewer_count_required",
+        "roi_compartment_required",
+        "labels_generated_by_pipeline"
+      ]
+    },
+    "tasks": {"type": "array"},
+    "blockers": {"type": "array", "items": {"type": "string"}},
+    "overall_gate": {
+      "type": "object",
+      "required": ["pass"],
+      "properties": {"pass": {"type": "boolean"}}
+    }
+  }
+}

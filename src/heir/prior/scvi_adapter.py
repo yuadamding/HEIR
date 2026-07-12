@@ -1,5 +1,6 @@
 """Optional scVI/scANVI adapter with no import-time heavy dependency."""
 
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -11,8 +12,21 @@ from ..expression import EXPRESSION_SPACE_ID, EXPRESSION_TARGET_SUM
 from ..models.rna import RNAVAE, RNAVAEConfig
 from ..utils import optional_import_error, resolve_device
 
-SCVI_DISTILLED_DECODER_SCHEMA = "heir.scvi_distilled_decoder.v2"
+SCVI_DISTILLED_DECODER_SCHEMA = "heir.scvi_distilled_decoder.v3"
 SCVI_EXPRESSION_NORMALIZATION_CONTRACT = "full_library_10000_then_panel_log1p_v2"
+SCVI_BATCH_CORRECTION_MODES = frozenset({"none", "reference_batch_marginalization"})
+
+
+def _array_sha256(values: np.ndarray) -> str:
+    """Hash an array's exact shape, dtype, and contiguous byte content."""
+
+    array = np.ascontiguousarray(values)
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+    digest.update(array.tobytes())
+    return digest.hexdigest()
 
 
 class SCVIAdapter:
@@ -31,6 +45,63 @@ class SCVIAdapter:
         self.latent_dim = latent_dim
         self.likelihood = likelihood
         self.model: Optional[Any] = None
+
+    @staticmethod
+    def validate_crossed_technical_batch(
+        section_values: Sequence[object],
+        batch_values: Sequence[object],
+        *,
+        key: str,
+    ) -> Tuple[str, ...]:
+        """Require an estimable technical design crossed with specimens."""
+
+        normalized_key = str(key).strip().lower()
+        reserved = {
+            "section_id",
+            "sample_id",
+            "donor_id",
+            "specimen_id",
+            "block_id",
+            "source_cell_id",
+            "source_row",
+            "major_annotation",
+            "cell_type",
+            "disease",
+            "tissue",
+            "anatomic_region",
+        }
+        if not normalized_key or normalized_key in reserved:
+            raise ValueError("technical batch key names identity or biological information")
+        sections_raw = np.asarray(section_values, dtype=object)
+        batches_raw = np.asarray(batch_values, dtype=object)
+        if sections_raw.ndim != 1 or batches_raw.shape != sections_raw.shape:
+            raise ValueError("technical batch values must align one-to-one with specimens")
+
+        def clean(values: np.ndarray, name: str) -> np.ndarray:
+            result = []
+            for value in values.tolist():
+                if value is None or (isinstance(value, float) and np.isnan(value)):
+                    raise ValueError("%s contains missing values" % name)
+                text = str(value).strip()
+                if not text or text.lower() in {"nan", "none", "null"}:
+                    raise ValueError("%s contains missing or empty values" % name)
+                result.append(text)
+            return np.asarray(result, dtype=np.str_)
+
+        sections = clean(sections_raw, "section identity")
+        batches = clean(batches_raw, "technical batch key")
+        section_levels = tuple(sorted(set(sections.tolist())))
+        batch_levels = tuple(sorted(set(batches.tolist())))
+        if len(section_levels) < 2 or len(batch_levels) < 2:
+            raise ValueError("technical batch correction requires at least two crossed levels")
+        if any(
+            set(sections[batches == level].tolist()) != set(section_levels)
+            for level in batch_levels
+        ):
+            raise ValueError("every technical batch level must occur in every specimen")
+        if any(len(set(batches[sections == level].tolist())) < 2 for level in section_levels):
+            raise ValueError("every specimen must contain at least two technical batch levels")
+        return batch_levels
 
     @staticmethod
     def _module() -> Any:
@@ -112,6 +183,8 @@ class SCVIAdapter:
         adata: Optional[Any] = None,
         gene_list: Optional[Sequence[str]] = None,
         transform_batch: Optional[Sequence[object]] = None,
+        batch_correction_mode: str = "reference_batch_marginalization",
+        posterior_samples: int = 32,
     ) -> np.ndarray:
         """Return panel expression normalized against the full decoded library.
 
@@ -121,22 +194,45 @@ class SCVIAdapter:
 
         if self.model is None:
             raise RuntimeError("fit or load the RNA model first")
-        if transform_batch is None or len(transform_batch) == 0:
+        mode = str(batch_correction_mode).strip().lower()
+        if mode not in SCVI_BATCH_CORRECTION_MODES:
             raise ValueError(
-                "transform_batch must name prespecified reference batches for portable decoding"
+                "batch_correction_mode must be none or reference_batch_marginalization"
             )
+        if isinstance(transform_batch, (str, bytes)):
+            raise TypeError("transform_batch must be a sequence of batch identifiers")
+        reference_batches = () if transform_batch is None else tuple(transform_batch)
+        if any(not str(value).strip() for value in reference_batches):
+            raise ValueError("transform_batch cannot contain empty batch identifiers")
+        if isinstance(posterior_samples, bool) or not isinstance(posterior_samples, int):
+            raise TypeError("posterior_samples must be an integer")
+        if posterior_samples <= 0:
+            raise ValueError("posterior_samples must be positive")
+        if mode == "reference_batch_marginalization" and not reference_batches:
+            raise ValueError(
+                "transform_batch must name prespecified reference batches when batch "
+                "marginalization is enabled"
+            )
+        if mode == "none" and reference_batches:
+            raise ValueError("transform_batch must be empty when batch_correction_mode is none")
         genes = None if gene_list is None else tuple(str(value) for value in gene_list)
         if genes is not None and (
             not genes or len(set(genes)) != len(genes) or any(not value.strip() for value in genes)
         ):
             raise ValueError("gene_list must contain unique non-empty genes")
-        values = self.model.get_normalized_expression(
-            adata,
-            gene_list=None if genes is None else list(genes),
-            library_size=EXPRESSION_TARGET_SUM,
-            transform_batch=list(transform_batch),
-            return_numpy=False,
-        )
+        normalization_options = {
+            "gene_list": None if genes is None else list(genes),
+            "library_size": EXPRESSION_TARGET_SUM,
+            "n_samples": posterior_samples,
+            "return_mean": True,
+            "return_numpy": False,
+        }
+        # Omitting ``transform_batch`` is semantically different from passing a
+        # list of every specimen: the latter explicitly averages away the batch
+        # effect.  Keep the choice visible and hashable in exported metadata.
+        if mode == "reference_batch_marginalization":
+            normalization_options["transform_batch"] = list(reference_batches)
+        values = self.model.get_normalized_expression(adata, **normalization_options)
         if hasattr(values, "columns"):
             columns = [str(value) for value in values.columns]
             if genes is not None:
@@ -181,6 +277,10 @@ class SCVIAdapter:
         seed: int = 17,
         device: str = "auto",
         transform_batch: Optional[Sequence[object]] = None,
+        batch_correction_mode: str = "reference_batch_marginalization",
+        posterior_samples: int = 32,
+        latent_target: Optional[np.ndarray] = None,
+        expression_target: Optional[np.ndarray] = None,
     ) -> RNAVAE:
         """Distill the fitted scVI mean decoder into HEIR's portable decoder.
 
@@ -201,12 +301,32 @@ class SCVIAdapter:
             raise ValueError("gene_list cannot contain empty genes")
         if max_epochs <= 0 or batch_size <= 0 or learning_rate <= 0 or patience <= 0:
             raise ValueError("decoder training settings must be positive")
-        latent = self.latent(adata)
-        target = self.normalized_expression(
-            adata,
-            genes,
-            transform_batch=transform_batch,
+        if isinstance(posterior_samples, bool) or not isinstance(posterior_samples, int):
+            raise TypeError("posterior_samples must be an integer")
+        if posterior_samples <= 0:
+            raise ValueError("posterior_samples must be positive")
+        latent = (
+            self.latent(adata)
+            if latent_target is None
+            else np.asarray(latent_target, dtype=np.float32)
         )
+        target = (
+            self.normalized_expression(
+                adata,
+                genes,
+                transform_batch=transform_batch,
+                batch_correction_mode=batch_correction_mode,
+                posterior_samples=posterior_samples,
+            )
+            if expression_target is None
+            else np.asarray(expression_target, dtype=np.float32)
+        )
+        if latent.ndim != 2 or latent.shape[1] != self.latent_dim:
+            raise ValueError("precomputed scVI latent target has the wrong shape")
+        if not np.isfinite(latent).all():
+            raise ValueError("precomputed scVI latent target must be finite")
+        if target.ndim != 2 or not np.isfinite(target).all() or np.any(target < 0):
+            raise ValueError("precomputed scVI expression target is invalid")
         if target.shape != (latent.shape[0], len(genes)):
             raise ValueError("scVI decoder output does not match cells and gene_list")
         held_out = np.asarray(validation_mask, dtype=bool)
@@ -288,7 +408,8 @@ class SCVIAdapter:
         validation_mask: np.ndarray,
         training_donors: Sequence[str],
         latent_space_id: str,
-        transform_batch: Sequence[object],
+        transform_batch: Optional[Sequence[object]] = None,
+        batch_correction_mode: str = "reference_batch_marginalization",
         **training_options: Any,
     ) -> RNAVAE:
         """Distill and atomically export the metadata required by ``heir train``."""
@@ -298,14 +419,50 @@ class SCVIAdapter:
             raise ValueError("training_donors must contain non-empty donor IDs")
         if not latent_space_id.strip():
             raise ValueError("latent_space_id is required")
-        reference_batches = tuple(str(value).strip() for value in transform_batch)
-        if not reference_batches or any(not value for value in reference_batches):
-            raise ValueError("transform_batch must contain non-empty reference batches")
+        mode = str(batch_correction_mode).strip().lower()
+        if mode not in SCVI_BATCH_CORRECTION_MODES:
+            raise ValueError(
+                "batch_correction_mode must be none or reference_batch_marginalization"
+            )
+        if isinstance(transform_batch, (str, bytes)):
+            raise TypeError("transform_batch must be a sequence of batch identifiers")
+        raw_reference_batches = () if transform_batch is None else tuple(transform_batch)
+        reference_batches = tuple(str(value).strip() for value in raw_reference_batches)
+        if any(not value for value in reference_batches):
+            raise ValueError("transform_batch cannot contain empty reference batches")
+        if mode == "reference_batch_marginalization" and not reference_batches:
+            raise ValueError(
+                "transform_batch must contain reference batches when marginalization is enabled"
+            )
+        if mode == "none" and reference_batches:
+            raise ValueError("transform_batch must be empty when batch_correction_mode is none")
+        posterior_samples = training_options.pop("posterior_samples", 32)
+        latent_target = training_options.pop("latent_target", None)
+        expression_target = training_options.pop("expression_target", None)
+        if latent_target is None:
+            latent_target = self.latent(adata)
+        else:
+            latent_target = np.asarray(latent_target, dtype=np.float32)
+        if expression_target is None:
+            expression_target = self.normalized_expression(
+                adata,
+                gene_list,
+                transform_batch=reference_batches,
+                batch_correction_mode=mode,
+                posterior_samples=posterior_samples,
+            )
+        else:
+            expression_target = np.asarray(expression_target, dtype=np.float32)
+        held_out = np.asarray(validation_mask, dtype=bool)
         model = self.distill_transferable_decoder(
             adata,
             gene_list,
-            validation_mask,
+            held_out,
             transform_batch=reference_batches,
+            batch_correction_mode=mode,
+            posterior_samples=posterior_samples,
+            latent_target=latent_target,
+            expression_target=expression_target,
             **training_options,
         )
         checkpoint = model.checkpoint()
@@ -325,6 +482,11 @@ class SCVIAdapter:
                 "version": 2,
             },
             "transform_batch": list(reference_batches),
+            "batch_correction_mode": mode,
+            "posterior_samples": posterior_samples,
+            "distillation_latent_sha256": _array_sha256(latent_target),
+            "distillation_target_sha256": _array_sha256(expression_target),
+            "validation_mask_sha256": _array_sha256(held_out),
             "decoder_only": True,
         }
         destination = Path(path).expanduser().resolve()

@@ -336,7 +336,7 @@ def test_view_agreement_fails_closed_without_independent_views() -> None:
         )
     )
     trainer = _RecordingTrainer(model)
-    with pytest.raises(ValueError, match="independent view predictions"):
+    with pytest.raises(ValueError, match="scale-held-out view predictions"):
         IterativeRefiner(
             lambda: trainer,
             RefinementConfig(broad_refinement_rounds=0),

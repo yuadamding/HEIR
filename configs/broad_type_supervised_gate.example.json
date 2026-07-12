@@ -1,0 +1,110 @@
+{
+  "schema_version": "heir.broad_type_supervised_plan.v1",
+  "status": "labels_pending",
+  "name": "snpatho_broad_type_supervised_development_v1",
+  "claim_scope": "supervised_development_only",
+  "device": "auto",
+  "seeds": [17, 41, 89],
+  "graph": {
+    "enabled": false,
+    "reason": "The current graph has not demonstrated benefit; this gate tests frozen image features only."
+  },
+  "molecular_residual": {
+    "enabled": false,
+    "reason": "Broad morphology-to-type identification must pass before molecular residuals are evaluated."
+  },
+  "label_policy": {
+    "generated_by_pipeline": false,
+    "independent_of_heir_predictions_required": true,
+    "roi_compartment_required": true,
+    "reviewer_confidence_required": true
+  },
+  "defaults": {
+    "minimum_reviewer_confidence": 0.7,
+    "minimum_reviewers": 2,
+    "minimum_class_count": 10,
+    "accepted_adjudication_statuses": [
+      "adjudicated",
+      "reviewer_agreement",
+      "orthogonal_assay_confirmed"
+    ]
+  },
+  "splits": {
+    "calibration_fraction": 0.2,
+    "test_fraction": 0.2
+  },
+  "models": {
+    "logistic_maximum_iterations": 500,
+    "mlp_hidden_dim": 64,
+    "mlp_epochs": 100,
+    "mlp_learning_rate": 0.001,
+    "mlp_weight_decay": 0.0001
+  },
+  "gate_thresholds": {
+    "minimum_macro_f1": 0.65,
+    "minimum_image_shuffle_macro_f1_delta": 0.05,
+    "maximum_ece": 0.10,
+    "minimum_predicted_class_occupancy_fraction": 0.75,
+    "minimum_seed_donor_run_pass_fraction": 1.0
+  },
+  "tasks": [
+    {
+      "task_id": "snpatho_4066_broad",
+      "analysis_scope": "within_specimen_roi_held_out_development",
+      "split_policy": "grouped_roi",
+      "ontology": {
+        "path": "ontologies/snpatho_broad_4066.tsv",
+        "sha256": "ed0148607bcc6178de185dbc3723afac9c245cd51a46902cd24a57a802868370"
+      },
+      "datasets": [
+        {
+          "section_id": "4066",
+          "donor_id": "4066",
+          "features": {
+            "path": "../artifacts/snpatho/4066/histology_full.npz",
+            "sha256": "17ee48f8c874d542c44843f8168128a9d668227333222fa73d5f463718fac5f5"
+          },
+          "labels": {
+            "path": "../artifacts/snpatho/broad_type_labels/4066.tsv",
+            "sha256": null
+          }
+        }
+      ]
+    },
+    {
+      "task_id": "snpatho_liver_metastases_broad",
+      "analysis_scope": "leave_one_specimen_out_development",
+      "split_policy": "leave_one_donor_out",
+      "ontology": {
+        "path": "ontologies/snpatho_broad_liver_metastases.tsv",
+        "sha256": "a7f0770bee590696ea01f883e2002d90d829137c12b81ae2ae2d84e5854da99a"
+      },
+      "datasets": [
+        {
+          "section_id": "4399",
+          "donor_id": "4399",
+          "features": {
+            "path": "../artifacts/snpatho/4399/histology_full.npz",
+            "sha256": "a458e23130ddb0cd40b165ae9fb1c2b6da166fc469d19b1c80074f8394ed9471"
+          },
+          "labels": {
+            "path": "../artifacts/snpatho/broad_type_labels/4399.tsv",
+            "sha256": null
+          }
+        },
+        {
+          "section_id": "4411",
+          "donor_id": "4411",
+          "features": {
+            "path": "../artifacts/snpatho/4411/histology_full.npz",
+            "sha256": "979b391c2e58e6aea3a9b5958392f264ea1fa624f5f152ec0176cc39ce134cd0"
+          },
+          "labels": {
+            "path": "../artifacts/snpatho/broad_type_labels/4411.tsv",
+            "sha256": null
+          }
+        }
+      ]
+    }
+  ]
+}

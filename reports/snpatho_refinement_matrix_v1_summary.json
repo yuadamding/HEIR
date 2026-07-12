@@ -1,6 +1,14 @@
 {
   "analysis_role": "native_scanvi_published_integrated_annotation_sensitivity",
   "annotation_provenance": "major_annotation copied from the published integrated-workflow object; not an independent clean reannotation",
+  "supersession": {
+    "historical_snapshot_immutable": true,
+    "unknown_mass_blocker_superseded": true,
+    "current_unknown_mass_status": "complete_but_unstable_no_mass_selected",
+    "current_effective_structural_evidence_gap_count": 6,
+    "replacement_summary": "reports/snpatho_unknown_mass_sensitivity_v2_summary.json",
+    "replacement_summary_sha256": "8979a7c6882b0a34483420310113c762c18bf0e58580a5fca16e169fc7cd697a"
+  },
   "artifacts": {
     "requested": 93,
     "scored": 93

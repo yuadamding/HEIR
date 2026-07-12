@@ -85,6 +85,8 @@ class HEIRConfig:
     legacy_unrestricted_residual: bool = False
     residual_rank: int = 0
     residual_max_norm: float = 0.5
+    residual_type_strategy: str = "detached_max"
+    residual_type_concentration_threshold: float = 0.6
     scgpt_embedding_dim: int = 0
 
     def __post_init__(self) -> None:
@@ -118,6 +120,10 @@ class HEIRConfig:
         if not math.isfinite(self.residual_max_norm) or self.residual_max_norm <= 0:
             raise ValueError("residual_max_norm must be finite and positive")
         object.__setattr__(self, "residual_rank", resolved_residual_rank)
+        if self.residual_type_strategy not in {"detached_max", "legacy_weighted_basis"}:
+            raise ValueError("residual_type_strategy must be detached_max or legacy_weighted_basis")
+        if not 0.0 <= self.residual_type_concentration_threshold < 1.0:
+            raise ValueError("residual_type_concentration_threshold must be in [0, 1)")
         if self.legacy_independent_prototype_query:
             # This flag only exists to reproduce the original, unrestricted
             # v1 model. Keep it from creating a hybrid architecture.
@@ -579,6 +585,16 @@ class HEIRModel(nn.Module):
 
         if basis.ndim != 3 or gate.ndim != 1 or basis.shape[0] != gate.shape[0]:
             raise ValueError("residual basis/gate must contain one entry per cell")
+        # Frozen RNA geometry remains float32 under CUDA autocast, whereas the
+        # learned coefficient/gate heads emit float16. Sampling occurs outside
+        # the forward autocast context, so einsum will not reconcile those
+        # dtypes for us. Promote the complete residual calculation explicitly;
+        # this also keeps the bounded norm calculation in the safer precision.
+        work_dtype = torch.promote_types(basis.dtype, coefficients.dtype)
+        work_dtype = torch.promote_types(work_dtype, gate.dtype)
+        basis = basis.to(dtype=work_dtype)
+        coefficients = coefficients.to(dtype=work_dtype)
+        gate = gate.to(dtype=work_dtype)
         if coefficients.ndim == 2:
             if coefficients.shape != (basis.shape[0], basis.shape[2]):
                 raise ValueError("residual coefficients do not align to the basis")
@@ -703,16 +719,34 @@ class HEIRModel(nn.Module):
                 min=self.config.logvar_min,
                 max=self.config.logvar_max,
             )
-            residual_basis = torch.einsum(
-                "nc,clr->nlr",
-                type_probabilities,
-                self.residual_type_basis,
-            )
-            cell_residual_max_norm = type_probabilities @ self.residual_type_max_norms.to(
-                dtype=type_probabilities.dtype
-            )
-            residual_gate = cell_residual_max_norm * torch.sigmoid(
-                self.residual_gate_head(embedding).squeeze(-1)
+            if self.config.residual_type_strategy == "legacy_weighted_basis":
+                residual_basis = torch.einsum(
+                    "nc,clr->nlr",
+                    type_probabilities,
+                    self.residual_type_basis,
+                )
+                cell_residual_max_norm = type_probabilities @ self.residual_type_max_norms.to(
+                    dtype=type_probabilities.dtype
+                )
+                concentration_gate = torch.ones_like(cell_residual_max_norm)
+            else:
+                # Coefficients retain their RNA-program interpretation by using
+                # one frozen, orthonormal type basis per cell.  Type selection
+                # and the concentration decision are detached: the residual
+                # loss cannot sharpen the classifier merely to unlock a larger
+                # molecular correction.
+                type_concentration, selected_type = type_probabilities.detach().max(dim=1)
+                residual_basis = self.residual_type_basis.index_select(0, selected_type)
+                cell_residual_max_norm = self.residual_type_max_norms.to(
+                    dtype=type_probabilities.dtype
+                ).index_select(0, selected_type)
+                concentration_gate = (
+                    type_concentration >= self.config.residual_type_concentration_threshold
+                ).to(dtype=type_probabilities.dtype)
+            residual_gate = (
+                cell_residual_max_norm
+                * torch.sigmoid(self.residual_gate_head(embedding).squeeze(-1))
+                * concentration_gate
             )
             residual_mu = self._bounded_low_rank_residual(
                 residual_basis,
@@ -730,9 +764,12 @@ class HEIRModel(nn.Module):
             residual_variance = residual_gate.square().unsqueeze(-1) * (
                 projected_variance / (1.0 + projected_variance.sum(dim=-1, keepdim=True))
             )
-            residual_logvar = residual_variance.clamp_min(
-                torch.finfo(residual_variance.dtype).tiny
-            ).log()
+            residual_logvar = (
+                residual_variance.clamp_min(torch.finfo(residual_variance.dtype).tiny)
+                .log()
+                .clamp(min=self.config.logvar_min, max=self.config.logvar_max)
+            )
+            residual_variance = residual_logvar.exp()
 
         routing_cost = (routing_query.unsqueeze(1) - means).square().mean(dim=-1)
         if self.config.covariance_aware_uot and means.shape[1]:
@@ -982,6 +1019,8 @@ class HEIRModel(nn.Module):
             "state_dict": self.state_dict(),
             "residual_geometry": {
                 "type_max_norms": self.residual_type_max_norms.detach().cpu(),
+                "type_strategy": self.config.residual_type_strategy,
+                "type_concentration_threshold": (self.config.residual_type_concentration_threshold),
                 "basis_trainable": bool(
                     self.residual_type_basis is not None and self.residual_type_basis.requires_grad
                 ),
@@ -993,8 +1032,16 @@ class HEIRModel(nn.Module):
         cls,
         checkpoint: Mapping[str, Any],
         strict: bool = True,
+        *,
+        allow_legacy_mixed_residual_basis: bool = False,
     ) -> "HEIRModel":
-        """Reconstruct a model from :meth:`checkpoint` output."""
+        """Reconstruct a model from :meth:`checkpoint` output.
+
+        Early v3 restricted-residual checkpoints did not record their use of
+        a probability-weighted mixture of non-aligned type bases.  Loading one
+        requires an explicit opt-in so it cannot silently acquire the new
+        detached-type semantics.
+        """
 
         if "config" not in checkpoint or "state_dict" not in checkpoint:
             raise KeyError("checkpoint must contain config and state_dict")
@@ -1015,10 +1062,40 @@ class HEIRModel(nn.Module):
             # algebraic cancellation intentionally instead of silently loading
             # its full-rank head into the restricted v3 residual.
             config_values["legacy_unrestricted_residual"] = True
+        legacy_unrestricted = bool(
+            config_values.get("legacy_unrestricted_residual", False)
+            or config_values.get("legacy_independent_prototype_query", False)
+        )
+        if "residual_type_strategy" not in config_values and not legacy_unrestricted:
+            if not allow_legacy_mixed_residual_basis:
+                raise ValueError(
+                    "legacy mixed residual basis requires allow_legacy_mixed_residual_basis=True"
+                )
+            config_values["residual_type_strategy"] = "legacy_weighted_basis"
+            config_values["residual_type_concentration_threshold"] = 0.0
         model = cls(HEIRConfig.from_dict(config_values))
         model.load_state_dict(checkpoint["state_dict"], strict=strict)
         geometry = checkpoint.get("residual_geometry")
-        if geometry is not None and not model.config.legacy_unrestricted_residual:
+        if not model.config.legacy_unrestricted_residual and not isinstance(geometry, Mapping):
+            raise ValueError("restricted checkpoint residual geometry is missing")
+        if isinstance(geometry, Mapping) and not model.config.legacy_unrestricted_residual:
+            strategy = geometry.get("type_strategy")
+            threshold = geometry.get("type_concentration_threshold")
+            if model.config.residual_type_strategy == "legacy_weighted_basis":
+                if strategy not in {None, "legacy_weighted_basis"}:
+                    raise ValueError("checkpoint residual type strategy differs from config")
+            elif strategy != model.config.residual_type_strategy:
+                raise ValueError("checkpoint residual type strategy differs from config")
+            if threshold is None:
+                if model.config.residual_type_strategy != "legacy_weighted_basis":
+                    raise ValueError("checkpoint residual concentration threshold is missing")
+            elif not math.isclose(
+                float(threshold),
+                model.config.residual_type_concentration_threshold,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            ):
+                raise ValueError("checkpoint residual concentration threshold differs from config")
             norms = torch.as_tensor(geometry["type_max_norms"])
             if norms.shape != model.residual_type_max_norms.shape:
                 raise ValueError("checkpoint residual geometry has the wrong type count")

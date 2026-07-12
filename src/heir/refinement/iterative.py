@@ -277,7 +277,7 @@ class IterativeRefiner:
         teacher.model.to(self.device)
         if self.config.require_view_agreement and view_probabilities is None:
             raise ValueError(
-                "refinement requires independent view predictions when view agreement is enabled"
+                "refinement requires scale-held-out view predictions when view agreement is enabled"
             )
         anchor_states: Dict[Tuple[str, str, str, str], AnchorLifecycle] = {}
         audit: List[RefinementRound] = []
@@ -487,10 +487,10 @@ class IterativeRefiner:
                         views = view_probabilities.get(batch.sample_id)
                 if self.config.require_view_agreement:
                     if views is None or np.asarray(views).ndim not in (2, 3):
-                        raise ValueError("missing independent views for %s" % stable_key)
+                        raise ValueError("missing scale-held-out views for %s" % stable_key)
                     if np.asarray(views).shape[0] < 2:
                         raise ValueError(
-                            "view agreement requires at least two independent predictions"
+                            "view agreement requires at least two scale-held-out predictions"
                         )
                 if broad_level and views is not None:
                     views = np.asarray(views)
@@ -518,7 +518,7 @@ class IterativeRefiner:
                 supported_types[supported_indices] = True
                 if self.config.require_view_agreement and views is None:
                     # Two identical teacher predictions do not count as
-                    # independent evidence; retain soft constraints only.
+                    # scale-held-out agreement; retain soft constraints only.
                     views = np.empty((0, len(probabilities)), dtype=np.int64)
                 if views is not None and views.shape[0] == 0:
                     selection = select_anchors(

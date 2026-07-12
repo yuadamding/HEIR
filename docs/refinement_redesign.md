@@ -45,10 +45,19 @@ The current development refiner addresses the code-level audit findings:
   row mass. Spot aggregation accepts external RNA-mass weights.
 - New checkpoints replace the algebraically cancelling unrestricted residual
   with a zero-initialized type-conditioned low-rank correction. Primary runs
-  freeze deterministic within-type RNA PCA directions and calibrate a separate
-  bound for each type from measured state separation/covariance. A smooth
-  unit-ball projection and sigmoid gate hard-bound deterministic and sampled
-  latent corrections. The coefficient log-variance head starts at `-6`.
+  freeze deterministic within-type RNA PCA directions. RNA cells use
+  regularized diagonal-Gaussian assignment to same-type prototypes; residual,
+  covariance, and nearest-neighbor state-separation scales are calibrated in
+  the learned residual subspace. Single-state types fall back to projected
+  covariance or empirical residual evidence. A detached maximum-type basis and
+  posterior-concentration gate replace the non-orthonormal weighted basis, and
+  the residual stays exactly zero until that internal concentration threshold
+  passes. This is a numerical safeguard, not the separate independent-label
+  broad-type development gate, which must pass before residual-on results are
+  interpreted. Then
+  a smooth unit-ball projection hard-bounds deterministic and sampled latent
+  corrections. The coefficient log-variance head starts at `-6`. Legacy v1
+  geometry and early v3 mixed-basis checkpoints require explicit migration.
 - Inference intervals sample prototype assignment, prototype covariance, and
   coefficient-space residual uncertainty. They are explicitly conditional on a
   measured known state and are suppressed for abstained cells. The v8 artifact
@@ -77,14 +86,20 @@ conda run -n hne heir fit-residual-geometry \
 The full snPATHO development matrix is resumable and CUDA-first:
 
 ```bash
-conda run -n hne python scripts/prepare_snpatho_refinement_inputs.py --execute
+conda run -n hne python scripts/prepare_snpatho_refinement_inputs.py \
+  --molecular-generation r2 --execute
 
 conda run -n hne python scripts/run_snpatho_refinement_benchmark.py \
-  --sample all --execute --controls \
-  --manifest-output reports/snpatho_refinement_v1_five_seed_manifest.json
+  --molecular-generation r2 --sample all --execute --controls \
+  --artifact-root /mnt/seagate/HEIR_runs/snpatho_refinement_nested_v2 \
+  --prohibit-adoption \
+  --manifest-output artifacts/snpatho/refinement_matrix_v2/run_manifest.json
 ```
 
-The preparation step consumes the hash-bound native-scANVI provenance, frozen
+R2 is the preparation default and requires the specimen-preserving molecular
+run under `artifacts/snpatho/r2_scanvi`; `--molecular-generation r1` is reserved
+for reproducing the historical specimen-batch sensitivity. The preparation
+step consumes the hash-bound native-scANVI provenance, frozen
 histology splits, and histology-only calibrated OOD artifacts. It creates the
 rare-complete prototypes, RNA residual geometry, and train/validation batches
 through the public HEIR CLI. Per-stage receipts resume interrupted work and a
@@ -93,11 +108,15 @@ without receipts fail closed; `--adopt-existing` accepts them only after the
 frozen CLI recipe reproduces byte-identical artifacts.
 
 The runner freezes five endpoint seeds (17, 41, 89, 131, and 197), round 0 and
-round 4, and three control seeds (17, 41, and 89) for prototype-only,
-image-record-shuffle, degree-preserving graph-node-shuffle, and no-graph
-controls. Wrong-donor coverage requires both alternative donors for every
-specimen: six directed target/source pairings at each control seed, or 18 cases
-in total. Under `heir predict --wrong-donor-control`, source prototypes are
+round 4, and three control seeds (17, 41, and 89) for the fully nested
+round0/refined × residual-on/off design, image-record shuffle,
+degree-preserving graph-node shuffle, and no graph. The nested cases use the
+same `--prototype-only` inference ablation at each checkpoint, allowing separate
+round-zero residual, refined residual, routing-refinement, and total-refinement
+effects. Wrong-prototype-bank coverage requires both alternative sources for
+every specimen: six directed target/source pairings at each control seed, or 18
+cases in total. The legacy CLI flag remains `heir predict --wrong-donor-control`;
+source prototypes are
 deterministically intersected with the target checkpoint ontology in memory,
 with at least two retained types/prototypes required. The PredictionBundle
 remains hash-bound to the full source bank, while telemetry records the exact
@@ -109,28 +128,33 @@ Score the complete development matrix, then derive the compact public summary:
 ```bash
 PYTHONPATH=src conda run -n hne python \
   scripts/benchmark_snpatho_refinement_matrix.py \
-  --run-manifest reports/snpatho_refinement_v1_five_seed_manifest.json \
+  --molecular-generation r2 \
+  --artifact-root /mnt/seagate/HEIR_runs/snpatho_refinement_nested_v2 \
+  --run-manifest artifacts/snpatho/refinement_matrix_v2/run_manifest.json \
   --evidence-manifest reports/snpatho_refinement_matrix_evidence_v1.json \
-  --json-output artifacts/snpatho/refinement_matrix_v1/report.json \
-  --tsv-output artifacts/snpatho/refinement_matrix_v1/report.tsv \
-  --markdown-output artifacts/snpatho/refinement_matrix_v1/report.md
+  --practical-delta-threshold 0.002 \
+  --json-output artifacts/snpatho/refinement_matrix_v2/report.json \
+  --tsv-output artifacts/snpatho/refinement_matrix_v2/report.tsv \
+  --markdown-output artifacts/snpatho/refinement_matrix_v2/report.md
 
 PYTHONPATH=src conda run -n hne python \
   scripts/summarize_snpatho_benchmarks.py \
-  --full-json artifacts/snpatho/refinement_matrix_v1/report.json \
-  --full-tsv artifacts/snpatho/refinement_matrix_v1/report.tsv \
-  --full-markdown artifacts/snpatho/refinement_matrix_v1/report.md \
-  --output reports/snpatho_refinement_matrix_v1_summary.json
+  --full-json artifacts/snpatho/refinement_matrix_v2/report.json \
+  --full-tsv artifacts/snpatho/refinement_matrix_v2/report.tsv \
+  --full-markdown artifacts/snpatho/refinement_matrix_v2/report.md \
+  --output artifacts/snpatho/refinement_matrix_v2/summary.json
 ```
 
-The current scorer consumed 93 of 93 requested artifacts. Strict ordering
-failed with 49 passing and 59 failing checks, so the public summary status is
-`blocked_evidence`. The remaining gaps are a clean independent reannotation,
+The committed 93-artifact report is a historical pre-nested diagnostic. The
+hardened plan requests 102 scored predictions across 147 stages, and classifies
+paired deltas using a prespecified practical margin of 0.002 as pass, tie, or
+fail while retaining raw sign separately. A new clean-root run is required
+before the nested decomposition can be interpreted. The remaining gaps are a clean independent reannotation,
 generic-atlas control, label permutation, state omission, reference
-downsampling, and an untouched external cohort. The fixed unknown-mass sweep is
-blocked because 14 of 15 cases lack checkpoint-serialized mass provenance; a
-post-hoc command/output manifest does not prove the settings used at execution.
-The v2 run manifest binds every input/output hash and canonical command across
+downsampling, and an untouched external cohort. The historical fixed-mass sweep
+was provenance-blocked; the clean replacement completed all 75 source-bound
+CUDA stages and 15 cases but is practically unstable and selects no mass.
+The historical v2 run manifest binds every input/output hash and canonical command across
 138 stages. Its final pass conservatively records all outputs as adopted, so it
 records `execution_provenance_verified=false`: current validation proves
 recipe/output consistency, source-bound CLI identity, and every shuffle-map
@@ -145,20 +169,35 @@ Run the prespecified seed-17 unknown-mass sensitivity separately at fixed masses
 ```bash
 PYTHONPATH=src conda run -n hne python \
   scripts/run_snpatho_refinement_benchmark.py \
+  --molecular-generation r1 \
   --sample all --unknown-mass-sensitivity --execute \
-  --manifest-output artifacts/snpatho/unknown_mass_sensitivity_v1/run_manifest.json
+  --artifact-root /mnt/seagate/HEIR_runs/snpatho_unknown_mass_clean_v2_run4 \
+  --prohibit-adoption \
+  --manifest-output artifacts/snpatho/unknown_mass_sensitivity_v2/run_manifest.json
 
 PYTHONPATH=src conda run -n hne python \
   scripts/benchmark_snpatho_unknown_mass.py \
-  --json-output artifacts/snpatho/unknown_mass_sensitivity_v1/report.json \
-  --tsv-output artifacts/snpatho/unknown_mass_sensitivity_v1/report.tsv \
-  --markdown-output artifacts/snpatho/unknown_mass_sensitivity_v1/report.md
+  --molecular-generation r1 \
+  --artifact-root /mnt/seagate/HEIR_runs/snpatho_unknown_mass_clean_v2_run4 \
+  --run-manifest artifacts/snpatho/unknown_mass_sensitivity_v2/run_manifest.json \
+  --practical-delta-threshold 0.002 \
+  --json-output artifacts/snpatho/unknown_mass_sensitivity_v2/report.json \
+  --tsv-output artifacts/snpatho/unknown_mass_sensitivity_v2/report.tsv \
+  --markdown-output artifacts/snpatho/unknown_mass_sensitivity_v2/report.md
 ```
 
-The evaluator currently validates only the 4411/mass-0.20 pair. The other 14
-cases predate checkpoint serialization of `uot_unknown_mass` and
-`uot_unknown_mass_mode`, so the full sweep and its cross-mass conclusion remain
-**blocked**. See [the evidence report](snpatho_unknown_mass_sensitivity.md).
+The runner now validates checkpoint-bound fixed-mode mass metadata before it can
+classify a stage as `skipped_valid`. Legacy cases fail immediately with guidance
+to use a clean output root. `--prohibit-adoption` additionally rejects any
+pre-existing planned endpoint before starting the canonical 75-stage grid (3
+specimens × 5 masses × 5 stages). The completed result is **unstable**: refined
+prediction does not beat round zero and both matched type-mean baselines by the
+0.002 practical margin at every mass. No mass is selected. See [the clean v2
+report](snpatho_unknown_mass_sensitivity_v2.md) and the [historical provenance
+failure](snpatho_unknown_mass_sensitivity.md).
+The clean plan reads immutable molecular inputs from the canonical preparation
+root, including `residual_geometry_rare_complete_v2.npz`, while writing every
+model and prediction endpoint only under the supplied `--artifact-root`.
 
 The orchestrator accepts only `development` or `development_validation` roles
 and enforces this order:

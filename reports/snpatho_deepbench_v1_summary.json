@@ -277,6 +277,10 @@
       "refined_heir_minus_matched_ffpe_r1_soft_type_mean"
     ],
     "requires_both_contrasts": true,
+    "raw_sign_only_legacy_decision": true,
+    "practical_delta_threshold": 0.002,
+    "passes_practical_margin": false,
+    "practical_margin_interpretation": "The positive macro deltas are below 0.002 and are not a practical biological pass; specimen signs are also inconsistent.",
     "status": "passes_developmental_joint_contrast",
     "success_formula": "macro_delta_vs_matched_ffpe_r1_hard > 0 and macro_delta_vs_matched_ffpe_r1_soft > 0"
   },

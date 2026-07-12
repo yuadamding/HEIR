@@ -339,6 +339,8 @@ class RNAReference:
     latent_space_id: str = ""
     block_id: str = ""
     source_count_sha256: str = ""
+    latent_training_donors: Tuple[str, ...] = ()
+    latent_transform_sha256: str = ""
 
     CONTRACT = "heir.rna_reference"
 
@@ -354,6 +356,16 @@ class RNAReference:
             or any(character not in "0123456789abcdef" for character in self.source_count_sha256)
         ):
             raise ValueError("source_count_sha256 must be a lowercase SHA-256 digest")
+        latent_donors = tuple(str(value).strip() for value in self.latent_training_donors)
+        if any(not value for value in latent_donors) or len(set(latent_donors)) != len(
+            latent_donors
+        ):
+            raise ValueError("latent_training_donors must be unique and non-empty")
+        if self.latent_transform_sha256 and (
+            len(self.latent_transform_sha256) != 64
+            or any(value not in "0123456789abcdef" for value in self.latent_transform_sha256)
+        ):
+            raise ValueError("latent_transform_sha256 must be a lowercase SHA-256 digest")
         cells = _readonly_strings(self.cell_ids, "cell_ids")
         genes = _readonly_strings(self.gene_ids, "gene_ids")
         _check_unique(cells, "cell_ids")
@@ -435,6 +447,7 @@ class RNAReference:
         object.__setattr__(self, "donor_ids", donors)
         object.__setattr__(self, "sample_ids", samples)
         object.__setattr__(self, "program_scores", programs)
+        object.__setattr__(self, "latent_training_donors", latent_donors)
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -462,6 +475,12 @@ class RNAReference:
                 "latent_space_id": np.asarray(self.latent_space_id, dtype=np.dtype("U")),
                 "block_id": np.asarray(self.block_id, dtype=np.dtype("U")),
                 "source_count_sha256": np.asarray(self.source_count_sha256, dtype=np.dtype("U")),
+                "latent_training_donors": np.asarray(
+                    self.latent_training_donors, dtype=np.dtype("U")
+                ),
+                "latent_transform_sha256": np.asarray(
+                    self.latent_transform_sha256, dtype=np.dtype("U")
+                ),
             }
         )
         _atomic_npz(path, compressed, payload)
@@ -507,6 +526,16 @@ class RNAReference:
                 source_count_sha256=(
                     str(np.asarray(archive["source_count_sha256"]).item())
                     if "source_count_sha256" in archive
+                    else ""
+                ),
+                latent_training_donors=(
+                    tuple(str(value) for value in archive["latent_training_donors"].tolist())
+                    if "latent_training_donors" in archive
+                    else ()
+                ),
+                latent_transform_sha256=(
+                    str(np.asarray(archive["latent_transform_sha256"]).item())
+                    if "latent_transform_sha256" in archive
                     else ""
                 ),
             )

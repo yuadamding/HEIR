@@ -132,7 +132,9 @@ def _sensitivity_artifact(
     view = round0 / "refinement_views.npz"
     view.write_bytes(b"synthetic refinement views")
 
-    native_prototype = artifact_root / sample / "prototypes_rare_complete.npz"
+    native_prototype = (
+        repository / "artifacts" / "snpatho" / "r1_scanvi" / sample / "prototypes_rare_complete.npz"
+    )
     prototype = refined / "prototypes" / ("%s__%s.npz" % (sample, sample))
     prototype.parent.mkdir(parents=True)
     prototype_value = PrototypeSet(
@@ -221,9 +223,10 @@ def _sensitivity_artifact(
     )
 
 
-def _fixture(tmp_path: Path) -> dict:
+def _fixture(tmp_path: Path, *, custom_output_root: bool = False) -> dict:
     repository = tmp_path / "repository"
-    artifact_root = repository / "artifacts" / "snpatho" / "r1_scanvi"
+    molecular_root = repository / "artifacts" / "snpatho" / "r1_scanvi"
+    artifact_root = tmp_path / "clean-unknown-mass-output" if custom_output_root else molecular_root
     sample = "sample_a"
     for relative in SENSITIVITY._RUNNER.UNKNOWN_MASS_SOURCE_FILES:
         source = ROOT / relative
@@ -273,7 +276,7 @@ def _fixture(tmp_path: Path) -> dict:
         block_id=sample + "_FFPE",
         source_count_sha256="e" * 64,
     )
-    reference_path = artifact_root / sample / "reference500_scanvi.npz"
+    reference_path = molecular_root / sample / "reference500_scanvi.npz"
     reference_path.parent.mkdir(parents=True)
     reference.save_npz(reference_path)
 
@@ -334,7 +337,13 @@ def _fixture(tmp_path: Path) -> dict:
         samples=(sample,),
         seeds=(17,),
         unknown_mass_sensitivity=True,
+        artifact_root=artifact_root,
     )
+    for stage in plan:
+        for _, stage_input in stage.inputs:
+            if not stage_input.exists():
+                stage_input.parent.mkdir(parents=True, exist_ok=True)
+                stage_input.write_bytes(b"synthetic frozen input")
     records = [
         {
             "sample": stage.sample,
@@ -387,16 +396,21 @@ def test_complete_grid_accepts_safety_selected_rounds_and_reports_stability(
     assert report["scored_prediction_count"] == 10
     source_identity = report["scorer_source_identity"]
     assert source_identity["schema"] == "heir.source_identity.v1"
-    assert [row["relative_path"] for row in source_identity["files"]] == [
+    source_files = [row["relative_path"] for row in source_identity["files"]]
+    assert source_files[:3] == [
         "scripts/benchmark_snpatho_unknown_mass.py",
         "scripts/benchmark_snpatho_refinement_matrix.py",
         "scripts/run_snpatho_refinement_benchmark.py",
     ]
+    assert "src/heir/inference.py" in source_files
+    assert "src/heir/evaluation/deepbench.py" in source_files
+    assert "pyproject.toml" in source_files
     assert len(source_identity["aggregate_sha256"]) == 64
     assert report["blockers"] == []
     assert report["manifests"]["unknown_mass_run"]["execution_mode"] == "all_skipped_valid"
     assert [case["refinement_round"] for case in report["cases"]] == [0, 1, 2, 3, 4]
     assert report["stability"]["status"] == "stable"
+    assert report["stability"]["practical_status_stable_across_masses"] is True
     assert report["stability"]["direction_stable_across_masses"] is True
     assert report["stability"]["refined_beats_round0_at_every_mass"] is True
     assert report["stability"]["heir_beats_both_baselines_at_every_mass"] is True
@@ -409,6 +423,10 @@ def test_complete_grid_accepts_safety_selected_rounds_and_reports_stability(
     for case in report["cases"]:
         assert set(case["endpoints"]) == {"round0", "refined"}
         assert set(case["paired_gene_spearman_deltas"]) == set(SENSITIVITY.CONTRASTS)
+        assert all(
+            delta["practical_status"] == "pass" and delta["raw_sign_status"] == "positive"
+            for delta in case["paired_gene_spearman_deltas"].values()
+        )
         assert case["endpoints"]["round0"]["refinement_round"] == 0
         for endpoint in case["endpoints"].values():
             assert set(endpoint["diagnostics"]) == {
@@ -417,6 +435,11 @@ def test_complete_grid_accepts_safety_selected_rounds_and_reports_stability(
                 "mean_unknown_probability",
             }
         assert case["prediction"]["telemetry_prediction_sha256_match"] is True
+        assert case["prediction"]["run_manifest_stage_bound"] is True
+        assert all(
+            endpoint["prediction"]["run_manifest_stage_bound"] is True
+            for endpoint in case["endpoints"].values()
+        )
         assert len(case["prediction"]["refinement_audit_sha256"]) == 64
         assert len(case["prediction"]["parent_checkpoint_sha256"]) == 64
 
@@ -428,6 +451,16 @@ def test_complete_grid_accepts_safety_selected_rounds_and_reports_stability(
     assert unstable["status"] == "unstable"
     assert unstable["direction_stable_across_masses"] is False
     assert unstable["heir_beats_both_baselines_at_every_mass"] is False
+
+
+def test_unknown_mass_scorer_accepts_hash_bound_clean_custom_artifact_root(tmp_path: Path) -> None:
+    arguments = _fixture(tmp_path, custom_output_root=True)
+
+    report = SENSITIVITY.evaluate_unknown_mass(**arguments)
+
+    assert report["status"] == "complete"
+    assert Path(report["request"]["artifact_root"]) == arguments["artifact_root"].resolve()
+    assert report["scored_prediction_count"] == 10
 
     output = tmp_path / "outputs"
     SENSITIVITY.write_report(

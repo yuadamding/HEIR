@@ -73,6 +73,8 @@ class ArrayContractTests(unittest.TestCase):
             cell_type_labels=np.asarray(["T", "B"]),
             donor_ids=np.asarray(["d1", "d1"]),
             latent_space_id="sha256:test-latent",
+            latent_training_donors=("atlas-1", "atlas-2"),
+            latent_transform_sha256="a" * 64,
         )
         self.assertTrue(sparse.isspmatrix_csr(reference.counts))
         self.assertFalse(reference.counts.data.flags.writeable)
@@ -84,6 +86,8 @@ class ArrayContractTests(unittest.TestCase):
         np.testing.assert_allclose(loaded.library_sizes, np.asarray([10.0, 12.0]))
         np.testing.assert_array_equal(loaded.cell_type_labels, np.asarray(["T", "B"]))
         self.assertEqual(loaded.latent_space_id, "sha256:test-latent")
+        self.assertEqual(loaded.latent_training_donors, ("atlas-1", "atlas-2"))
+        self.assertEqual(loaded.latent_transform_sha256, "a" * 64)
 
     def test_rna_reference_rejects_negative_counts(self):
         with self.assertRaisesRegex(ValueError, "non-negative"):

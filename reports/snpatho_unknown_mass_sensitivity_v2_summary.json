@@ -1,0 +1,67 @@
+{
+  "schema": "heir.snpatho_unknown_mass_sensitivity_summary.v2",
+  "generated_date": "2026-07-12",
+  "status": "complete",
+  "stability_status": "unstable",
+  "analysis_role": "opened_cohort_development_sensitivity",
+  "source_parent_commit": "153157fd3577e97078ad3164f68c74afbf1445c8",
+  "execution": {
+    "artifact_root": "/mnt/seagate/HEIR_runs/snpatho_unknown_mass_clean_v2_run4",
+    "cuda": true,
+    "adoption_prohibited": true,
+    "execution_mode": "all_completed",
+    "stage_count": 75,
+    "prediction_endpoint_count": 30,
+    "run_manifest": "artifacts/snpatho/unknown_mass_sensitivity_v2/run_manifest.json",
+    "run_manifest_sha256": "050e22c552d35f95669577c6a39c7d232bf727aa8b14142a1698c5f2b0d02a67",
+    "source_identity_sha256": "151873a295b04d1172176b64be512d203fa66eec2652f3eb396b10cb113afb01",
+    "runtime_environment_sha256": "f1bfc63fac31adedab6e1939e7fb4cb2e7d5e567a623cd007d90b87103baab59",
+    "source_file_count": 73,
+    "runtime_package_count": 140,
+    "manifested_input_record_count": 315,
+    "manifested_output_record_count": 150
+  },
+  "evaluation": {
+    "full_report": "artifacts/snpatho/unknown_mass_sensitivity_v2/report.json",
+    "full_report_sha256": "619edec3e17ddc2de534579964130346445809221ac71fa01e668d050ceec870",
+    "full_tsv": "artifacts/snpatho/unknown_mass_sensitivity_v2/report.tsv",
+    "full_tsv_sha256": "7f2f40bfab1bac023cabb2b778c41f70d623b93f19cb382128b51f841455b2c1",
+    "full_markdown": "artifacts/snpatho/unknown_mass_sensitivity_v2/report.md",
+    "full_markdown_sha256": "4b66f47e29502151eb7aa150422a5b84264b557351d604b7c009c8ce555758e5",
+    "scorer_source_identity_sha256": "3dfc6804ebd508aa47a352fba2eeb9c4878945de1d7f990cc74b998e16c72184",
+    "scored_case_count": 15,
+    "scored_prediction_count": 30,
+    "seed": 17,
+    "unknown_masses": [0.0, 0.01, 0.05, 0.1, 0.2],
+    "practical_delta_threshold": 0.002,
+    "practical_status_stable_across_masses": false,
+    "raw_direction_stable_across_masses": false,
+    "refined_beats_round0_at_every_mass": false,
+    "refined_beats_all_comparators_at_every_mass": false
+  },
+  "per_sample": {
+    "4066": {
+      "refined_minus_round0": ["tie", "tie", "tie", "tie", "tie"],
+      "refined_minus_hard_type_mean": ["pass", "pass", "pass", "pass", "pass"],
+      "refined_minus_soft_type_mean": ["pass", "pass", "pass", "pass", "pass"]
+    },
+    "4399": {
+      "refined_minus_round0": ["tie", "tie", "tie", "tie", "tie"],
+      "refined_minus_hard_type_mean": ["fail", "fail", "fail", "fail", "fail"],
+      "refined_minus_soft_type_mean": ["fail", "fail", "fail", "fail", "fail"]
+    },
+    "4411": {
+      "refined_minus_round0": ["tie", "tie", "tie", "tie", "tie"],
+      "refined_minus_hard_type_mean": ["tie", "tie", "tie", "tie", "tie"],
+      "refined_minus_soft_type_mean": ["pass", "pass", "pass", "tie", "tie"]
+    }
+  },
+  "conclusion": "The complete checkpoint-bound seed-17 grid does not identify a stable or successful unknown-mass setting. No mass is selected, and unknown-mass tuning does not rescue molecular refinement.",
+  "limitations": [
+    "This is a seed-17 development sensitivity, not a multiseed stability claim.",
+    "The R1 shared scANVI backbone used published integrated-workflow annotations and saw all three specimens.",
+    "All snPATHO spatial truths were previously opened; this is not untouched confirmation.",
+    "Independent broad-type reviewer labels remain unavailable, so the upstream morphology-to-type gate is blocked.",
+    "PyTorch reports that CUDA multinomial sampling lacks a deterministic cumsum kernel; hashes bind the realized endpoints, but a future rerun is not promised to be bitwise identical."
+  ]
+}

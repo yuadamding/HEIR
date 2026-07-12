@@ -7,11 +7,14 @@ portable, deterministic artifact containing:
 
 * one orthonormal residual basis per cell type;
 * the locally identified PCA rank for each type; and
-* a type-specific Euclidean residual bound calibrated to measured molecular
-  state separation, prototype covariance, or empirical within-type residuals.
+* a type-specific Euclidean residual bound calibrated in that learned
+  subspace to measured molecular state separation, prototype covariance, or
+  empirical within-type residuals.
 
-When prototypes are supplied, a cell's residual is measured from its nearest
-same-type prototype.  Otherwise it is measured from its type centroid.  A
+When prototypes and diagonal variances are supplied, a cell's residual is
+measured from the same-type prototype with the smallest regularized Gaussian
+negative log likelihood.  A variance-free bank falls back to Euclidean
+assignment, and a missing bank falls back to the type centroid.  A
 rank-deficient or rare type keeps all locally supported PCA directions and
 borrows only its missing directions from pooled *within-type* RNA residuals.
 If even the pooled residuals are rank deficient, a deterministic canonical
@@ -38,6 +41,12 @@ from scipy.stats import chi2  # type: ignore[import-untyped]
 PathLike = Union[str, Path]
 _SCALE_NAMES = ("state", "covariance", "residual")
 _SCALE_SOURCES = set(_SCALE_NAMES) | {"pooled_residual", "minimum"}
+_ASSIGNMENT_METHODS = {"diagonal_gaussian_nll", "euclidean", "legacy_euclidean"}
+_STATE_SCALE_METHODS = {
+    "projected_nearest_neighbor_quantile",
+    "legacy_all_pair_median",
+}
+_RESIDUAL_SCALE_METHODS = {"projected_quantile", "legacy_full_latent_quantile"}
 
 
 def _labels(values: object, name: str) -> np.ndarray:
@@ -132,14 +141,47 @@ def _complete_basis(
     return np.stack(accepted, axis=1)
 
 
-def _state_scale(means: np.ndarray) -> float:
+def _state_scale(
+    means: np.ndarray,
+    basis: np.ndarray,
+    quantile: float,
+) -> float:
+    """Low quantile of projected nearest-state separations.
+
+    Each prototype contributes only its closest competing same-type state.
+    This prevents a distant outlier state from inflating the residual basin of
+    prototypes that are close together.
+    """
+
     if means.shape[0] < 2:
         return 0.0
-    distances = []
-    for first in range(means.shape[0] - 1):
-        delta = means[first + 1 :] - means[first]
-        distances.extend(np.linalg.norm(delta, axis=1).tolist())
-    return float(np.median(np.asarray(distances, dtype=np.float64)))
+    projected = means @ basis
+    deltas = projected[:, None, :] - projected[None, :, :]
+    distances = np.linalg.norm(deltas, axis=2)
+    np.fill_diagonal(distances, np.inf)
+    nearest = distances.min(axis=1)
+    return float(np.quantile(nearest, quantile))
+
+
+def _prototype_assignments(
+    cells: np.ndarray,
+    means: np.ndarray,
+    variances: np.ndarray,
+    variance_floor: float,
+) -> np.ndarray:
+    """Assign cells to same-type states with a deterministic molecular cost."""
+
+    delta_squared = np.square(cells[:, None, :] - means[None, :, :])
+    if variances.shape[0] == 0:
+        cost = delta_squared.sum(axis=2)
+    else:
+        regularized = np.maximum(variances, variance_floor)
+        # The log-determinant term prevents a broad prototype from winning
+        # solely because it declares high variance in every latent dimension.
+        cost = 0.5 * (
+            delta_squared / regularized[None, :, :] + np.log(regularized)[None, :, :]
+        ).sum(axis=2)
+    return np.argmin(cost, axis=1)
 
 
 def _covariance_scale(
@@ -188,12 +230,18 @@ class RNAResidualGeometry:
     minimum_bound: float
     maximum_bound: Optional[float]
     scale_priority: Tuple[str, ...]
+    prototype_assignment_method: str
+    prototype_variance_floor: float
+    state_separation_quantile: float
+    state_scale_method: str
+    residual_scale_method: str
     latent_space_id: str = ""
     source_reference_sha256: str = ""
     training_donors: Tuple[str, ...] = ()
     latent_transform_sha256: str = ""
 
-    SCHEMA = "heir.rna_residual_geometry.v1"
+    SCHEMA = "heir.rna_residual_geometry.v2"
+    LEGACY_SCHEMA = "heir.rna_residual_geometry.v1"
 
     def __post_init__(self) -> None:
         names = _labels(self.type_names, "type_names")
@@ -260,6 +308,21 @@ class RNAResidualGeometry:
         priority = tuple(str(value).strip().lower() for value in self.scale_priority)
         if not priority or len(set(priority)) != len(priority) or set(priority) - set(_SCALE_NAMES):
             raise ValueError("scale_priority must contain unique state/covariance/residual entries")
+        assignment_method = str(self.prototype_assignment_method).strip().lower()
+        if assignment_method not in _ASSIGNMENT_METHODS:
+            raise ValueError("unknown prototype assignment method")
+        if not np.isfinite(self.prototype_variance_floor) or self.prototype_variance_floor < 0:
+            raise ValueError("prototype_variance_floor must be finite and non-negative")
+        if assignment_method == "diagonal_gaussian_nll" and self.prototype_variance_floor <= 0:
+            raise ValueError("Gaussian assignment requires a positive prototype variance floor")
+        if not 0 < self.state_separation_quantile < 1:
+            raise ValueError("state_separation_quantile must be between zero and one")
+        state_scale_method = str(self.state_scale_method).strip().lower()
+        if state_scale_method not in _STATE_SCALE_METHODS:
+            raise ValueError("unknown state scale method")
+        residual_scale_method = str(self.residual_scale_method).strip().lower()
+        if residual_scale_method not in _RESIDUAL_SCALE_METHODS:
+            raise ValueError("unknown residual scale method")
         if not isinstance(self.latent_space_id, str):
             raise TypeError("latent_space_id must be a string")
         if self.latent_space_id and not self.latent_space_id.strip():
@@ -288,6 +351,9 @@ class RNAResidualGeometry:
         object.__setattr__(self, "residual_scales", residuals)
         object.__setattr__(self, "scale_sources", sources)
         object.__setattr__(self, "scale_priority", priority)
+        object.__setattr__(self, "prototype_assignment_method", assignment_method)
+        object.__setattr__(self, "state_scale_method", state_scale_method)
+        object.__setattr__(self, "residual_scale_method", residual_scale_method)
         object.__setattr__(self, "training_donors", donors)
 
     @property
@@ -352,6 +418,20 @@ class RNAResidualGeometry:
                 dtype=np.float64,
             ),
             scale_priority=np.asarray(self.scale_priority, dtype=np.str_),
+            prototype_assignment_method=np.asarray(
+                self.prototype_assignment_method,
+                dtype=np.str_,
+            ),
+            prototype_variance_floor=np.asarray(
+                self.prototype_variance_floor,
+                dtype=np.float64,
+            ),
+            state_separation_quantile=np.asarray(
+                self.state_separation_quantile,
+                dtype=np.float64,
+            ),
+            state_scale_method=np.asarray(self.state_scale_method, dtype=np.str_),
+            residual_scale_method=np.asarray(self.residual_scale_method, dtype=np.str_),
             latent_space_id=np.asarray(self.latent_space_id, dtype=np.str_),
             source_reference_sha256=np.asarray(self.source_reference_sha256, dtype=np.str_),
             training_donors=np.asarray(self.training_donors, dtype=np.str_),
@@ -359,11 +439,38 @@ class RNAResidualGeometry:
         )
 
     @classmethod
-    def from_npz(cls, path: PathLike) -> "RNAResidualGeometry":
-        """Load and fully validate an RNA residual-geometry artifact."""
+    def from_npz(
+        cls,
+        path: PathLike,
+        *,
+        allow_legacy_geometry: bool = False,
+    ) -> "RNAResidualGeometry":
+        """Load and fully validate an RNA residual-geometry artifact.
+
+        Version-one geometry used Euclidean assignments, full-latent residual
+        norms, and median all-pairs state separation.  It is therefore refused
+        by default; callers must explicitly opt into those legacy semantics.
+        """
 
         with np.load(path, allow_pickle=False) as values:
-            if "schema" not in values or str(np.asarray(values["schema"]).item()) != cls.SCHEMA:
+            schema = str(np.asarray(values["schema"]).item()) if "schema" in values else ""
+            if schema == cls.LEGACY_SCHEMA:
+                if not allow_legacy_geometry:
+                    raise ValueError(
+                        "legacy RNA residual geometry requires allow_legacy_geometry=True"
+                    )
+                assignment_method = "legacy_euclidean"
+                variance_floor = 0.0
+                state_quantile = 0.5
+                state_scale_method = "legacy_all_pair_median"
+                residual_scale_method = "legacy_full_latent_quantile"
+            elif schema == cls.SCHEMA:
+                assignment_method = str(np.asarray(values["prototype_assignment_method"]).item())
+                variance_floor = float(np.asarray(values["prototype_variance_floor"]).item())
+                state_quantile = float(np.asarray(values["state_separation_quantile"]).item())
+                state_scale_method = str(np.asarray(values["state_scale_method"]).item())
+                residual_scale_method = str(np.asarray(values["residual_scale_method"]).item())
+            else:
                 raise ValueError("not an %s artifact" % cls.SCHEMA)
             maximum = float(np.asarray(values["maximum_bound"]).item())
             return cls(
@@ -382,6 +489,11 @@ class RNAResidualGeometry:
                 minimum_bound=float(np.asarray(values["minimum_bound"]).item()),
                 maximum_bound=None if np.isnan(maximum) else maximum,
                 scale_priority=tuple(str(value) for value in values["scale_priority"].tolist()),
+                prototype_assignment_method=assignment_method,
+                prototype_variance_floor=variance_floor,
+                state_separation_quantile=state_quantile,
+                state_scale_method=state_scale_method,
+                residual_scale_method=residual_scale_method,
                 latent_space_id=str(np.asarray(values["latent_space_id"]).item()),
                 source_reference_sha256=str(np.asarray(values["source_reference_sha256"]).item()),
                 training_donors=tuple(str(value) for value in values["training_donors"].tolist()),
@@ -405,6 +517,8 @@ def fit_rna_residual_geometry(
     minimum_calibration_cells: int = 3,
     scale_priority: Sequence[str] = _SCALE_NAMES,
     rank_tolerance: float = 1.0e-7,
+    prototype_variance_floor: float = 1.0e-4,
+    state_separation_quantile: float = 0.1,
     latent_space_id: str = "",
     source_reference_sha256: str = "",
     training_donors: Sequence[object] = (),
@@ -422,14 +536,17 @@ def fit_rna_residual_geometry(
         Optional authoritative model order.  With no explicit order, the union
         of cell and prototype labels is sorted lexicographically.
     prototype_means, prototype_labels, prototype_variances:
-        Optional measured state bank.  Cells are residualized against their
-        nearest same-type mean.  State separation is the median within-type
-        pairwise mean distance.  Diagonal variances are converted to a
-        trace-matched Gaussian radial quantile in the fitted subspace.
+        Optional measured state bank.  With variances, cells are assigned by a
+        regularized diagonal-Gaussian negative log likelihood; without them,
+        assignment is Euclidean.  State separation is a low quantile of each
+        state's nearest same-type neighbor distance after projection into the
+        fitted residual subspace.  Diagonal variances are converted to a
+        trace-matched Gaussian radial quantile in the same subspace.
     scale_priority:
         Ordered subset of ``("state", "covariance", "residual")`` used to
-        choose each type's scale.  Empirical pooled within-type residuals and
-        finally ``minimum_bound`` are automatic rare-type fallbacks.
+        choose each type's scale.  Both type-specific and pooled empirical
+        residual norms are projected into that type's fitted subspace;
+        ``minimum_bound`` is the final rare-type fallback.
 
     The selected molecular scale is multiplied by ``bound_fraction``.  The
     default of one half places a state-geometry bound at the midpoint between
@@ -461,6 +578,10 @@ def fit_rna_residual_geometry(
         raise ValueError("minimum_calibration_cells must be at least two")
     if not np.isfinite(rank_tolerance) or not 0 < rank_tolerance < 1:
         raise ValueError("rank_tolerance must be between zero and one")
+    if not np.isfinite(prototype_variance_floor) or prototype_variance_floor <= 0:
+        raise ValueError("prototype_variance_floor must be finite and positive")
+    if not 0 < state_separation_quantile < 1:
+        raise ValueError("state_separation_quantile must be between zero and one")
     priority = tuple(str(value).strip().lower() for value in scale_priority)
     if not priority or len(set(priority)) != len(priority) or set(priority) - set(_SCALE_NAMES):
         raise ValueError("scale_priority must contain unique state/covariance/residual entries")
@@ -488,7 +609,11 @@ def fit_rna_residual_geometry(
         if not np.isfinite(variances).all() or np.any(variances < 0):
             raise ValueError("prototype variances must be finite and non-negative")
     else:
-        variances = np.empty((means.shape[0], latent.shape[1]), dtype=np.float64)
+        # An empty first dimension is the explicit sentinel consumed by
+        # ``_prototype_assignments`` for variance-free Euclidean matching.
+        # Never allocate one uninitialized row per prototype here: its shape
+        # would incorrectly select the Gaussian-NLL path.
+        variances = np.empty((0, latent.shape[1]), dtype=np.float64)
 
     observed_names = set(labels.tolist()) | set(mean_labels.tolist())
     if type_names is None:
@@ -511,14 +636,18 @@ def fit_rna_residual_geometry(
         selected, _ = _sorted_rows(latent[labels == type_name])
         type_means, prototype_order = _sorted_rows(means[mean_labels == type_name])
         if prototype_variances is None:
-            type_variances = np.empty((type_means.shape[0], latent.shape[1]), dtype=np.float64)
+            type_variances = np.empty((0, latent.shape[1]), dtype=np.float64)
         else:
             type_variances = variances[mean_labels == type_name][prototype_order]
         if selected.shape[0] == 0:
             residual = np.empty((0, latent.shape[1]), dtype=np.float64)
         elif type_means.shape[0] > 0:
-            squared_distance = np.square(selected[:, None, :] - type_means[None, :, :]).sum(axis=2)
-            assignments = np.argmin(squared_distance, axis=1)
+            assignments = _prototype_assignments(
+                selected,
+                type_means,
+                type_variances,
+                prototype_variance_floor,
+            )
             residual = selected - type_means[assignments]
         else:
             residual = selected - selected.mean(axis=0, keepdims=True)
@@ -547,12 +676,6 @@ def fit_rna_residual_geometry(
         if all_raw_rows
         else np.empty((0, latent.shape[1]), dtype=np.float64)
     )
-    pooled_scale = (
-        float(np.quantile(np.linalg.norm(raw_pooled, axis=1), calibration_quantile))
-        if raw_pooled.shape[0] >= minimum_calibration_cells
-        else 0.0
-    )
-
     bases = []
     effective_ranks = []
     state_scales = []
@@ -574,15 +697,34 @@ def fit_rna_residual_geometry(
             rank,
             rank_tolerance,
         )
-        state = _state_scale(type_means)
+        state = _state_scale(
+            type_means,
+            basis,
+            state_separation_quantile,
+        )
         covariance = (
             _covariance_scale(type_variances, basis, calibration_quantile)
             if prototype_variances is not None
             else 0.0
         )
         empirical = (
-            float(np.quantile(np.linalg.norm(residual, axis=1), calibration_quantile))
+            float(
+                np.quantile(
+                    np.linalg.norm(residual @ basis, axis=1),
+                    calibration_quantile,
+                )
+            )
             if residual.shape[0] >= minimum_calibration_cells
+            else 0.0
+        )
+        pooled_scale = (
+            float(
+                np.quantile(
+                    np.linalg.norm(raw_pooled @ basis, axis=1),
+                    calibration_quantile,
+                )
+            )
+            if raw_pooled.shape[0] >= minimum_calibration_cells
             else 0.0
         )
         component_scales = {
@@ -630,6 +772,13 @@ def fit_rna_residual_geometry(
         minimum_bound=minimum_bound,
         maximum_bound=maximum_bound,
         scale_priority=priority,
+        prototype_assignment_method=(
+            "diagonal_gaussian_nll" if prototype_variances is not None else "euclidean"
+        ),
+        prototype_variance_floor=prototype_variance_floor,
+        state_separation_quantile=state_separation_quantile,
+        state_scale_method="projected_nearest_neighbor_quantile",
+        residual_scale_method="projected_quantile",
         latent_space_id=latent_space_id,
         source_reference_sha256=source_reference_sha256,
         training_donors=tuple(str(value) for value in training_donors),

@@ -483,7 +483,10 @@ def _validate_decoder_contract(
     metadata = checkpoint.get("metadata")
     if not isinstance(config, Mapping) or not isinstance(metadata, Mapping):
         raise ValueError("distilled decoder lacks config or metadata")
-    if metadata.get("schema") != "heir.scvi_distilled_decoder.v2":
+    if metadata.get("schema") not in {
+        "heir.scvi_distilled_decoder.v2",
+        "heir.scvi_distilled_decoder.v3",
+    }:
         raise ValueError("distilled decoder has an unsupported metadata schema")
     raw_gene_names = metadata.get("gene_names")
     if not isinstance(raw_gene_names, list) or any(

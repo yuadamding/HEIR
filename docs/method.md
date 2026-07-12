@@ -4,27 +4,41 @@ For sample (s), HEIR receives H&E nuclei (\{(x_i,r_i,m_i)\}_{i=1}^{N_s}) and an 
 
 The image graph predicts hierarchical type probabilities, a conditional
 known-state prototype distribution (q_{ik}), a separate biological-unknown
-probability (u_i), and a restricted residual posterior. For new v3 checkpoints,
-the decoded molecular mean is
+probability (u_i), and a restricted residual posterior. For current restricted
+checkpoints, the decoded molecular mean is
 
 \[
 z_i^{\mathrm{proto}}=\sum_k q_{ik}\widetilde\mu_{sk},
 \qquad
 \Delta z_i=
-\alpha_i\frac{B_i a_i}{\sqrt{1+\lVert B_i a_i\rVert_2^2}},
+g_i\delta_{c_i^*}\sigma(h_i)
+\frac{B_{c_i^*}a_i}{\sqrt{1+\lVert B_{c_i^*}a_i\rVert_2^2}},
 \qquad
 z_i=z_i^{\mathrm{proto}}+\Delta z_i,
 \]
 
-where (B_i=\sum_c p_i(c)B_c) mixes type-conditioned bases,
-(\operatorname{rank}(B_c)\le r), and
-(0<\alpha_i<\sum_c p_i(c)\delta_c), with each (\delta_c) calibrated from the
-measured RNA latent geometry. The coefficient-mean head is initialized exactly
-at zero and every deterministic or sampled residual has
-(\lVert\Delta z_i\rVert_2<\sum_c p_i(c)\delta_c); a fresh deterministic model
-therefore equals its routed prototype baseline. Checkpoint v1/v2 models retain their
-historical unrestricted residual behavior when loaded and are never silently
-upgraded.
+where (c_i^*=\arg\max_c\operatorname{stopgrad}p_i(c)),
+(g_i=\mathbb{1}[\max_c p_i(c)\ge\tau]), and each orthonormal (B_c) contains
+frozen within-type RNA directions with (\operatorname{rank}(B_c)\le r).
+The concentration gate defers molecular residual prediction when broad type is
+uncertain, and detachment prevents residual losses from sharpening the type
+posterior merely to unlock a correction. Each (\delta_c) is calibrated in the
+corresponding RNA residual subspace. The coefficient-mean head is initialized
+exactly at zero and every deterministic or sampled residual satisfies
+(\lVert\Delta z_i\rVert_2<\delta_{c_i^*}); a fresh deterministic model therefore
+equals its routed prototype baseline. The residual stays exactly disabled until
+the prespecified broad/type-posterior concentration gate passes. Checkpoint
+v1/v2 models retain their
+historical unrestricted behavior. Early v3 restricted checkpoints that used a
+probability-weighted sum of nonaligned bases are rejected unless the caller
+explicitly requests legacy mixed-basis migration.
+
+RNA cells are assigned to same-type prototypes with a regularized diagonal
+Gaussian negative log likelihood when prototype variances are available. State
+bounds use a low quantile of projected nearest-neighbor prototype separation,
+not median all-pairs distance. Covariance and empirical residual scales are also
+computed after projection; a type with one prototype therefore falls back to
+its projected covariance or projected within-type residual evidence.
 
 Unknown probability therefore changes confidence and loss participation, not the
 biological latent by scaling it toward zero.

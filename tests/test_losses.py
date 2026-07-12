@@ -252,6 +252,59 @@ class BiologicalLossTests(unittest.TestCase):
 
 
 class CompositeLossTests(unittest.TestCase):
+    def test_uncertain_type_residual_cycle_precision_is_finite(self) -> None:
+        model = HEIRModel(
+            HEIRConfig(
+                morphology_dim=5,
+                num_cell_types=3,
+                expression_dim=6,
+                latent_dim=3,
+                graph_hidden_dim=7,
+                graph_output_dim=6,
+                trunk_hidden_dims=(9, 6),
+                decoder_hidden_dims=(6, 9),
+                dropout=0.0,
+                hard_type_routing=False,
+                residual_type_concentration_threshold=0.9,
+            )
+        )
+        with torch.no_grad():
+            model.fine_type_head.weight.zero_()
+            model.fine_type_head.bias.zero_()
+        morphology = torch.randn(6, 5, requires_grad=True)
+        output = model(
+            morphology,
+            prototype_means=torch.randn(3, 3),
+            prototype_types=torch.tensor([0, 1, 2]),
+            sample_latent=False,
+        )
+        assert output.residual_gate is not None
+        torch.testing.assert_close(output.residual_gate, torch.zeros_like(output.residual_gate))
+        self.assertTrue(torch.all(output.residual_logvar >= model.config.logvar_min))
+        criterion = HEIRCompositeLoss(
+            HEIRLossConfig(
+                cell_type_weight=0.0,
+                uot_weight=0.0,
+                program_weight=0.0,
+                marker_weight=0.0,
+                pseudobulk_weight=0.0,
+                composition_weight=0.0,
+                cycle_weight=1.0,
+                residual_weight=0.0,
+                latent_kl_weight=0.0,
+                graph_weight=0.0,
+                calibration_weight=0.0,
+                hierarchy_weight=0.0,
+                scgpt_weight=0.0,
+            )
+        )
+        total, _ = criterion(output, cycle_latent=output.latent.detach() + 0.1)
+        self.assertTrue(torch.isfinite(total))
+        total.backward()
+        self.assertIsNotNone(morphology.grad)
+        assert morphology.grad is not None
+        self.assertTrue(torch.isfinite(morphology.grad).all())
+
     def test_type_conditioned_biology_uses_detached_molecular_responsibilities(self) -> None:
         live_probabilities = torch.tensor(
             [[0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],

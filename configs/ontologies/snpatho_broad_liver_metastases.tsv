@@ -1,0 +1,9 @@
+# Broad H&E-resolvable development ontology for snPATHO liver metastases 4399/4411.
+broad_type	description
+metastatic_malignant_epithelial	Metastatic malignant epithelial/tumor nuclei
+hepatocyte	Normal liver parenchymal hepatocyte nuclei
+immune	Broad immune compartment; no fine lymphoid subdivision
+fibroblast_stromal	Fibroblast, CAF, perivascular-like, or other stromal nuclei
+endothelial_lsec	Vascular endothelial or liver sinusoidal endothelial nuclei
+ductal_cholangiocyte	Ductal or cholangiocyte nuclei
+other_unknown	Reviewed nucleus not safely assigned to another broad class

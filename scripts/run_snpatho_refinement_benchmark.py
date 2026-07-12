@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -23,6 +25,7 @@ from heir.data import PrototypeSet
 from heir.inference import PredictionBundle, validate_wrong_donor_prototype_filter
 
 SAMPLES = ("4066", "4399", "4411")
+MOLECULAR_GENERATIONS = ("r1", "r2")
 SAMPLE_SITES = {
     "4066": "primary_breast",
     "4399": "liver_metastasis",
@@ -31,7 +34,19 @@ SAMPLE_SITES = {
 SEEDS = (17, 41, 89, 131, 197)
 ABLATION_SEEDS = (17, 41, 89)
 UNKNOWN_MASS_SENSITIVITY = (0.0, 0.01, 0.05, 0.10, 0.20)
-PREDICTION_CONTROLS = ("prototype_only", "image_shuffle", "graph_shuffle", "no_graph")
+DEFAULT_UOT_UNKNOWN_MASS = 0.05
+PREDICTION_CONTROLS = (
+    "round0_prototype_only",
+    "refined_prototype_only",
+    "image_shuffle",
+    "graph_shuffle",
+    "no_graph",
+)
+PROTOTYPE_ONLY_CONTROLS = frozenset(
+    {"prototype_only", "round0_prototype_only", "refined_prototype_only"}
+)
+WRONG_PROTOTYPE_BANK_CONTROL = "wrong_prototype_bank"
+LEGACY_WRONG_DONOR_CONTROL = "wrong_donor"
 REFINEMENT_RUN_MANIFEST_SCHEMA = "heir.snpatho_refinement_run_manifest.v2"
 LEGACY_FIVE_SEED_MANIFEST_SCHEMA = "heir.snpatho_five_seed_refinement_manifest.v1"
 UNKNOWN_MASS_MANIFEST_SCHEMA = "heir.snpatho_unknown_mass_run_manifest.v1"
@@ -56,6 +71,14 @@ REFINEMENT_RUN_SOURCE_FILES = (
     *UNKNOWN_MASS_SOURCE_FILES,
     "scripts/benchmark_snpatho_refinement_matrix.py",
 )
+ENVIRONMENT_SOURCE_FILES = (
+    "pyproject.toml",
+    "uv.lock",
+    "poetry.lock",
+    "environment.yml",
+    "environment.yaml",
+    "requirements.txt",
+)
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
@@ -76,11 +99,17 @@ class PlannedStage:
     prototype_donor_id: Optional[str] = None
 
 
-def wrong_donor_pairings(samples: Sequence[str]) -> tuple[tuple[str, str], ...]:
-    """Return every directed target/source pairing without self-donors."""
+def wrong_prototype_bank_pairings(samples: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """Return every directed target/source prototype-bank pairing without self-pairs."""
 
     unique = tuple(dict.fromkeys(str(sample) for sample in samples))
     return tuple((target, source) for target in unique for source in unique if source != target)
+
+
+def wrong_donor_pairings(samples: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """Compatibility alias for :func:`wrong_prototype_bank_pairings`."""
+
+    return wrong_prototype_bank_pairings(samples)
 
 
 def _sha256(path: Path) -> str:
@@ -120,24 +149,125 @@ def _source_identity(
     digest_rows = [
         {"relative_path": row["relative_path"], "sha256": row["sha256"]} for row in files
     ]
+    environment = _runtime_environment_identity()
     return {
         "schema": "heir.source_identity.v1",
         "runner": dict(files[0]),
         "files": files,
-        "aggregate_sha256": _canonical_sha256(digest_rows),
+        "runtime_environment": environment,
+        "aggregate_sha256": _canonical_sha256(
+            {
+                "files": digest_rows,
+                "runtime_environment_sha256": environment["aggregate_sha256"],
+            }
+        ),
     }
+
+
+@lru_cache(maxsize=1)
+def _runtime_environment_identity() -> Mapping[str, Any]:
+    """Hash the exact installed Python and accelerator runtime used by subprocesses."""
+
+    packages = sorted(
+        (
+            {
+                "name": str(distribution.metadata.get("Name", "")).strip(),
+                "version": str(distribution.version),
+            }
+            for distribution in importlib.metadata.distributions()
+            if str(distribution.metadata.get("Name", "")).strip()
+        ),
+        key=lambda row: (row["name"].lower(), row["version"]),
+    )
+    accelerator: dict[str, Any] = {"torch_importable": False}
+    try:
+        import torch
+
+        accelerator = {
+            "torch_importable": True,
+            "torch_version": torch.__version__,
+            "torch_cuda_build": torch.version.cuda,
+            "cudnn_version": torch.backends.cudnn.version(),
+            "cuda_available": torch.cuda.is_available(),
+        }
+        if torch.cuda.is_available():
+            properties = torch.cuda.get_device_properties(0)
+            accelerator.update(
+                {
+                    "device_name": torch.cuda.get_device_name(0),
+                    "compute_capability": list(torch.cuda.get_device_capability(0)),
+                    "total_memory_bytes": int(properties.total_memory),
+                }
+            )
+            try:
+                completed = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=driver_version",
+                        "--format=csv,noheader",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                accelerator["nvidia_driver_versions"] = sorted(
+                    set(line.strip() for line in completed.stdout.splitlines() if line.strip())
+                )
+            except (OSError, subprocess.SubprocessError):
+                accelerator["nvidia_driver_versions"] = []
+    except ImportError:
+        pass
+    payload = {
+        "python_version": sys.version,
+        "python_implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "packages": packages,
+        "package_count": len(packages),
+        "accelerator": accelerator,
+    }
+    return {**payload, "aggregate_sha256": _canonical_sha256(payload)}
+
+
+def _runtime_source_files(
+    repository: Path,
+    entrypoints: Sequence[str],
+) -> tuple[str, ...]:
+    """Return entrypoints plus the complete importable HEIR and environment recipe."""
+
+    repository = repository.expanduser().resolve()
+    candidates = list(entrypoints)
+    source_root = repository / "src" / "heir"
+    if source_root.is_dir():
+        candidates.extend(
+            str(path.relative_to(repository))
+            for path in sorted(source_root.rglob("*.py"))
+            if path.is_file()
+        )
+    candidates.extend(
+        relative
+        for relative in ENVIRONMENT_SOURCE_FILES
+        if (repository / relative).is_file()
+    )
+    return tuple(dict.fromkeys(candidates))
 
 
 def unknown_mass_source_identity(repository: Path) -> Mapping[str, Any]:
     """Return the exact source inventory used to validate the sensitivity plan."""
 
-    return _source_identity(repository, UNKNOWN_MASS_SOURCE_FILES)
+    return _source_identity(
+        repository,
+        _runtime_source_files(repository, UNKNOWN_MASS_SOURCE_FILES),
+    )
 
 
 def refinement_run_source_identity(repository: Path) -> Mapping[str, Any]:
     """Return the current full-matrix planning, validation, and scoring recipe."""
 
-    return _source_identity(repository, REFINEMENT_RUN_SOURCE_FILES)
+    return _source_identity(
+        repository,
+        _runtime_source_files(repository, REFINEMENT_RUN_SOURCE_FILES),
+    )
 
 
 @lru_cache(maxsize=512)
@@ -220,6 +350,31 @@ def _heir_source_binding(
 def _heir_source_command(repository: Path, *arguments: str) -> list[str]:
     binding = _heir_source_binding(repository)
     return [*(str(value) for value in binding["command_prefix"]), *arguments]
+
+
+def _repository_script_command(
+    repository: Path,
+    script_relative_path: str,
+    *arguments: str,
+) -> tuple[str, ...]:
+    """Run one repository script in isolated mode against this exact source tree."""
+
+    repository = repository.expanduser().resolve()
+    source_root = _repository_path(repository, "src")
+    script = _repository_path(repository, *script_relative_path.split("/"))
+    interpreter = Path(os.path.abspath(sys.executable)).expanduser()
+    bootstrap = (
+        "import runpy,sys;"
+        "sys.path.insert(0,%s);"
+        "sys.argv=[%s]+sys.argv[1:];"
+        "runpy.run_path(%s,run_name='__main__')"
+        % (
+            json.dumps(str(source_root), ensure_ascii=True),
+            json.dumps(str(script), ensure_ascii=True),
+            json.dumps(str(script), ensure_ascii=True),
+        )
+    )
+    return (str(interpreter), "-I", "-c", bootstrap, *arguments)
 
 
 def _run(
@@ -345,6 +500,42 @@ def _assert_batch_metadata(
         raise ValueError("checkpoint %s batch source_artifacts do not match" % label)
 
 
+def _validate_fixed_unknown_mass(
+    metadata: Mapping[str, Any],
+    expected_unknown_mass: float,
+    *,
+    label: str,
+) -> None:
+    """Reject legacy or mismatched checkpoints before stage adoption."""
+
+    clean_root_guidance = (
+        "regenerate this case under a clean output root; do not reuse or adopt the legacy "
+        "stage directory"
+    )
+    if "uot_unknown_mass" not in metadata or "uot_unknown_mass_mode" not in metadata:
+        raise ValueError(
+            "%s checkpoint lacks complete fixed unknown-mass metadata; %s"
+            % (label, clean_root_guidance)
+        )
+    try:
+        observed = float(metadata["uot_unknown_mass"])
+        expected = float(expected_unknown_mass)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "%s checkpoint has invalid unknown-mass metadata; %s" % (label, clean_root_guidance)
+        ) from error
+    if metadata["uot_unknown_mass_mode"] != "fixed" or not math.isclose(
+        observed,
+        expected,
+        rel_tol=0.0,
+        abs_tol=1.0e-12,
+    ):
+        raise ValueError(
+            "%s checkpoint unknown-mass metadata is not fixed at %.12g; %s"
+            % (label, expected, clean_root_guidance)
+        )
+
+
 def _validate_trained_pair(
     checkpoint: Path,
     history: Path,
@@ -355,6 +546,7 @@ def _validate_trained_pair(
     validation_batch: Path,
     decoder: Path,
     residual_geometry: Path,
+    expected_unknown_mass: float,
 ) -> None:
     metadata = _checkpoint_metadata(checkpoint)
     if metadata.get("schema") != "heir.trained_model.v1":
@@ -365,6 +557,11 @@ def _validate_trained_pair(
         raise ValueError("round-zero checkpoint seed does not match the requested seed")
     if set(str(value) for value in metadata.get("training_donors", ())) != {sample}:
         raise ValueError("round-zero checkpoint donor does not match the requested sample")
+    _validate_fixed_unknown_mass(
+        metadata,
+        expected_unknown_mass,
+        label="round-zero",
+    )
     _assert_batch_metadata(
         metadata.get("training_batches"),
         _batch_identity(train_batch),
@@ -478,6 +675,7 @@ def _validate_refined_pair(
     train_batch: Path,
     validation_batch: Path,
     round_checkpoints: Sequence[Path],
+    expected_unknown_mass: float,
 ) -> None:
     metadata = _checkpoint_metadata(checkpoint)
     if metadata.get("schema") != "heir.refined_model.v1":
@@ -488,6 +686,11 @@ def _validate_refined_pair(
         raise ValueError("refined checkpoint does not bind the current round-zero checkpoint")
     if set(str(value) for value in metadata.get("refinement_training_donors", ())) != {sample}:
         raise ValueError("refined checkpoint donor does not match the requested sample")
+    _validate_fixed_unknown_mass(
+        metadata,
+        expected_unknown_mass,
+        label="refined",
+    )
     _assert_batch_metadata(
         metadata.get("refinement_training_batches"),
         _batch_identity(train_batch),
@@ -569,6 +772,11 @@ def _validate_refined_pair(
             raise ValueError("round-%d checkpoint identity is stale" % round_id)
         if round_metadata.get("parent_checkpoint_sha256") != _sha256(parent_checkpoint):
             raise ValueError("round-%d checkpoint has a stale parent" % round_id)
+        _validate_fixed_unknown_mass(
+            round_metadata,
+            expected_unknown_mass,
+            label="round-%d" % round_id,
+        )
         if bool(round_metadata.get("selected_by_parent_run")) != (round_id == selected_round):
             raise ValueError("round-%d checkpoint selection flag is inconsistent" % round_id)
         if bool(round_metadata.get("refinement_round_committed")) != bool(
@@ -578,16 +786,31 @@ def _validate_refined_pair(
 
 
 def _control_flags(control: Optional[str]) -> Mapping[str, bool]:
-    names = {
-        "prototype_only": "prototype_only",
+    telemetry_names = {
         "image_shuffle": "image_feature_shuffle",
         "graph_shuffle": "graph_node_shuffle",
         "no_graph": "no_graph",
-        "wrong_donor": "wrong_donor",
+        WRONG_PROTOTYPE_BANK_CONTROL: "wrong_donor",
+        LEGACY_WRONG_DONOR_CONTROL: "wrong_donor",
     }
-    if control is not None and control not in names:
+    if control in PROTOTYPE_ONLY_CONTROLS:
+        active_telemetry_name = "prototype_only"
+    elif control is None:
+        active_telemetry_name = None
+    else:
+        active_telemetry_name = telemetry_names.get(control)
+    if control is not None and active_telemetry_name is None:
         raise ValueError("unknown prediction control %s" % control)
-    return {telemetry_name: control == name for name, telemetry_name in names.items()}
+    return {
+        telemetry_name: telemetry_name == active_telemetry_name
+        for telemetry_name in (
+            "prototype_only",
+            "image_feature_shuffle",
+            "graph_node_shuffle",
+            "no_graph",
+            "wrong_donor",
+        )
+    }
 
 
 def _expected_shuffle_transform(
@@ -694,9 +917,10 @@ def _validate_prediction(
         if negative.get(name) is not enabled:
             raise ValueError("prediction telemetry has stale control flag %s" % name)
     expected_donor = prototype_donor_id or sample
-    if control == "wrong_donor" and expected_donor == sample:
-        raise ValueError("wrong-donor validation requires a non-matched prototype donor")
-    if control != "wrong_donor" and expected_donor != sample:
+    is_wrong_bank = control in {WRONG_PROTOTYPE_BANK_CONTROL, LEGACY_WRONG_DONOR_CONTROL}
+    if is_wrong_bank and expected_donor == sample:
+        raise ValueError("wrong-prototype-bank validation requires a non-matched prototype donor")
+    if not is_wrong_bank and expected_donor != sample:
         raise ValueError("matched prediction validation cannot use a non-matched prototype donor")
     if negative.get("prototype_donor_id") != expected_donor or negative.get("seed") != seed:
         raise ValueError("prediction telemetry has stale control donor/seed provenance")
@@ -710,7 +934,7 @@ def _validate_prediction(
                 raise ValueError("shuffle prediction telemetry has stale transform %s" % name)
     elif transform is not None:
         raise ValueError("non-shuffle prediction telemetry unexpectedly reports a transform")
-    if control == "wrong_donor":
+    if is_wrong_bank:
         source_prototypes = PrototypeSet.load_npz(prototypes)
         validate_wrong_donor_prototype_filter(
             source_prototypes,
@@ -778,10 +1002,13 @@ def _predict_command(
     )
     flags = {
         "prototype_only": "--prototype-only",
+        "round0_prototype_only": "--prototype-only",
+        "refined_prototype_only": "--prototype-only",
         "image_shuffle": "--image-feature-shuffle",
         "graph_shuffle": "--graph-node-shuffle",
         "no_graph": "--no-graph",
-        "wrong_donor": "--wrong-donor-control",
+        WRONG_PROTOTYPE_BANK_CONTROL: "--wrong-donor-control",
+        LEGACY_WRONG_DONOR_CONTROL: "--wrong-donor-control",
     }
     if control is not None:
         command.append(flags[control])
@@ -875,17 +1102,31 @@ def _prediction_stage(
 def _case_stages(
     repository: Path,
     *,
+    artifact_root: Path,
     sample: str,
     seed: int,
     controls: bool,
     unknown_mass: Optional[float],
+    molecular_generation: str,
 ) -> list[PlannedStage]:
-    root = _repository_path(repository, "artifacts", "snpatho", "r1_scanvi", sample)
+    expected_unknown_mass = (
+        DEFAULT_UOT_UNKNOWN_MASS if unknown_mass is None else float(unknown_mass)
+    )
+    if molecular_generation not in MOLECULAR_GENERATIONS:
+        raise ValueError("molecular_generation must be r1 or r2")
+    source_root = _repository_path(
+        repository,
+        "artifacts",
+        "snpatho",
+        "%s_scanvi" % molecular_generation,
+        sample,
+    )
+    root = artifact_root.expanduser().resolve() / sample
     round0, refined = _model_directories(root, seed, unknown_mass)
-    train_batch = root / "batch_train_rare_complete.npz"
-    validation_batch = root / "batch_validation_rare_complete.npz"
-    native_prototypes = root / "prototypes_rare_complete.npz"
-    residual_geometry = root / "residual_geometry_rare_complete.npz"
+    train_batch = source_root / "batch_train_rare_complete.npz"
+    validation_batch = source_root / "batch_validation_rare_complete.npz"
+    native_prototypes = source_root / "prototypes_rare_complete.npz"
+    residual_geometry = source_root / "residual_geometry_rare_complete_v2.npz"
     checkpoint = round0 / "heir.pt"
     history = round0 / "history.json"
     views = round0 / "refinement_views.npz"
@@ -896,7 +1137,11 @@ def _case_stages(
         repository.parent,
         "HEIR_assets",
         "pretrained",
-        "snpatho_scanvi_r1_v1_decoder.pt",
+        (
+            "snpatho_scanvi_r1_v1_decoder.pt"
+            if molecular_generation == "r1"
+            else "snpatho_scanvi_r2_preserve_biology_v1_decoder.pt"
+        ),
     )
     ontology = _repository_path(repository, "configs", "ontologies", "snpatho_%s.tsv" % sample)
 
@@ -959,15 +1204,14 @@ def _case_stages(
         "--device",
         "cuda",
     )
-    if unknown_mass is not None:
-        train_command.extend(
-            [
-                "--uot-unknown-mass",
-                "%.2f" % unknown_mass,
-                "--uot-unknown-mass-mode",
-                "fixed",
-            ]
-        )
+    train_command.extend(
+        [
+            "--uot-unknown-mass",
+            "%.2f" % expected_unknown_mass,
+            "--uot-unknown-mass-mode",
+            "fixed",
+        ]
+    )
 
     round_checkpoints = (
         tuple(refined / ("round_%d" % round_id) / "heir_refined.pt" for round_id in range(1, 5))
@@ -1028,15 +1272,14 @@ def _case_stages(
             "cuda",
         ]
     )
-    if unknown_mass is not None:
-        refine_command.extend(
-            [
-                "--uot-unknown-mass",
-                "%.2f" % unknown_mass,
-                "--uot-unknown-mass-mode",
-                "fixed",
-            ]
-        )
+    refine_command.extend(
+        [
+            "--uot-unknown-mass",
+            "%.2f" % expected_unknown_mass,
+            "--uot-unknown-mass-mode",
+            "fixed",
+        ]
+    )
 
     stages = [
         PlannedStage(
@@ -1055,6 +1298,7 @@ def _case_stages(
                 validation_batch=validation_batch,
                 decoder=decoder,
                 residual_geometry=residual_geometry,
+                expected_unknown_mass=expected_unknown_mass,
             ),
             unknown_mass,
             inputs=(
@@ -1070,9 +1314,9 @@ def _case_stages(
             sample,
             seed,
             "build_views",
-            (
-                sys.executable,
-                str(_repository_path(repository, "scripts", "build_refinement_views.py")),
+            _repository_script_command(
+                repository,
+                "scripts/build_refinement_views.py",
                 "--checkpoint",
                 str(checkpoint),
                 "--batch",
@@ -1112,6 +1356,7 @@ def _case_stages(
                 train_batch=train_batch,
                 validation_batch=validation_batch,
                 round_checkpoints=round_checkpoints,
+                expected_unknown_mass=expected_unknown_mass,
             ),
             unknown_mass,
             inputs=(
@@ -1173,16 +1418,30 @@ def _case_stages(
             )
     if controls and seed in ABLATION_SEEDS:
         for control in PREDICTION_CONTROLS:
+            if control == "round0_prototype_only":
+                control_checkpoint = checkpoint
+                control_prototypes = native_prototypes
+                control_directory = round0 / "control_prototype_only"
+                control_round = 0
+            else:
+                control_checkpoint = refined_checkpoint
+                control_prototypes = refined_prototypes
+                control_directory = refined / (
+                    "control_prototype_only"
+                    if control == "refined_prototype_only"
+                    else "control_" + control
+                )
+                control_round = 4
             stages.append(
                 _prediction_stage(
                     repository,
                     sample=sample,
                     seed=seed,
                     name=control,
-                    checkpoint=refined_checkpoint,
-                    prototypes=refined_prototypes,
-                    directory=refined / ("control_" + control),
-                    refinement_round=4,
+                    checkpoint=control_checkpoint,
+                    prototypes=control_prototypes,
+                    directory=control_directory,
+                    refinement_round=control_round,
                     unknown_mass=None,
                     control=control,
                 )
@@ -1197,10 +1456,23 @@ def build_plan(
     seeds: Sequence[int],
     controls: bool = False,
     unknown_mass_sensitivity: bool = False,
+    artifact_root: Optional[Path] = None,
+    molecular_generation: str = "r1",
 ) -> tuple[PlannedStage, ...]:
     """Build a repository-rooted plan without reading or running artifacts."""
 
     repository = repository.expanduser().resolve()
+    if molecular_generation not in MOLECULAR_GENERATIONS:
+        raise ValueError("molecular_generation must be r1 or r2")
+    if artifact_root is None:
+        artifact_root = _repository_path(
+            repository,
+            "artifacts",
+            "snpatho",
+            "%s_scanvi" % molecular_generation,
+        )
+    else:
+        artifact_root = artifact_root.expanduser().resolve()
     if unknown_mass_sensitivity and tuple(seeds) != (SEEDS[0],):
         raise ValueError("unknown-mass sensitivity is prespecified for seed 17 only")
     if unknown_mass_sensitivity and controls:
@@ -1215,25 +1487,23 @@ def build_plan(
                 stages.extend(
                     _case_stages(
                         repository,
+                        artifact_root=artifact_root,
                         sample=sample,
                         seed=seed,
                         controls=controls,
                         unknown_mass=mass,
+                        molecular_generation=molecular_generation,
                     )
                 )
 
     if controls:
-        pairings = wrong_donor_pairings(samples)
+        pairings = wrong_prototype_bank_pairings(samples)
         for seed in seeds:
             if seed not in ABLATION_SEEDS:
                 continue
             for target, source in pairings:
-                target_root = _repository_path(
-                    repository, "artifacts", "snpatho", "r1_scanvi", target
-                )
-                donor_root = _repository_path(
-                    repository, "artifacts", "snpatho", "r1_scanvi", source
-                )
+                target_root = artifact_root / target
+                donor_root = artifact_root / source
                 _, target_refined = _model_directories(target_root, seed, None)
                 _, donor_refined = _model_directories(donor_root, seed, None)
                 stages.append(
@@ -1241,13 +1511,13 @@ def build_plan(
                         repository,
                         sample=target,
                         seed=seed,
-                        name="wrong_donor_" + source,
+                        name="wrong_prototype_bank_" + source,
                         checkpoint=target_refined / "heir_refined.pt",
                         prototypes=donor_refined / "prototypes" / ("%s__%s.npz" % (source, source)),
                         directory=target_refined / ("control_wrong_donor_" + source),
                         refinement_round=4,
                         unknown_mass=None,
-                        control="wrong_donor",
+                        control=WRONG_PROTOTYPE_BANK_CONTROL,
                         prototype_donor_id=source,
                     )
                 )
@@ -1299,6 +1569,12 @@ def _control_transform_recipe(stage: PlannedStage) -> Optional[Mapping[str, Any]
     }
     algorithms = {
         "prototype_only": ("zero residual-gate weights and set bias=-100 before inference"),
+        "round0_prototype_only": (
+            "round-zero checkpoint with residual-gate weights zeroed and bias=-100"
+        ),
+        "refined_prototype_only": (
+            "refined checkpoint with residual-gate weights zeroed and bias=-100"
+        ),
         "image_shuffle": (
             "apply default_rng(seed).permutation(n_nuclei) to histology feature rows"
         ),
@@ -1306,7 +1582,11 @@ def _control_transform_recipe(stage: PlannedStage) -> Optional[Mapping[str, Any]
             "apply default_rng(seed).permutation(n_nuclei) to graph edge endpoint indices"
         ),
         "no_graph": "replace edge_index and edge_weight by empty arrays",
-        "wrong_donor": "use the explicitly supplied non-matched donor PrototypeSet",
+        "wrong_prototype_bank": (
+            "use the explicitly supplied non-matched PrototypeSet while retaining the shared "
+            "molecular backbone"
+        ),
+        "wrong_donor": ("legacy CLI spelling for the wrong-prototype-bank control"),
     }
     recipe["algorithm"] = algorithms[stage.control]
     if stage.control in {"image_shuffle", "graph_shuffle"}:
@@ -1319,14 +1599,18 @@ def _control_transform_recipe(stage: PlannedStage) -> Optional[Mapping[str, Any]
     return recipe
 
 
-def full_matrix_plan_payload(stages: Sequence[PlannedStage]) -> Mapping[str, Any]:
+def full_matrix_plan_payload(
+    stages: Sequence[PlannedStage],
+    *,
+    molecular_generation: str = "r1",
+) -> Mapping[str, Any]:
     """Serialize the exact canonical full-matrix plan without execution claims."""
 
     expected_stage_count = (
         15 * 5
         + 3 * len(SAMPLES)
         + (len(PREDICTION_CONTROLS) * len(ABLATION_SEEDS) * len(SAMPLES))
-        + (len(wrong_donor_pairings(SAMPLES)) * len(ABLATION_SEEDS))
+        + (len(wrong_prototype_bank_pairings(SAMPLES)) * len(ABLATION_SEEDS))
     )
     if len(stages) != expected_stage_count:
         raise ValueError(
@@ -1370,6 +1654,7 @@ def full_matrix_plan_payload(stages: Sequence[PlannedStage]) -> Mapping[str, Any
         samples=SAMPLES,
         seeds=SEEDS,
         controls=True,
+        molecular_generation=molecular_generation,
     )
     expected_ids = [_stage_id(stage) for stage in expected]
     if [row["stage_id"] for row in rows] != expected_ids:
@@ -1379,16 +1664,26 @@ def full_matrix_plan_payload(stages: Sequence[PlannedStage]) -> Mapping[str, Any
         "seeds": list(SEEDS),
         "control_seeds": list(ABLATION_SEEDS),
         "trajectory_seed": SEEDS[0],
-        "controls": [*PREDICTION_CONTROLS, "wrong_donor"],
-        "wrong_donor_pairings": [
+        "molecular_generation": molecular_generation,
+        "controls": [*PREDICTION_CONTROLS, WRONG_PROTOTYPE_BANK_CONTROL],
+        "wrong_prototype_bank_pairings": [
             {
                 "target": target,
                 "source": source,
                 "site_matched": SAMPLE_SITES[target] == SAMPLE_SITES[source],
             }
-            for target, source in wrong_donor_pairings(SAMPLES)
+            for target, source in wrong_prototype_bank_pairings(SAMPLES)
         ],
-        "wrong_donor_pairing_count_per_control_seed": len(wrong_donor_pairings(SAMPLES)),
+        "wrong_prototype_bank_pairing_count_per_control_seed": len(
+            wrong_prototype_bank_pairings(SAMPLES)
+        ),
+        # Deprecated compatibility fields. Scientific reports use
+        # ``wrong_prototype_bank_*`` because the molecular backbone is shared.
+        "wrong_donor_pairings": [
+            {"target": target, "source": source}
+            for target, source in wrong_prototype_bank_pairings(SAMPLES)
+        ],
+        "wrong_donor_pairing_count_per_control_seed": len(wrong_prototype_bank_pairings(SAMPLES)),
         "stage_count": len(rows),
         "stages": rows,
     }
@@ -1399,9 +1694,19 @@ def _compatibility_cases(
     stages: Sequence[PlannedStage],
     *,
     manifest_directory: Path,
+    molecular_generation: str,
 ) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
-    native_path = repository / "reports" / "snpatho_scanvi_r1_manifest.json"
-    native = _json_object(native_path, schema="heir.snpatho_scanvi_r1_manifest.v1")
+    native_path = (
+        repository / "reports" / "snpatho_scanvi_r1_manifest.json"
+        if molecular_generation == "r1"
+        else repository / "artifacts" / "snpatho" / "r2_scanvi" / "native_manifest.json"
+    )
+    native_schema = (
+        "heir.snpatho_scanvi_r1_manifest.v1"
+        if molecular_generation == "r1"
+        else "heir.snpatho_scanvi_r2_manifest.v1"
+    )
+    native = _json_object(native_path, schema=native_schema)
     lookup = {(stage.sample, stage.seed, stage.name): stage for stage in stages}
     cases = []
     for seed in SEEDS:
@@ -1418,16 +1723,28 @@ def _compatibility_cases(
             )
     compatibility = {
         "schema": LEGACY_FIVE_SEED_MANIFEST_SCHEMA,
-        "analysis_role": "prespecified_five_seed_native_scanvi_integrated_annotation_sensitivity",
+        "analysis_role": (
+            "prespecified_five_seed_native_scanvi_integrated_annotation_sensitivity"
+            if molecular_generation == "r1"
+            else "specimen_preserving_scanvi_integrated_annotation_sensitivity"
+        ),
+        "molecular_generation": molecular_generation,
         "negative_control": False,
         "native_scanvi_manifest_sha256": _sha256(native_path),
         "latent_space_id": native.get("latent_space_id"),
         "expression_space_id": native.get("expression_space_id"),
         "seeds": list(SEEDS),
         "samples": list(SAMPLES),
-        "controls_available": sorted([*PREDICTION_CONTROLS, "wrong_donor"]),
+        "controls_available": sorted([*PREDICTION_CONTROLS, WRONG_PROTOTYPE_BANK_CONTROL]),
+        "wrong_prototype_bank_pairings": [
+            {"target": target, "source": source}
+            for target, source in wrong_prototype_bank_pairings(SAMPLES)
+        ],
+        "wrong_prototype_bank_coverage_complete": True,
+        # Deprecated aliases retained for report readers built against v1.
         "wrong_donor_pairings": [
-            {"target": target, "source": source} for target, source in wrong_donor_pairings(SAMPLES)
+            {"target": target, "source": source}
+            for target, source in wrong_prototype_bank_pairings(SAMPLES)
         ],
         "wrong_donor_coverage_complete": True,
         "cases": cases,
@@ -1441,13 +1758,17 @@ def build_refinement_run_manifest(
     records: Sequence[Mapping[str, Any]],
     *,
     manifest_path: Path,
+    molecular_generation: str = "r1",
 ) -> Mapping[str, Any]:
     """Adopt or record the exact full matrix while preserving execution semantics."""
 
     repository = repository.expanduser().resolve()
     manifest_path = manifest_path.expanduser().resolve()
     manifest_directory = manifest_path.parent
-    plan = full_matrix_plan_payload(stages)
+    plan = full_matrix_plan_payload(
+        stages,
+        molecular_generation=molecular_generation,
+    )
     if len(records) != len(stages):
         raise ValueError("execution records do not align to the full refinement plan")
     manifested_stages = []
@@ -1526,18 +1847,28 @@ def build_refinement_run_manifest(
         repository,
         stages,
         manifest_directory=manifest_directory,
+        molecular_generation=molecular_generation,
     )
     return {
         "schema": REFINEMENT_RUN_MANIFEST_SCHEMA,
         "manifest_role": manifest_role,
         "analysis_role": compatibility["analysis_role"],
         "negative_control": False,
+        "molecular_generation": molecular_generation,
         "native_scanvi_manifest_sha256": compatibility["native_scanvi_manifest_sha256"],
         "latent_space_id": compatibility["latent_space_id"],
         "expression_space_id": compatibility["expression_space_id"],
         "seeds": compatibility["seeds"],
         "samples": compatibility["samples"],
         "controls_available": compatibility["controls_available"],
+        "wrong_prototype_bank_pairings": compatibility.get(
+            "wrong_prototype_bank_pairings",
+            compatibility.get("wrong_donor_pairings", []),
+        ),
+        "wrong_prototype_bank_coverage_complete": compatibility.get(
+            "wrong_prototype_bank_coverage_complete",
+            compatibility.get("wrong_donor_coverage_complete", False),
+        ),
         "wrong_donor_pairings": compatibility["wrong_donor_pairings"],
         "wrong_donor_coverage_complete": compatibility["wrong_donor_coverage_complete"],
         "cases": cases,
@@ -1573,10 +1904,13 @@ def unknown_mass_plan_payload(
     stages: Sequence[PlannedStage],
     *,
     samples: Sequence[str],
+    molecular_generation: str = "r1",
 ) -> Mapping[str, Any]:
     """Serialize the canonical sensitivity plan independently of execution status."""
 
     samples = tuple(str(sample) for sample in samples)
+    if molecular_generation not in MOLECULAR_GENERATIONS:
+        raise ValueError("molecular_generation must be r1 or r2")
     expected = len(samples) * len(UNKNOWN_MASS_SENSITIVITY) * len(UNKNOWN_MASS_STAGE_NAMES)
     if len(stages) != expected:
         raise ValueError("unknown-mass plan has %d stages, expected %d" % (len(stages), expected))
@@ -1602,12 +1936,17 @@ def unknown_mass_plan_payload(
                         "unknown_mass": stage.unknown_mass,
                         "stage": stage.name,
                         "command": list(stage.command),
+                        "inputs": [
+                            {"role": role, "path": str(path.resolve())}
+                            for role, path in stage.inputs
+                        ],
                         "outputs": [str(path.resolve()) for path in stage.outputs],
                     }
                 )
     return {
         "samples": list(samples),
         "seed": SEEDS[0],
+        "molecular_generation": molecular_generation,
         "unknown_masses": list(UNKNOWN_MASS_SENSITIVITY),
         "stage_names": list(UNKNOWN_MASS_STAGE_NAMES),
         "stages": rows,
@@ -1620,11 +1959,16 @@ def build_unknown_mass_manifest(
     records: Sequence[Mapping[str, Any]],
     *,
     samples: Sequence[str],
+    molecular_generation: str = "r1",
 ) -> Mapping[str, Any]:
     """Build a hash-bound manifest after every canonical output validates."""
 
     repository = repository.expanduser().resolve()
-    plan = unknown_mass_plan_payload(stages, samples=samples)
+    plan = unknown_mass_plan_payload(
+        stages,
+        samples=samples,
+        molecular_generation=molecular_generation,
+    )
     if len(records) != len(stages):
         raise ValueError("execution records do not align to the unknown-mass plan")
     manifested_stages = []
@@ -1636,6 +1980,17 @@ def build_unknown_mass_manifest(
             if record.get(field) != planned[field]:
                 raise ValueError("execution record %s does not match its planned stage" % field)
         output_rows = []
+        input_rows = []
+        for role, path in stage.inputs:
+            if not path.is_file():
+                raise RuntimeError("cannot manifest a missing stage input: %s" % path)
+            input_rows.append(
+                {
+                    "role": role,
+                    "path": str(path.resolve()),
+                    "sha256": _sha256(path),
+                }
+            )
         for path in stage.outputs:
             if not path.is_file():
                 raise RuntimeError("cannot manifest a missing stage output: %s" % path)
@@ -1643,6 +1998,7 @@ def build_unknown_mass_manifest(
         manifested_stages.append(
             {
                 **planned,
+                "inputs": input_rows,
                 "outputs": output_rows,
                 "status": status,
             }
@@ -1658,12 +2014,17 @@ def build_unknown_mass_manifest(
         "schema": UNKNOWN_MASS_MANIFEST_SCHEMA,
         "samples": list(plan["samples"]),
         "seed": plan["seed"],
+        "molecular_generation": plan["molecular_generation"],
         "unknown_masses": list(plan["unknown_masses"]),
         "stage_names": list(plan["stage_names"]),
         "stage_count": len(manifested_stages),
         "plan_sha256": _canonical_sha256(plan),
         "execution_mode": execution_mode,
         "manifest_role": "post_execute_output_adoption_and_validation",
+        "lineage_scope": (
+            "current source/environment, exact commands, and SHA-256 identities of every "
+            "planned stage input and output"
+        ),
         "cli_source_binding": _heir_source_binding(repository, require_sources=True),
         "validation_recipe_source_identity": unknown_mass_source_identity(repository),
         "stages": manifested_stages,
@@ -1686,6 +2047,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--controls", action="store_true")
     parser.add_argument(
+        "--molecular-generation",
+        choices=MOLECULAR_GENERATIONS,
+        default="r2",
+        help="R2 preserves specimen biology; use r1 only for historical reproduction",
+    )
+    parser.add_argument(
+        "--artifact-root",
+        type=Path,
+        default=None,
+        help="Output root for model and prediction stages; immutable inputs remain canonical",
+    )
+    parser.add_argument(
+        "--prohibit-adoption",
+        action="store_true",
+        help=(
+            "Fail before execution if any planned output already exists; use this with a fresh "
+            "artifact root for execution-provenance-clean runs"
+        ),
+    )
+    parser.add_argument(
         "--unknown-mass-sensitivity",
         action="store_true",
         help="plan or execute the seed-17 fixed unknown-mass grid 0,.01,.05,.10,.20",
@@ -1706,6 +2087,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         requested_seeds = (SEEDS[0],)
     if args.manifest_output is not None and not args.execute:
         raise ValueError("--manifest-output requires --execute so every output is validated")
+    if args.prohibit_adoption and not args.execute:
+        raise ValueError("--prohibit-adoption requires --execute")
     if args.manifest_output is not None and not args.unknown_mass_sensitivity:
         if (
             tuple(requested_samples) != SAMPLES
@@ -1723,7 +2106,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         seeds=requested_seeds,
         controls=args.controls,
         unknown_mass_sensitivity=args.unknown_mass_sensitivity,
+        artifact_root=(
+            None
+            if args.artifact_root is None
+            else _output_path(repository, args.artifact_root)
+        ),
+        molecular_generation=args.molecular_generation,
     )
+    if args.prohibit_adoption:
+        existing = sorted(
+            {path for stage in stages for path in stage.outputs if path.exists()},
+            key=str,
+        )
+        if existing:
+            preview = ", ".join(str(path) for path in existing[:5])
+            suffix = "" if len(existing) <= 5 else " (and %d more)" % (len(existing) - 5)
+            raise RuntimeError(
+                "--prohibit-adoption found existing planned outputs: %s%s. Choose a clean "
+                "--artifact-root; existing endpoints are never deleted automatically."
+                % (preview, suffix)
+            )
     records = []
     for stage in stages:
         status = _run(
@@ -1752,6 +2154,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stages,
                 records,
                 samples=requested_samples,
+                molecular_generation=args.molecular_generation,
             ),
         )
     elif args.manifest_output is not None and args.execute:
@@ -1763,6 +2166,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 stages,
                 records,
                 manifest_path=destination,
+                molecular_generation=args.molecular_generation,
             ),
         )
     print(json.dumps({"execute": args.execute, "records": records}, indent=2, sort_keys=True))

@@ -267,6 +267,8 @@ def test_checkpoint_history_pair_rejects_mismatched_json_identity(tmp_path):
                 "training_donors": ["4066"],
                 "best_epoch": 3,
                 "best_validation_loss": 1.25,
+                "uot_unknown_mass": 0.05,
+                "uot_unknown_mass_mode": "fixed",
                 "rna_vae_sha256": _sha256(decoder),
                 "residual_geometry_sha256": _sha256(geometry),
                 "training_batches": [dict(train_identity)],
@@ -292,6 +294,7 @@ def test_checkpoint_history_pair_rejects_mismatched_json_identity(tmp_path):
         "validation_batch": validation_batch,
         "decoder": decoder,
         "residual_geometry": geometry,
+        "expected_unknown_mass": 0.05,
     }
     RUNNER._validate_trained_pair(checkpoint, history, **kwargs)
     history.write_text(
@@ -307,6 +310,43 @@ def test_checkpoint_history_pair_rejects_mismatched_json_identity(tmp_path):
         RUNNER._validate_trained_pair(checkpoint, history, **kwargs)
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        {},
+        {"uot_unknown_mass": 0.05},
+        {"uot_unknown_mass": 0.05, "uot_unknown_mass_mode": "targets_or_fixed"},
+        {"uot_unknown_mass": 0.20, "uot_unknown_mass_mode": "fixed"},
+    ),
+)
+def test_runner_rejects_legacy_or_mismatched_unknown_mass_with_clean_root_guidance(metadata):
+    with pytest.raises(ValueError, match="clean output root"):
+        RUNNER._validate_fixed_unknown_mass(
+            metadata,
+            0.05,
+            label="round-zero",
+        )
+
+
+def test_existing_legacy_stage_is_not_silently_adopted(tmp_path):
+    outputs = (tmp_path / "heir.pt", tmp_path / "history.json")
+    for output in outputs:
+        output.write_bytes(b"legacy")
+
+    with pytest.raises(RuntimeError, match="existing stage outputs are invalid.*clean output root"):
+        RUNNER._run(
+            ("not-executed",),
+            outputs,
+            False,
+            validator=lambda: RUNNER._validate_fixed_unknown_mass(
+                {},
+                0.05,
+                label="round-zero",
+            ),
+            repository=tmp_path,
+        )
+
+
 def test_control_plan_covers_only_the_prespecified_ablation_seeds(tmp_path):
     plan = RUNNER.build_plan(
         tmp_path,
@@ -314,7 +354,7 @@ def test_control_plan_covers_only_the_prespecified_ablation_seeds(tmp_path):
         seeds=RUNNER.SEEDS,
         controls=True,
     )
-    assert len(plan) == 138
+    assert len(plan) == 147
     cli_stages = [stage for stage in plan if stage.name != "build_views"]
     assert cli_stages
     for stage in cli_stages:
@@ -327,7 +367,12 @@ def test_control_plan_covers_only_the_prespecified_ablation_seeds(tmp_path):
         assert {stage.seed for stage in stages} == set(RUNNER.ABLATION_SEEDS)
         assert {stage.sample for stage in stages} == set(RUNNER.SAMPLES)
         assert len(stages) == len(RUNNER.ABLATION_SEEDS) * len(RUNNER.SAMPLES)
-    wrong_donor = [stage for stage in plan if stage.control == "wrong_donor"]
+    for stage in plan:
+        if stage.name in {"train_round0", "refine"}:
+            assert stage.validate.keywords["expected_unknown_mass"] == pytest.approx(0.05)
+            assert stage.command[stage.command.index("--uot-unknown-mass-mode") + 1] == "fixed"
+            assert float(stage.command[stage.command.index("--uot-unknown-mass") + 1]) == 0.05
+    wrong_donor = [stage for stage in plan if stage.control == "wrong_prototype_bank"]
     expected_pairings = set(RUNNER.wrong_donor_pairings(RUNNER.SAMPLES))
     observed_pairings = {(stage.sample, stage.prototype_donor_id) for stage in wrong_donor}
     assert observed_pairings == expected_pairings
@@ -340,7 +385,14 @@ def test_control_plan_covers_only_the_prespecified_ablation_seeds(tmp_path):
             if stage.sample == target and stage.prototype_donor_id == source
         ]
         assert {stage.seed for stage in stages} == set(RUNNER.ABLATION_SEEDS)
-        assert all(stage.name == "wrong_donor_" + source for stage in stages)
+        assert all(stage.name == "wrong_prototype_bank_" + source for stage in stages)
+
+    round0_off = [stage for stage in plan if stage.name == "round0_prototype_only"]
+    refined_off = [stage for stage in plan if stage.name == "refined_prototype_only"]
+    assert len(round0_off) == len(refined_off) == 9
+    assert all(stage.validate.keywords["refinement_round"] == 0 for stage in round0_off)
+    assert all(stage.validate.keywords["refinement_round"] == 4 for stage in refined_off)
+    assert all("--prototype-only" in stage.command for stage in (*round0_off, *refined_off))
 
 
 def test_source_bound_cli_executes_with_current_environment_and_repository_source() -> None:
@@ -384,6 +436,9 @@ def test_unknown_mass_sensitivity_plan_is_isolated_cuda_and_has_no_duplicate_abl
             assert float(
                 stage.command[stage.command.index("--uot-unknown-mass") + 1]
             ) == pytest.approx(stage.unknown_mass)
+            assert stage.validate.keywords["expected_unknown_mass"] == pytest.approx(
+                stage.unknown_mass
+            )
         if stage.name == "refine":
             assert "--save-round-checkpoints" not in stage.command
             assert len(stage.outputs) == 3
@@ -397,6 +452,63 @@ def test_unknown_mass_sensitivity_plan_is_isolated_cuda_and_has_no_duplicate_abl
             seeds=(41,),
             unknown_mass_sensitivity=True,
         )
+
+
+def test_clean_unknown_mass_plan_separates_output_root_from_v2_molecular_inputs(tmp_path):
+    output_root = tmp_path / "fresh-outputs"
+    plan = RUNNER.build_plan(
+        ROOT,
+        artifact_root=output_root,
+        samples=("4066",),
+        seeds=(17,),
+        unknown_mass_sensitivity=True,
+    )
+
+    assert all(
+        path.is_relative_to(output_root.resolve()) for stage in plan for path in stage.outputs
+    )
+    train_stage = next(stage for stage in plan if stage.name == "train_round0")
+    inputs = dict(train_stage.inputs)
+    assert inputs["residual_geometry"].name == "residual_geometry_rare_complete_v2.npz"
+    assert not inputs["residual_geometry"].is_relative_to(output_root.resolve())
+
+    existing = train_stage.outputs[0]
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"legacy")
+    with pytest.raises(RuntimeError, match="Choose a clean --artifact-root"):
+        RUNNER.main(
+            [
+                "--sample",
+                "4066",
+                "--seed",
+                "17",
+                "--unknown-mass-sensitivity",
+                "--execute",
+                "--prohibit-adoption",
+                "--artifact-root",
+                str(output_root),
+            ]
+        )
+
+
+def test_r2_plan_routes_all_molecular_inputs_and_decoder_to_r2(tmp_path):
+    plan = RUNNER.build_plan(
+        ROOT,
+        artifact_root=tmp_path / "outputs",
+        samples=("4066",),
+        seeds=(17,),
+        molecular_generation="r2",
+    )
+    train = next(stage for stage in plan if stage.name == "train_round0")
+    inputs = dict(train.inputs)
+    assert "/r2_scanvi/4066/" in str(inputs["train_batch"])
+    assert "/r2_scanvi/4066/" in str(inputs["residual_geometry"])
+    assert str(inputs["rna_decoder"]).endswith(
+        "HEIR_assets/pretrained/snpatho_scanvi_r2_preserve_biology_v1_decoder.pt"
+    )
+    views = next(stage for stage in plan if stage.name == "build_views")
+    assert views.command[1:3] == ("-I", "-c")
+    assert str((ROOT / "src").resolve()) in views.command[3]
 
 
 def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp_path):
@@ -415,6 +527,11 @@ def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp
         for output in stage.outputs:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes((stage.name + "\n").encode())
+    for stage in plan:
+        for _, stage_input in stage.inputs:
+            if not stage_input.exists():
+                stage_input.parent.mkdir(parents=True, exist_ok=True)
+                stage_input.write_bytes(b"synthetic input")
     records = [
         {
             "sample": stage.sample,
@@ -444,6 +561,9 @@ def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp
     for planned, manifested in zip(plan, manifest["stages"]):
         assert manifested["command"] == list(planned.command)
         assert manifested["status"] == "skipped_valid"
+        assert [row["role"] for row in manifested["inputs"]] == [
+            role for role, _ in planned.inputs
+        ]
         assert [row["path"] for row in manifested["outputs"]] == [
             str(path.resolve()) for path in planned.outputs
         ]
@@ -509,11 +629,11 @@ def test_full_run_manifest_marks_posthoc_adoption_as_unverified(
         "wrong_donor_pairings": [],
         "wrong_donor_coverage_complete": False,
     }
-    monkeypatch.setattr(RUNNER, "full_matrix_plan_payload", lambda stages: plan)
+    monkeypatch.setattr(RUNNER, "full_matrix_plan_payload", lambda stages, **kwargs: plan)
     monkeypatch.setattr(
         RUNNER,
         "_compatibility_cases",
-        lambda repository, stages, manifest_directory: (compatibility, []),
+        lambda repository, stages, manifest_directory, **kwargs: (compatibility, []),
     )
     monkeypatch.setattr(
         RUNNER,
@@ -630,11 +750,11 @@ def test_full_run_manifest_fails_closed_on_legacy_shuffle_telemetry(
         "wrong_donor_pairings": [],
         "wrong_donor_coverage_complete": False,
     }
-    monkeypatch.setattr(RUNNER, "full_matrix_plan_payload", lambda stages: plan)
+    monkeypatch.setattr(RUNNER, "full_matrix_plan_payload", lambda stages, **kwargs: plan)
     monkeypatch.setattr(
         RUNNER,
         "_compatibility_cases",
-        lambda repository, stages, manifest_directory: (compatibility, []),
+        lambda repository, stages, manifest_directory, **kwargs: (compatibility, []),
     )
     monkeypatch.setattr(
         RUNNER,

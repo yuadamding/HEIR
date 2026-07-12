@@ -1028,6 +1028,10 @@ def test_build_prototypes_binds_emitted_latent_reference_for_safe_assembly(tmp_p
         == 0
     )
     prototype_set = PrototypeSet.load_npz(prototypes)
+    enriched = RNAReference.load_npz(enriched_reference)
+    assert enriched.latent_training_donors == ("donor1",)
+    assert enriched.latent_transform_sha256 == hashlib.sha256(transform.read_bytes()).hexdigest()
+    assert enriched.latent_space_id == "sha256:%s" % enriched.latent_transform_sha256
     assert (
         prototype_set.source_reference_sha256
         == hashlib.sha256(enriched_reference.read_bytes()).hexdigest()

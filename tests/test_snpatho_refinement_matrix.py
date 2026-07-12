@@ -40,6 +40,12 @@ def _prediction(
     wrong_donor_source: str = "donor_b",
     prototype_sha256: str = "b" * 64,
 ) -> None:
+    wrong_bank = control in {"wrong_donor", "wrong_prototype_bank"}
+    prototype_only = control in {
+        "prototype_only",
+        "round0_prototype_only",
+        "refined_prototype_only",
+    }
     nucleus_ids = np.asarray(["n%d" % index for index in range(6)])
     expression = np.repeat(np.asarray(spot_linear_expression, dtype=np.float32), 2, axis=0)
     probabilities = np.full((6, 2), 0.5, dtype=np.float32)
@@ -85,9 +91,9 @@ def _prediction(
         "graph_node_shuffle": control == "graph_shuffle",
         "image_feature_shuffle": control == "image_shuffle",
         "no_graph": control == "no_graph",
-        "prototype_only": control == "prototype_only",
-        "wrong_donor": control == "wrong_donor",
-        "prototype_donor_id": wrong_donor_source if control == "wrong_donor" else sample,
+        "prototype_only": prototype_only,
+        "wrong_donor": wrong_bank,
+        "prototype_donor_id": wrong_donor_source if wrong_bank else sample,
         "seed": seed,
     }
     telemetry = path.with_name("prediction.telemetry.json")
@@ -203,6 +209,14 @@ def _fixture(tmp_path: Path) -> dict:
         spot_linear_expression=round0_linear,
     )
     _prediction(
+        round0.parent / "control_prototype_only" / "predictions.npz",
+        sample=sample,
+        seed=seed,
+        round_id=0,
+        spot_linear_expression=control_linear,
+        control="round0_prototype_only",
+    )
+    _prediction(
         refined_root / "predictions.npz",
         sample=sample,
         seed=seed,
@@ -217,13 +231,20 @@ def _fixture(tmp_path: Path) -> dict:
             round_id=round_id,
             spot_linear_expression=round0_linear,
         )
-    for control in ("prototype_only", "image_shuffle", "graph_shuffle", "no_graph"):
+    for control in ("refined_prototype_only", "image_shuffle", "graph_shuffle", "no_graph"):
+        directory = (
+            "control_prototype_only"
+            if control == "refined_prototype_only"
+            else "control_" + control
+        )
         _prediction(
-            refined_root / ("control_" + control) / "predictions.npz",
+            refined_root / directory / "predictions.npz",
             sample=sample,
             seed=seed,
             round_id=4,
-            spot_linear_expression=control_linear,
+            spot_linear_expression=(
+                round0_linear if control == "refined_prototype_only" else control_linear
+            ),
             control=control,
         )
     wrong_donor_prototypes = (
@@ -250,7 +271,7 @@ def _fixture(tmp_path: Path) -> dict:
         seed=seed,
         round_id=4,
         spot_linear_expression=control_linear,
-        control="wrong_donor",
+        control="wrong_prototype_bank",
         prototype_sha256=sha256_file(wrong_donor_prototypes),
     )
     return {
@@ -282,7 +303,16 @@ def test_complete_matrix_scores_full_metrics_deltas_and_strict_ordering(tmp_path
         "missing_refinement_run_manifest"
     ]
     assert len(report["evidence_blockers"]) == len(MATRIX.EVIDENCE_REQUIREMENTS)
-    assert report["scored_artifact_count"] == report["requested_artifact_count"] == 10
+    assert report["scored_artifact_count"] == report["requested_artifact_count"] == 11
+    assert report["practical_delta_threshold"] == pytest.approx(0.002)
+    assert report["strict_ordering_summary"]["tie_count"] == 0
+    assert report["residual_routing_decomposition"]["case_count"] == 1
+    assert set(report["residual_routing_decomposition"]["cases"][0]["components"]) == {
+        "round0_residual_effect",
+        "refined_residual_effect",
+        "routing_refinement_effect",
+        "total_refinement_effect",
+    }
     assert report["request"]["requested_wrong_donor_pairings"] == [
         {"target": "sample_a", "source": "donor_b"}
     ]
@@ -313,6 +343,50 @@ def test_complete_matrix_scores_full_metrics_deltas_and_strict_ordering(tmp_path
     assert all(row["status"] == "pass" for row in report["strict_ordering_checks"])
 
 
+def test_matrix_accepts_r2_native_schema_and_reports_generation(tmp_path: Path) -> None:
+    arguments = _fixture(tmp_path)
+    manifest_path = arguments["native_manifest_path"]
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["schema"] = "heir.snpatho_scanvi_r2_manifest.v1"
+    payload["molecular_generation"] = "r2"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = MATRIX.evaluate_matrix(**arguments)
+
+    assert report["matrix_status"] == "complete"
+    assert report["molecular_generation"] == "r2"
+    assert report["manifests"]["native_scanvi"]["molecular_generation"] == "r2"
+
+
+def test_native_schema_rejects_declared_generation_mismatch() -> None:
+    with pytest.raises(ValueError, match="generation disagrees"):
+        MATRIX._native_molecular_generation(
+            {
+                "schema": "heir.snpatho_scanvi_r2_manifest.v1",
+                "molecular_generation": "r1",
+            }
+        )
+
+
+def test_practical_margin_reports_ties_without_erasing_raw_signs(tmp_path: Path) -> None:
+    arguments = _fixture(tmp_path)
+    arguments["practical_delta_threshold"] = 10.0
+
+    report = MATRIX.evaluate_matrix(**arguments)
+
+    assert report["matrix_status"] == "complete"
+    assert report["strict_ordering_status"] == "fail"
+    assert report["strict_ordering_summary"]["tie_count"] == len(report["strict_ordering_checks"])
+    raw = report["strict_ordering_summary"]["raw_sign_diagnostics"]
+    assert raw["positive_count"] > 0
+    assert raw["positive_count"] + raw["negative_count"] + raw["zero_count"] == len(
+        report["strict_ordering_checks"]
+    )
+    assert MATRIX._practical_delta_status(0.002, 0.002) == "pass"
+    assert MATRIX._practical_delta_status(0.001, 0.002) == "tie"
+    assert MATRIX._practical_delta_status(-0.002, 0.002) == "fail"
+
+
 def test_wrong_donor_requests_cover_all_six_directed_pairings(tmp_path: Path) -> None:
     samples = ("4066", "4399", "4411")
     requests = MATRIX.build_requests(
@@ -323,7 +397,7 @@ def test_wrong_donor_requests_cover_all_six_directed_pairings(tmp_path: Path) ->
         controls=("wrong_donor",),
         control_seeds=(17,),
     )
-    wrong = [request for request in requests if request.control == "wrong_donor"]
+    wrong = [request for request in requests if request.control == "wrong_prototype_bank"]
     assert len(wrong) == 6
     assert {(request.sample, request.prototype_donor_id) for request in wrong} == {
         (target, source) for target in samples for source in samples if source != target
@@ -341,7 +415,9 @@ def test_wrong_donor_requests_cover_all_six_directed_pairings(tmp_path: Path) ->
         wrong_donor_target="sample_a",
         wrong_donor_source="external_donor",
     )
-    external_wrong = next(request for request in external if request.control == "wrong_donor")
+    external_wrong = next(
+        request for request in external if request.control == "wrong_prototype_bank"
+    )
     assert external_wrong.prototype_source == (
         tmp_path
         / "external_donor"
@@ -367,7 +443,7 @@ def test_external_wrong_donor_without_resolvable_source_bank_blocks_matrix(tmp_p
     assert report["matrix_status"] == "blocked"
     assert any(
         row["code"] == "missing_requested_artifact"
-        and "missing requested wrong-donor source prototype" in row["message"]
+        and "missing requested wrong-prototype-bank source prototype" in row["message"]
         for row in report["matrix_blockers"]
     )
 
@@ -381,7 +457,7 @@ def test_wrong_donor_summary_reports_mean_worst_and_site_matched() -> None:
     checks = []
     deltas = {}
     for index, (target, source) in enumerate(pairings, start=1):
-        case_id = "%s/seed17/wrong_donor_%s" % (target, source)
+        case_id = "%s/seed17/wrong_prototype_bank_%s" % (target, source)
         delta = index / 100.0
         deltas[(target, source)] = delta
         cases.append(
@@ -389,13 +465,13 @@ def test_wrong_donor_summary_reports_mean_worst_and_site_matched() -> None:
                 "case_id": case_id,
                 "sample": target,
                 "seed": 17,
-                "control": "wrong_donor",
+                "control": "wrong_prototype_bank",
                 "prototype_donor_id": source,
             }
         )
         checks.append(
             {
-                "name": "refined_gt_wrong_donor",
+                "name": "refined_gt_wrong_prototype_bank",
                 "sample": target,
                 "seed": 17,
                 "right_case_id": case_id,
@@ -495,7 +571,7 @@ def test_missing_control_and_telemetry_hash_mismatch_are_explicit_blockers(tmp_p
     assert "prediction SHA-256 does not match inference telemetry" in messages
     checks = {row["name"]: row["status"] for row in report["strict_ordering_checks"]}
     assert checks["refined_gt_image_shuffle"] == "blocked"
-    assert checks["round0_gt_prototype_only"] == "blocked"
+    assert checks["refined_residual_on_gt_off"] == "blocked"
 
 
 def test_cli_writes_atomic_json_tsv_and_markdown(tmp_path: Path) -> None:

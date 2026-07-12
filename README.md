@@ -31,7 +31,7 @@ The repository contains a runnable HEIR core and a development-only refinement r
 - composition, pseudobulk, marker/program, residual, cycle, hierarchy, graph, anchor, and uncertainty objectives;
 - covariance-aware UOT on the decoded molecular latent, detached transport responsibilities, and direct molecular/type M-step supervision;
 - two parent-gated rounds followed by fine refinement, with an EMA teacher,
-  revocable anchors, independent-view gates, a validated round-0 rollback target,
+  revocable anchors, scale-held-out-view gates, a validated round-0 rollback target,
   and fixed measured priors by default;
 - H&E-only distillation, calibration, OOD detection, abstention, v8
   known-state-conditional expression availability and intervals (public cell
@@ -97,6 +97,17 @@ return to the ignored run directory:
 PYTHONPATH=src conda run -n scdiffeq python scripts/train_snpatho_scanvi.py
 ```
 
+The R2 default does **not** use `section_id` as a removable batch and does not
+marginalize decoder expression over specimens. It runs a donor-rotated
+decoder-distillation audit, writes those audit checkpoints beside the external
+decoder, and uses one hash-bound, 32-sample posterior-mean expression target for
+every rotation and the deployable decoder. `--molecular-design
+technical_batch_only` is accepted only when every declared technical level is
+observed across specimens and every specimen contains multiple levels. Output
+families are immutable: reruns use fresh versioned paths rather than deleting a
+completed checkpoint. The historical specimen-corrected model remains available as the explicitly named
+`specimen_batch_sensitivity`; it is not the default.
+
 The current input labels are the published integrated-workflow annotations;
 the script records them as an annotation sensitivity and does not call them an
 independent clean reannotation.
@@ -110,6 +121,13 @@ verifiable.
 
 Heavy pathology/scGPT/scVI models remain isolated producers of cached artifacts. HEIR then provides the checked path between them:
 
+For molecular-refinement development, first run the independent reviewer-label
+[broad-type gate](docs/broad_type_supervised_gate.md) on frozen features with
+both graph and molecular residual disabled. That gate is currently
+`blocked_evidence` because reviewed labels are absent; the commands below remain
+an engineering path and must not be interpreted as a validated biological path
+until the gate passes.
+
 ```text
 prepare-histology + prepare-reference
               ↓
@@ -117,6 +135,8 @@ build-prototypes + fit-ood
               ↓
          assemble-batch
               ↓
+ independent broad-type gate [no graph, no residual]
+              ↓ pass
  train [optional generic H&E–ST pretraining checkpoint]
               ↓
  refine → predict → evaluate-spatial
@@ -181,17 +201,18 @@ annotations; those labels are not an independent clean reannotation. All five
 prespecified endpoint seeds (17, 41, 89, 131, and 197) and the three control
 seeds (17, 41, and 89) are complete. The refinement matrix scored all 93 of 93
 requested artifacts, but strict ordering failed: 49 of 108 checks passed and 59
-failed. All 18 directed wrong-donor cases are present; their all-directed mean
+failed. All 18 directed wrong-prototype-bank cases are present; their all-directed mean
 refined-minus-control paired median gene-Spearman delta is -0.0040. Its overall
 status is `blocked_evidence`, with missing clean independent
 reannotation, generic-atlas, label-permutation, state-omission,
-reference-downsampling, and untouched-external-cohort evidence. The seed-17
-fixed unknown-mass sweep is also blocked: only 1 of 15 paired cases has both
-checkpoints bound to a serialized fixed-mass setting. The other 14 cases cannot
-be rescued by a post-hoc recipe-adoption manifest. See the hash-bound
+reference-downsampling, and untouched-external-cohort evidence. The historical
+unknown-mass attempt was provenance-blocked, but its clean replacement is now
+complete: 75 of 75 CUDA stages and 30 endpoints produced all 15 fixed-mass
+comparisons. The result is unstable and does not select a mass or rescue
+refinement. See the hash-bound
 [compact refinement-matrix summary](reports/snpatho_refinement_matrix_v1_summary.json).
-The machine-readable [unknown-mass evidence report](reports/snpatho_unknown_mass_sensitivity_v1.json)
-records the checkpoint-provenance failures and the one evaluable pair.
+The [v2 unknown-mass summary](reports/snpatho_unknown_mass_sensitivity_v2_summary.json)
+records the clean result; the v1 report remains the historical provenance failure.
 The v2 refinement run manifest recursively validates all 138 canonical stage
 recipes and current output hashes. Its final validation pass conservatively
 records all 138 outputs as adopted, verifies the source-bound CLI identity and
@@ -203,6 +224,9 @@ Full per-gene JSON, TSV, and Markdown reports remain under the ignored
 tracked.
 
 For refinement development, use only a development cohort with spatial truth.
+The independent broad-type gate must pass first; the internal residual
+posterior-concentration threshold is a separate numerical safeguard and is not
+a substitute for reviewer-label evidence.
 The separate orchestrator enforces the prespecified
 `train → predict-0 → refine/predict rounds → development evaluation` order and
 rejects locked roles:

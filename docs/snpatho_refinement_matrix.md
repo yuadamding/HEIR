@@ -2,6 +2,11 @@
 
 Status: **blocked_evidence**; matrix: **complete**; strict ordering: **fail**; full primary evidence: **blocked**.
 
+This is the historical pre-nested matrix snapshot. Its unknown-mass blocker was
+later resolved by a clean 75-stage run, which was complete but unstable; see
+[the v2 sensitivity](snpatho_unknown_mass_sensitivity_v2.md). The other blockers
+and the failed refinement conclusion remain.
+
 Execution provenance verified: **false**; control transform hashes verified: **true**.
 
 Scored 93 of 93 requested artifacts.

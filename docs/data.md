@@ -79,7 +79,7 @@ The local Visium metadata do not contain meaningful spot cell-type labels, so th
 locked benchmark can score gene-expression reconstruction but must not describe
 composition as observed ground truth unless an independent annotation is added.
 
-Current derived-artifact status (2026-07-11): all three specimens have audited
+Current derived-artifact status (2026-07-12): all three specimens have audited
 full-resolution H&E, converted single-nucleus references, Space Ranger nucleus
 segmentations, CUDA OmiCLIP pathology features, hash-bound training/inference
 artifacts, and frozen Visium truth. The completed run evaluated 40,739, 31,499,
@@ -94,19 +94,30 @@ come from the published integrated-workflow objects rather than an independent
 clean reannotation. Native scANVI now supplies the hash-bound molecular latent,
 reference, prototypes, residual geometry, and external decoder/checkpoint
 lineage recorded in `reports/snpatho_scanvi_r1_manifest.json`; this is no longer
-the earlier SVD fallback path. Five endpoint seeds and three-seed controls are
+the earlier SVD fallback path. That completed R1 run used specimen identity as a
+batch and marginalized its decoder across all three specimens, so it remains a
+historical molecular-design sensitivity. The implemented R2 trainer instead
+preserves specimen/site biology by default, permits only explicit
+non-confounded technical batches, and performs a donor-rotated decoder audit.
+R2 checkpoints remain external under `HEIR_assets/pretrained`, with derived
+artifacts in the ignored `artifacts/snpatho/r2_scanvi` root; R2 has not yet
+replaced the reported R1 benchmark. Five endpoint seeds and three-seed controls are
 complete, and `reports/snpatho_refinement_matrix_v1_summary.json` records the
 93-of-93 matrix and failed strict ordering. These opened-cohort results are
 developmental annotation sensitivities, not the requested clean-R1 or untouched
 primary endpoint.
 
-The matrix summary lists seven remaining evidence gaps: clean independent
+The matrix summary's historical snapshot lists seven evidence gaps. The clean
+checkpoint-bound unknown-mass grid is now complete but unstable, so six
+structural gaps remain: clean independent
 reannotation, a generic-atlas control, label permutation, state omission,
-reference downsampling, a complete checkpoint-bound unknown-mass sweep, and an
-untouched external cohort. The separate fixed
-unknown-mass sweep has only 1 of 15 checkpoint-bound cases, so its cross-mass
-conclusion is blocked and does not rescue the failed ordering. The current
-138-stage run manifest conservatively records all outputs as recursively
+reference downsampling, and an untouched external cohort. The replacement
+fixed-mass run completed 75 of 75 CUDA stages and all 15 cases; it selects no
+mass and does not rescue the failed ordering. The final-source replacement was
+executed from an empty adoption-prohibited root and binds every stage input,
+stage output, source file, installed package, and CUDA runtime identity. The
+separate historical 138-stage full-matrix run manifest conservatively records
+all outputs as recursively
 hash-validated adoptions. The source-bound CLI and all shuffle transformation
 hashes validate, but adoption is not proof of each output's original execution
 source, so the execution-provenance gate is false. Full per-gene benchmark artifacts remain ignored under

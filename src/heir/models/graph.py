@@ -117,14 +117,28 @@ class GraphMessageLayer(nn.Module):
         projected_neighbors = self.neighbor_projection(node_features)
         messages = projected_neighbors.index_select(0, source)
         if edge_weight is None:
-            weights = node_features.new_ones(edge_index.shape[1])
+            weights = torch.ones(
+                edge_index.shape[1],
+                device=node_features.device,
+                dtype=messages.dtype,
+            )
         else:
-            weights = edge_weight.to(dtype=node_features.dtype)
+            weights = edge_weight.to(device=node_features.device, dtype=messages.dtype)
             messages = messages * weights.unsqueeze(-1)
-        aggregate = node_features.new_zeros((node_features.shape[0], self.output_dim))
+        # Linear projections are autocast to FP16/BF16 while the input tensor
+        # commonly remains FP32. ``index_add`` requires an exact dtype match.
+        aggregate = torch.zeros(
+            (node_features.shape[0], self.output_dim),
+            device=node_features.device,
+            dtype=messages.dtype,
+        )
         aggregate = aggregate.index_add(0, target, messages)
         if self.normalize_messages:
-            degree = node_features.new_zeros(node_features.shape[0])
+            degree = torch.zeros(
+                node_features.shape[0],
+                device=node_features.device,
+                dtype=messages.dtype,
+            )
             degree = degree.index_add(0, target, weights)
             aggregate = aggregate / degree.clamp_min(1.0).unsqueeze(-1)
         output = self.self_projection(node_features) + aggregate

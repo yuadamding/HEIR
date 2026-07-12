@@ -1,5 +1,8 @@
 # snPATHO unknown-mass sensitivity
 
+> Historical v1 provenance audit. The clean replacement is complete and
+> reported in [snPATHO unknown-mass sensitivity v2](snpatho_unknown_mass_sensitivity_v2.md).
+
 Evaluation status: **blocked**. Stability conclusion: **blocked**.
 
 Scored 1 of 15 required seed-17 cases.
