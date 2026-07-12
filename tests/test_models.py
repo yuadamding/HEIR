@@ -323,6 +323,19 @@ class HEIRModelTests(unittest.TestCase):
             output.expression,
             model.expression_decoder(output.prototype_latent),
         )
+        assert model.residual_logvar_head is not None
+        torch.testing.assert_close(
+            model.residual_logvar_head.weight,
+            torch.zeros_like(model.residual_logvar_head.weight),
+        )
+        torch.testing.assert_close(
+            model.residual_logvar_head.bias,
+            torch.full_like(model.residual_logvar_head.bias, -6.0),
+        )
+        torch.testing.assert_close(
+            output.residual_coefficient_logvar,
+            torch.full_like(output.residual_coefficient_logvar, -6.0),
+        )
 
     def test_restricted_residual_has_bounded_norm_and_type_basis_rank(self) -> None:
         rank = 2
@@ -354,6 +367,51 @@ class HEIRModelTests(unittest.TestCase):
         self.assertLessEqual(int(torch.linalg.matrix_rank(output.residual_mu)), rank)
         sampled = model.sample_residuals(output, draws=64)
         self.assertTrue(torch.all(sampled.norm(dim=-1) <= maximum + 1.0e-6))
+
+    def test_rna_geometry_sets_type_specific_bound_and_survives_checkpoint(self) -> None:
+        model = HEIRModel(
+            small_config(
+                hard_type_routing=False,
+                residual_rank=2,
+                residual_max_norm=9.0,
+            )
+        ).eval()
+        bases = torch.zeros(3, 4, 2)
+        bases[:, 0, 0] = 1.0
+        bases[:, 1, 1] = 1.0
+        maximums = torch.tensor([0.1, 0.3, 0.7])
+        model.configure_residual_geometry(bases, maximums, freeze_basis=True)
+        assert model.residual_type_basis is not None
+        assert not model.residual_type_basis.requires_grad
+        assert model.residual_coefficient_head is not None
+        assert model.residual_gate_head is not None
+        with torch.no_grad():
+            model.fine_type_head.weight.zero_()
+            model.fine_type_head.bias.copy_(torch.tensor([30.0, -30.0, -30.0]))
+            model.residual_coefficient_head.weight.zero_()
+            model.residual_coefficient_head.bias.fill_(100.0)
+            model.residual_gate_head.weight.zero_()
+            model.residual_gate_head.bias.fill_(30.0)
+        output = model(
+            torch.randn(5, 6),
+            prototype_means=torch.randn(3, 4),
+            prototype_types=torch.tensor([0, 1, 2]),
+            sample_latent=False,
+        )
+        self.assertTrue(torch.all(output.residual_mu.norm(dim=-1) <= 0.1 + 1.0e-6))
+
+        restored = HEIRModel.from_checkpoint(model.checkpoint())
+        torch.testing.assert_close(restored.residual_type_max_norms, maximums)
+        assert restored.residual_type_basis is not None
+        assert not restored.residual_type_basis.requires_grad
+
+    def test_rna_geometry_rejects_nonorthonormal_basis(self) -> None:
+        model = HEIRModel(small_config(residual_rank=2))
+        with self.assertRaisesRegex(ValueError, "orthonormal"):
+            model.configure_residual_geometry(
+                torch.ones(3, 4, 2),
+                torch.ones(3),
+            )
 
     def test_deterministic_inference_and_checkpoint_round_trip(self) -> None:
         model = HEIRModel(small_config()).eval()

@@ -57,7 +57,12 @@ from .image import (
 from .inference import PredictionBundle, predict_cells
 from .models.heir import HEIRConfig, HEIRModel
 from .models.rna import RNAVAE
-from .prior import GenePrograms, SCGPTTeacherArtifact
+from .prior import (
+    GenePrograms,
+    RNAResidualGeometry,
+    SCGPTTeacherArtifact,
+    fit_rna_residual_geometry,
+)
 from .prior.prototypes import build_sample_prototypes
 from .refinement import IterativeRefiner
 from .segmentation import (
@@ -1072,6 +1077,59 @@ def command_build_prototypes(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_fit_residual_geometry(args: argparse.Namespace) -> int:
+    """Freeze within-type RNA PCA directions and molecularly scaled bounds."""
+
+    reference = RNAReference.load_npz(args.reference)
+    if reference.latent.shape[1] == 0 or not reference.latent_space_id:
+        raise ValueError("residual geometry requires an identified RNA latent representation")
+    prototypes = None if args.prototypes is None else PrototypeSet.load_npz(args.prototypes)
+    if prototypes is not None and prototypes.latent_space_id != reference.latent_space_id:
+        raise ValueError("prototype and reference latent-space identities differ")
+    geometry = fit_rna_residual_geometry(
+        reference.latent,
+        reference.cell_type_labels,
+        args.rank,
+        type_names=args.type_name,
+        prototype_means=None if prototypes is None else prototypes.means,
+        prototype_labels=None if prototypes is None else prototypes.cell_type_labels,
+        prototype_variances=None if prototypes is None else prototypes.variances,
+        calibration_quantile=args.calibration_quantile,
+        bound_fraction=args.bound_fraction,
+        minimum_bound=args.minimum_bound,
+        maximum_bound=args.maximum_bound,
+        minimum_calibration_cells=args.minimum_calibration_cells,
+        latent_space_id=reference.latent_space_id,
+        source_reference_sha256=_sha256(args.reference),
+        training_donors=tuple(sorted(set(reference.donor_ids.tolist()))),
+        latent_transform_sha256=("" if prototypes is None else prototypes.latent_transform_sha256),
+    )
+    geometry.to_npz(args.output)
+    _json(
+        {
+            "output": str(Path(args.output).expanduser().resolve()),
+            "schema": geometry.SCHEMA,
+            "latent_space_id": geometry.latent_space_id,
+            "rank": geometry.rank,
+            "type_bounds": {
+                str(name): float(bound)
+                for name, bound in zip(
+                    geometry.type_names.tolist(),
+                    geometry.residual_type_max_norm.tolist(),
+                )
+            },
+            "scale_sources": {
+                str(name): str(source)
+                for name, source in zip(
+                    geometry.type_names.tolist(),
+                    geometry.scale_sources.tolist(),
+                )
+            },
+        }
+    )
+    return 0
+
+
 def command_fit_ood(args: argparse.Namespace) -> int:
     """Fit pathology-feature OOD only on declared development donors."""
 
@@ -1609,6 +1667,197 @@ def _batch_ontology(
     return type_names, gene_names
 
 
+def _npz_contract(path: Path) -> Optional[str]:
+    """Return a framework-light artifact contract, or ``None`` when unavailable."""
+
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            if "__contract__" not in archive:
+                return None
+            return str(np.asarray(archive["__contract__"]).item())
+    except (OSError, ValueError, EOFError):
+        return None
+
+
+def _validate_residual_geometry_training_provenance(
+    geometry: RNAResidualGeometry,
+    batches: Sequence[HEIRTrainingBatch],
+    type_names: Sequence[str],
+    *,
+    unsafe_allow_legacy: bool,
+) -> str:
+    """Bind RNA residual geometry to the exact molecular inputs in every batch.
+
+    A shared latent-space label and compatible rank are insufficient: the
+    geometry must name the exact RNAReference hash used by each PrototypeSet,
+    and its latent transform/source identity must agree with those artifacts.
+    The unsafe override only permits provenance that is genuinely unavailable;
+    an observed mismatch always fails.
+    """
+
+    expected_types = tuple(str(value) for value in type_names)
+    geometry_types = tuple(str(value) for value in geometry.type_names.tolist())
+    if geometry_types != expected_types:
+        raise ValueError("RNA residual geometry cell-type order differs from the training batches")
+
+    legacy_gaps: List[str] = []
+
+    def unavailable(message: str) -> None:
+        if not unsafe_allow_legacy:
+            raise ValueError(
+                message + "; rebuild the molecular artifacts or use "
+                "--unsafe-allow-legacy-residual-geometry-provenance only for an audited "
+                "legacy migration"
+            )
+        legacy_gaps.append(message)
+
+    if not geometry.source_reference_sha256:
+        unavailable("RNA residual geometry lacks source_reference_sha256")
+    if geometry.latent_transform_sha256:
+        expected_latent_id = "sha256:%s" % geometry.latent_transform_sha256
+        if geometry.latent_space_id != expected_latent_id:
+            raise ValueError(
+                "RNA residual geometry latent_space_id is not bound to its latent transform"
+            )
+    elif not (
+        geometry.latent_space_id.startswith("sha256:")
+        and len(geometry.latent_space_id) == len("sha256:") + 64
+        and all(
+            character in "0123456789abcdef"
+            for character in geometry.latent_space_id[len("sha256:") :]
+        )
+    ):
+        unavailable(
+            "RNA residual geometry lacks both latent_transform_sha256 and a hash-bound "
+            "latent_space_id"
+        )
+
+    for batch in batches:
+        label = "%s/%s" % (batch.sample_id, batch.bag_id)
+        if batch.type_names and tuple(batch.type_names) != expected_types:
+            raise ValueError("training batch %s has a different cell-type order" % label)
+        if geometry.latent_space_id != batch.latent_space_id:
+            raise ValueError(
+                "RNA residual geometry latent_space_id differs from training batch %s" % label
+            )
+
+        prototype_sources: List[Tuple[Path, str]] = []
+        reference_sources: List[Tuple[Path, str]] = []
+        for raw_path, recorded_sha256 in zip(batch.source_artifacts, batch.source_sha256):
+            source = Path(raw_path).expanduser().resolve()
+            contract = _npz_contract(source) if source.is_file() else None
+            if contract not in {PrototypeSet.CONTRACT, RNAReference.CONTRACT}:
+                continue
+            actual_sha256 = _sha256(str(source))
+            if actual_sha256 != recorded_sha256:
+                raise ValueError(
+                    "training batch %s molecular source hash no longer matches %s" % (label, source)
+                )
+            target = prototype_sources if contract == PrototypeSet.CONTRACT else reference_sources
+            target.append((source, actual_sha256))
+        if len(prototype_sources) > 1 or len(reference_sources) > 1:
+            raise ValueError(
+                "training batch %s has ambiguous prototype/reference source provenance" % label
+            )
+        if not prototype_sources:
+            unavailable("training batch %s has no accessible hash-bound PrototypeSet" % label)
+        if not reference_sources:
+            unavailable("training batch %s has no accessible hash-bound RNAReference" % label)
+
+        prototype = None
+        if prototype_sources:
+            prototype_path, _ = prototype_sources[0]
+            prototype = PrototypeSet.load_npz(prototype_path)
+            if prototype.latent_space_id != batch.latent_space_id:
+                raise ValueError(
+                    "PrototypeSet latent_space_id differs from training batch %s" % label
+                )
+            if not prototype.source_reference_sha256:
+                unavailable("PrototypeSet for training batch %s lacks reference provenance" % label)
+            elif (
+                geometry.source_reference_sha256
+                and prototype.source_reference_sha256 != geometry.source_reference_sha256
+            ):
+                raise ValueError(
+                    "RNA residual geometry source reference differs from PrototypeSet for %s"
+                    % label
+                )
+            if prototype.latent_transform_sha256 != geometry.latent_transform_sha256:
+                raise ValueError(
+                    "RNA residual geometry latent transform differs from PrototypeSet for %s"
+                    % label
+                )
+            prototype_type_order = tuple(
+                dict.fromkeys(str(value) for value in prototype.cell_type_labels.tolist())
+            )
+            if prototype_type_order != expected_types:
+                raise ValueError("PrototypeSet cell-type order differs for %s" % label)
+            if tuple(str(value) for value in prototype.prototype_ids.tolist()) != tuple(
+                batch.prototype_ids
+            ):
+                raise ValueError("PrototypeSet identifiers differ from training batch %s" % label)
+            type_lookup = {name: index for index, name in enumerate(expected_types)}
+            expected_prototype_types = np.asarray(
+                [type_lookup[str(value)] for value in prototype.cell_type_labels.tolist()],
+                dtype=np.int64,
+            )
+            prototype_payload_matches = (
+                np.array_equal(
+                    batch.prototype_means.detach().cpu().numpy(),
+                    np.asarray(prototype.means, dtype=np.float32),
+                )
+                and np.array_equal(
+                    batch.prototype_variances.detach().cpu().numpy(),
+                    np.asarray(prototype.variances, dtype=np.float32),
+                )
+                and np.array_equal(
+                    batch.prototype_weights.detach().cpu().numpy(),
+                    np.asarray(prototype.weights, dtype=np.float32),
+                )
+                and np.array_equal(
+                    batch.prototype_types.detach().cpu().numpy(),
+                    expected_prototype_types,
+                )
+            )
+            if not prototype_payload_matches:
+                raise ValueError(
+                    "training batch %s prototype payload differs from its hash-bound source" % label
+                )
+
+        if reference_sources:
+            reference_path, reference_sha256 = reference_sources[0]
+            reference = RNAReference.load_npz(reference_path)
+            if (
+                geometry.source_reference_sha256
+                and geometry.source_reference_sha256 != reference_sha256
+            ):
+                raise ValueError(
+                    "RNA residual geometry source_reference_sha256 differs from the "
+                    "RNAReference used by training batch %s" % label
+                )
+            if prototype is not None and (
+                prototype.source_reference_sha256
+                and prototype.source_reference_sha256 != reference_sha256
+            ):
+                raise ValueError(
+                    "PrototypeSet for training batch %s names a different RNAReference" % label
+                )
+            if reference.latent_space_id != batch.latent_space_id:
+                raise ValueError(
+                    "RNAReference latent_space_id differs from training batch %s" % label
+                )
+            if batch.gene_names and tuple(
+                str(value) for value in reference.gene_ids.tolist()
+            ) != tuple(batch.gene_names):
+                raise ValueError("RNAReference gene order differs for training batch %s" % label)
+
+    return (
+        "unsafe_legacy_missing_provenance"
+        if legacy_gaps
+        else "strict_hash_bound_prototype_reference_and_latent_source"
+    )
+
+
 def _load_hierarchy(
     path: Optional[str],
     type_names: Sequence[str],
@@ -1897,6 +2146,40 @@ def command_train(args: argparse.Namespace) -> int:
         model = HEIRModel(model_config)
     if rna_vae is not None:
         model.load_rna_decoder(rna_vae, freeze=not args.finetune_rna_decoder)
+    residual_geometry_sha256 = None
+    residual_geometry_provenance_status = None
+    residual_geometry_source_reference_sha256 = None
+    residual_geometry_latent_transform_sha256 = None
+    if args.residual_geometry is not None:
+        geometry_path = Path(args.residual_geometry).expanduser().resolve()
+        geometry = RNAResidualGeometry.from_npz(geometry_path)
+        if geometry.latent_space_id != latent_space_id:
+            raise ValueError("RNA residual geometry latent_space_id differs from training batches")
+        residual_geometry_provenance_status = _validate_residual_geometry_training_provenance(
+            geometry,
+            all_batches,
+            type_names,
+            unsafe_allow_legacy=args.unsafe_allow_legacy_residual_geometry_provenance,
+        )
+        geometry_overlap = sorted(validation_donors & set(geometry.training_donors))
+        if geometry_overlap and not (
+            args.allow_split_overlap or args.unsafe_allow_molecular_validation_overlap
+        ):
+            raise ValueError(
+                "RNA residual geometry was fitted on validation donors: %s"
+                % ", ".join(geometry_overlap)
+            )
+        if geometry.residual_type_basis.shape[2] != model.config.residual_rank:
+            raise ValueError("RNA residual geometry rank differs from the HEIR residual rank")
+        basis, maximums = geometry.model_parameters(type_names)
+        model.configure_residual_geometry(
+            torch.from_numpy(basis),
+            torch.from_numpy(maximums),
+            freeze_basis=not args.finetune_residual_basis,
+        )
+        residual_geometry_sha256 = _sha256(str(geometry_path))
+        residual_geometry_source_reference_sha256 = geometry.source_reference_sha256
+        residual_geometry_latent_transform_sha256 = geometry.latent_transform_sha256
     optimization = OptimizationConfig(
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -1925,6 +2208,8 @@ def command_train(args: argparse.Namespace) -> int:
         seed=args.seed,
         device=args.device,
         allow_split_overlap=args.allow_split_overlap,
+        uot_unknown_mass=args.uot_unknown_mass,
+        uot_unknown_mass_mode=args.uot_unknown_mass_mode,
     )
     result = trainer.fit(training_batches, validation_batches)
     destination = Path(args.output).expanduser().resolve()
@@ -1936,6 +2221,8 @@ def command_train(args: argparse.Namespace) -> int:
         "parent_type_names": list(parent_names),
         "gene_names": list(gene_names),
         "training_stage": stage.value,
+        "uot_unknown_mass": float(args.uot_unknown_mass),
+        "uot_unknown_mass_mode": str(args.uot_unknown_mass_mode),
         "latent_space_id": latent_space_id,
         "feature_space_id": feature_space_id,
         "expression_space_id": expression_space_id,
@@ -1960,6 +2247,16 @@ def command_train(args: argparse.Namespace) -> int:
         ),
         "initial_heir_sha256": initial_checkpoint_sha256,
         "initial_heir_training_donors": list(initial_training_donors),
+        "residual_geometry": (
+            None
+            if args.residual_geometry is None
+            else str(Path(args.residual_geometry).expanduser().resolve())
+        ),
+        "residual_geometry_sha256": residual_geometry_sha256,
+        "residual_geometry_provenance_status": residual_geometry_provenance_status,
+        "residual_geometry_source_reference_sha256": (residual_geometry_source_reference_sha256),
+        "residual_geometry_latent_transform_sha256": (residual_geometry_latent_transform_sha256),
+        "residual_basis_trainable": bool(args.finetune_residual_basis),
         "training_batches": [
             {
                 "sample_id": batch.sample_id,
@@ -2009,12 +2306,91 @@ def command_train(args: argparse.Namespace) -> int:
     return 0
 
 
+_REFINEMENT_VIEW_SCHEMA = "heir.refinement_views.v2"
+_LEGACY_REFINEMENT_VIEW_SCHEMA = "heir.refinement_views.v1"
+_REFINEMENT_VIEW_CONSTRUCTION = "one_encoder_scale_block_plus_shared_explicit_morphology"
+
+
+def _ordered_identity_sha256(values: Sequence[object]) -> str:
+    encoded = json.dumps(
+        [str(value) for value in values],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _refinement_view_metadata(
+    archive: np.lib.npyio.NpzFile,
+    *,
+    checkpoint_sha256: str,
+    batch_sha256: str,
+    batch: HEIRTrainingBatch,
+) -> Mapping[str, object]:
+    if "metadata_json" not in archive:
+        raise ValueError("view artifact lacks versioned metadata_json provenance")
+    raw_metadata = np.asarray(archive["metadata_json"])
+    if raw_metadata.ndim != 0:
+        raise ValueError("view artifact metadata_json must be a scalar")
+    try:
+        metadata = json.loads(str(raw_metadata.item()))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("view artifact metadata_json is malformed") from error
+    if not isinstance(metadata, Mapping):
+        raise ValueError("view artifact metadata_json must contain an object")
+    schema = str(metadata.get("schema", ""))
+    if schema not in {_REFINEMENT_VIEW_SCHEMA, _LEGACY_REFINEMENT_VIEW_SCHEMA}:
+        raise ValueError("view artifact has an unsupported provenance schema")
+
+    # v1 already committed the complete checkpoint and batch bytes. Accept it
+    # only through this explicit migration branch after both digests match;
+    # the bound batch bytes supply the identities added as first-class v2
+    # fields. No unversioned or partially versioned artifact is migrated.
+    for field, expected in (
+        ("checkpoint_sha256", checkpoint_sha256),
+        ("batch_sha256", batch_sha256),
+    ):
+        if str(metadata.get(field, "")) != expected:
+            raise ValueError("view artifact %s differs from the refinement input" % field)
+    if schema == _LEGACY_REFINEMENT_VIEW_SCHEMA:
+        return metadata
+
+    expected_metadata: Mapping[str, object] = {
+        "batch_contract": batch.CONTRACT,
+        "batch_contract_version": batch.CONTRACT_VERSION,
+        "batch_source_sha256": list(batch.source_sha256),
+        "batch_source_roles": list(batch.source_roles),
+        "sample_id": batch.sample_id,
+        "donor_id": batch.donor_id,
+        "bag_id": batch.bag_id,
+        "block_id": batch.block_id,
+        "feature_space_id": batch.feature_space_id,
+        "latent_space_id": batch.latent_space_id,
+        "type_names": list(batch.type_names),
+        "type_ontology_sha256": _ordered_identity_sha256(batch.type_names),
+    }
+    for field, expected in expected_metadata.items():
+        if metadata.get(field) != expected:
+            raise ValueError("view artifact %s differs from the refinement batch" % field)
+    return metadata
+
+
 def _load_refinement_views(
     specifications: Sequence[str],
     batches: Sequence[HEIRTrainingBatch],
+    *,
+    checkpoint_path: str,
+    batch_paths: Sequence[str],
 ) -> Dict[str, np.ndarray]:
+    if len(batch_paths) != len(batches):
+        raise ValueError("refinement batch paths must align to loaded training batches")
+    checkpoint_sha256 = _sha256(checkpoint_path)
     expected = {
-        "%s::%s::%s" % (batch.donor_id, batch.sample_id, batch.bag_id): batch for batch in batches
+        "%s::%s::%s" % (batch.donor_id, batch.sample_id, batch.bag_id): (
+            batch,
+            _sha256(path),
+        )
+        for batch, path in zip(batches, batch_paths)
     }
     result: Dict[str, np.ndarray] = {}
     for specification in specifications:
@@ -2025,14 +2401,28 @@ def _load_refinement_views(
             raise ValueError("view prediction key is not a training batch: %s" % key)
         if key in result:
             raise ValueError("view prediction key is repeated: %s" % key)
-        batch = expected[key]
+        batch, batch_sha256 = expected[key]
         if not batch.nucleus_ids:
             raise ValueError("view alignment requires nucleus_ids in every training batch")
+        if not batch.source_sha256:
+            raise ValueError("view alignment requires source SHA-256 provenance in every batch")
         with np.load(raw_path, allow_pickle=False) as archive:
-            required = {"nucleus_ids", "view_predictions", "view_ids", "view_source_sha256"}
+            required = {
+                "nucleus_ids",
+                "view_predictions",
+                "view_ids",
+                "view_source_sha256",
+                "metadata_json",
+            }
             missing_keys = sorted(required - set(archive.files))
             if missing_keys:
                 raise ValueError("view artifact is missing: %s" % ", ".join(missing_keys))
+            view_metadata = _refinement_view_metadata(
+                archive,
+                checkpoint_sha256=checkpoint_sha256,
+                batch_sha256=batch_sha256,
+                batch=batch,
+            )
             nucleus_ids = [str(value) for value in archive["nucleus_ids"].tolist()]
             predictions = np.array(archive["view_predictions"], copy=True)
             view_ids = [str(value) for value in archive["view_ids"].tolist()]
@@ -2049,6 +2439,10 @@ def _load_refinement_views(
             )
         if predictions.ndim not in (2, 3) or predictions.shape[1] != len(nucleus_ids):
             raise ValueError("view_predictions must have shape (views, nuclei[, types])")
+        if predictions.ndim == 3 and predictions.shape[2] != len(batch.type_names):
+            raise ValueError("view_predictions type axis differs from the bound ontology")
+        if not np.issubdtype(predictions.dtype, np.number) or not np.isfinite(predictions).all():
+            raise ValueError("view_predictions must be finite and numeric")
         if (
             len(view_ids) != predictions.shape[0]
             or len(set(view_ids)) != len(view_ids)
@@ -2060,6 +2454,38 @@ def _load_refinement_views(
             for value in view_hashes
         ):
             raise ValueError("view_source_sha256 must align and contain SHA-256 digests")
+        if view_metadata.get("view_construction") != _REFINEMENT_VIEW_CONSTRUCTION:
+            raise ValueError("view artifact uses an unsupported view construction")
+        try:
+            blocks = int(view_metadata["encoder_blocks"])
+            block_width = int(view_metadata["encoder_block_width"])
+            tail = int(view_metadata["shared_tail_features"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("view artifact construction metadata is incomplete") from error
+        width = int(batch.morphology.shape[1])
+        if (
+            blocks < 2
+            or blocks != predictions.shape[0]
+            or tail < 0
+            or tail >= width
+            or block_width <= 0
+            or blocks * block_width + tail != width
+        ):
+            raise ValueError("view artifact construction metadata differs from the batch")
+        expected_view_ids = ["encoder_scale_%d" % index for index in range(blocks)]
+        if view_ids != expected_view_ids:
+            raise ValueError("view_ids differ from the bound scale-held-out construction")
+        expected_hashes = []
+        for block_index in range(blocks):
+            start = block_index * block_width
+            stop = start + block_width
+            digest = hashlib.sha256()
+            digest.update(checkpoint_sha256.encode("ascii"))
+            digest.update(batch_sha256.encode("ascii"))
+            digest.update(("encoder_block_%d:%d:%d" % (block_index, start, stop)).encode("ascii"))
+            expected_hashes.append(digest.hexdigest())
+        if view_hashes != expected_hashes:
+            raise ValueError("view_source_sha256 does not bind the selected checkpoint and batch")
         for left in range(predictions.shape[0]):
             for right in range(left + 1, predictions.shape[0]):
                 if np.array_equal(predictions[left], predictions[right]):
@@ -2210,10 +2636,19 @@ def command_refine(args: argparse.Namespace) -> int:
         maximum_prior_total_variation=args.maximum_prior_total_variation,
         max_anchors_per_class=args.max_anchors_per_class,
         stable_rounds_required=args.stable_rounds_required,
+        maximum_validation_loss_degradation=args.maximum_validation_loss_degradation,
+        objective_relative_stability_tolerance=(args.objective_relative_stability_tolerance),
         objective_stability_tolerance=args.objective_stability_tolerance,
+        round_selection_mode=args.round_selection_mode,
+        maximum_spatial_score_degradation=args.maximum_spatial_score_degradation,
         broad_refinement_rounds=args.broad_refinement_rounds,
     )
-    views = _load_refinement_views(args.view_predictions or [], training_batches)
+    views = _load_refinement_views(
+        args.view_predictions or [],
+        training_batches,
+        checkpoint_path=args.checkpoint,
+        batch_paths=args.train_batch,
+    )
 
     def trainer_factory() -> HEIRTrainer:
         return HEIRTrainer(
@@ -2225,6 +2660,8 @@ def command_refine(args: argparse.Namespace) -> int:
             seed=args.seed,
             device=args.device,
             allow_split_overlap=args.allow_split_overlap,
+            uot_unknown_mass=args.uot_unknown_mass,
+            uot_unknown_mass_mode=args.uot_unknown_mass_mode,
         )
 
     result = IterativeRefiner(
@@ -2265,6 +2702,8 @@ def command_refine(args: argparse.Namespace) -> int:
     refined_metadata.update(
         {
             "schema": "heir.refined_model.v1",
+            "uot_unknown_mass": float(args.uot_unknown_mass),
+            "uot_unknown_mass_mode": str(args.uot_unknown_mass_mode),
             "parent_checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
             "parent_checkpoint_sha256": _sha256(args.checkpoint),
             "refinement_round": result.selected_round,
@@ -2311,6 +2750,30 @@ def command_refine(args: argparse.Namespace) -> int:
     refined_checkpoint["metadata"] = refined_metadata
     checkpoint_path = destination / "heir_refined.pt"
     _atomic_torch_save(refined_checkpoint, checkpoint_path)
+    round_checkpoint_outputs: Dict[str, str] = {}
+    if args.save_round_checkpoints:
+        selected_state = {
+            name: value.detach().cpu().clone() for name, value in model.state_dict().items()
+        }
+        for item, state in zip(result.rounds, result.round_state_dicts):
+            model.load_state_dict(state)
+            round_metadata = dict(refined_metadata)
+            round_metadata.update(
+                {
+                    "schema": "heir.refined_round_model.v1",
+                    "refinement_round": item.round_id,
+                    "refinement_round_committed": item.committed,
+                    "selected_by_parent_run": item.round_id == result.selected_round,
+                }
+            )
+            round_checkpoint = model.checkpoint()
+            round_checkpoint["metadata"] = round_metadata
+            round_directory = destination / ("round_%d" % item.round_id)
+            round_directory.mkdir(parents=True, exist_ok=True)
+            round_path = round_directory / "heir_refined.pt"
+            _atomic_torch_save(round_checkpoint, round_path)
+            round_checkpoint_outputs[str(item.round_id)] = str(round_path)
+        model.load_state_dict(selected_state)
 
     prototype_directory = destination / "prototypes"
     prototype_directory.mkdir(parents=True, exist_ok=True)
@@ -2354,6 +2817,7 @@ def command_refine(args: argparse.Namespace) -> int:
             "selected_round": result.selected_round,
             "stopped_reason": result.stopped_reason,
             "prototype_artifacts": prototype_outputs,
+            "round_checkpoints": round_checkpoint_outputs,
         },
         audit_path,
     )
@@ -2366,9 +2830,131 @@ def command_refine(args: argparse.Namespace) -> int:
             "selected_round": result.selected_round,
             "stopped_reason": result.stopped_reason,
             "prototype_artifacts": prototype_outputs,
+            "round_checkpoints": round_checkpoint_outputs,
         }
     )
     return 0
+
+
+def _wrong_donor_ontology_intersection(
+    prototypes: PrototypeSet,
+    target_type_names: Sequence[str],
+) -> Tuple[PrototypeSet, Dict[str, object]]:
+    """Filter a wrong-donor bank to the checkpoint ontology in memory.
+
+    This helper is called only from the explicitly requested wrong-donor
+    branch in :func:`command_predict`.  The returned bank keeps source row
+    order and artifact metadata; the caller remains responsible for binding
+    the prediction to the hash of the original, unfiltered PrototypeSet.
+    """
+
+    if len(np.unique(prototypes.sample_ids)) != 1:
+        raise ValueError(
+            "wrong-donor ontology intersection requires one sample-specific prototype bank"
+        )
+    checkpoint_types = tuple(str(value) for value in target_type_names)
+    checkpoint_type_set = set(checkpoint_types)
+    original_types = tuple(
+        dict.fromkeys(str(value) for value in prototypes.cell_type_labels.tolist())
+    )
+    original_type_set = set(original_types)
+    retained_types = tuple(value for value in checkpoint_types if value in original_type_set)
+    omitted_types = tuple(value for value in original_types if value not in checkpoint_type_set)
+    selected = np.asarray(
+        [str(value) in checkpoint_type_set for value in prototypes.cell_type_labels.tolist()],
+        dtype=bool,
+    )
+    retained_prototype_count = int(selected.sum())
+    if len(retained_types) < 2 or retained_prototype_count < 2:
+        raise ValueError(
+            "wrong-donor ontology intersection must retain at least two cell types "
+            "and two prototypes"
+        )
+    weights = np.asarray(prototypes.weights[selected], dtype=np.float64)
+    total = float(weights.sum())
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError("wrong-donor ontology intersection has no positive prototype mass")
+    weights /= total
+    filtered = PrototypeSet(
+        prototype_ids=np.asarray(prototypes.prototype_ids[selected]),
+        sample_ids=np.asarray(prototypes.sample_ids[selected]),
+        cell_type_labels=np.asarray(prototypes.cell_type_labels[selected]),
+        means=np.asarray(prototypes.means[selected]),
+        variances=np.asarray(prototypes.variances[selected]),
+        weights=weights,
+        n_cells=np.asarray(prototypes.n_cells[selected]),
+        latent_space_id=prototypes.latent_space_id,
+        donor_id=prototypes.donor_id,
+        block_id=prototypes.block_id,
+        source_reference_sha256=prototypes.source_reference_sha256,
+        latent_training_donors=prototypes.latent_training_donors,
+        latent_transform_sha256=prototypes.latent_transform_sha256,
+    )
+    return filtered, {
+        "policy": "target_checkpoint_ontology_intersection_v1",
+        "minimum_retained_type_count": 2,
+        "minimum_retained_prototype_count": 2,
+        "original_prototype_count": int(len(prototypes.prototype_ids)),
+        "retained_prototype_count": int(len(filtered.prototype_ids)),
+        "omitted_prototype_count": int(len(prototypes.prototype_ids) - len(filtered.prototype_ids)),
+        "original_type_count": len(original_types),
+        "retained_type_count": len(retained_types),
+        "omitted_type_count": len(omitted_types),
+        "original_type_names": list(original_types),
+        "retained_type_names": list(retained_types),
+        "omitted_type_names": list(omitted_types),
+        "weights_renormalized": True,
+    }
+
+
+def _canonical_payload_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _shuffle_control_transform(
+    control: str,
+    seed: int,
+    nuclei: int,
+) -> Tuple[np.ndarray, Mapping[str, object]]:
+    """Return the exact deterministic shuffle map and its auditable recipe."""
+
+    algorithms = {
+        "image_shuffle": (
+            "apply default_rng(seed).permutation(n_nuclei) to histology feature rows"
+        ),
+        "graph_shuffle": (
+            "apply default_rng(seed).permutation(n_nuclei) to graph edge endpoint indices"
+        ),
+    }
+    if control not in algorithms:
+        raise ValueError("unsupported shuffle control %s" % control)
+    permutation = np.asarray(
+        np.random.default_rng(seed).permutation(nuclei),
+        dtype="<i8",
+    )
+    map_sha256 = hashlib.sha256(permutation.tobytes(order="C")).hexdigest()
+    recipe: Dict[str, object] = {
+        "schema": "heir.inference_control_transform.v1",
+        "control": control,
+        "seed": int(seed),
+        "random_generator": "numpy.random.default_rng",
+        "algorithm": algorithms[control],
+        "nuclei": int(nuclei),
+        "map_encoding": "little-endian-int64-c-order",
+        "expected_transform_map_sha256": map_sha256,
+    }
+    return permutation, {
+        **recipe,
+        "recipe_sha256": _canonical_payload_sha256(recipe),
+        "map_sha256": map_sha256,
+    }
 
 
 def command_predict(args: argparse.Namespace) -> int:
@@ -2395,6 +2981,12 @@ def command_predict(args: argparse.Namespace) -> int:
             raise ValueError("--telemetry-output must not overwrite a prediction input/output")
     checkpoint = _load_checkpoint(args.checkpoint)
     model = HEIRModel.from_checkpoint(checkpoint)
+    if args.prototype_only:
+        if model.config.legacy_unrestricted_residual or model.residual_gate_head is None:
+            raise ValueError("prototype-only control requires a restricted-residual checkpoint")
+        with torch.no_grad():
+            model.residual_gate_head.weight.zero_()
+            model.residual_gate_head.bias.fill_(-100.0)
     metadata = checkpoint.get("metadata")
     if not isinstance(metadata, Mapping):
         raise ValueError("checkpoint lacks HEIR ontology metadata")
@@ -2423,6 +3015,9 @@ def command_predict(args: argparse.Namespace) -> int:
 
     bag = HistologyBag.load_npz(args.histology)
     prototypes = PrototypeSet.load_npz(args.prototypes)
+    original_prototype_sha256 = _sha256(args.prototypes)
+    inference_prototypes = prototypes
+    prototype_filter: Optional[Dict[str, object]] = None
     missing_bag_provenance = [
         name
         for name, value in (
@@ -2451,13 +3046,24 @@ def command_predict(args: argparse.Namespace) -> int:
         or bag.feature_space_id != checkpoint_feature_space_id
     ) and not args.unsafe_allow_feature_space_mismatch:
         raise ValueError("HistologyBag feature_space_id does not match the trained checkpoint")
+    if args.wrong_donor_control:
+        if not prototypes.donor_id:
+            raise ValueError("wrong-donor control requires PrototypeSet donor provenance")
+        if prototypes.donor_id == args.donor_id:
+            raise ValueError("wrong-donor control requires a non-matched PrototypeSet donor")
     if not prototypes.donor_id or not prototypes.block_id:
         if not args.unsafe_allow_missing_prototype_provenance:
             raise ValueError("PrototypeSet lacks donor/block provenance")
-    elif prototypes.donor_id != args.donor_id:
+    elif prototypes.donor_id != args.donor_id and not args.wrong_donor_control:
         raise ValueError("PrototypeSet donor differs from --donor-id")
-    elif bag.block_id and prototypes.block_id != bag.block_id:
+    elif bag.block_id and prototypes.block_id != bag.block_id and not args.wrong_donor_control:
         raise ValueError("PrototypeSet block differs from the HistologyBag")
+    if args.wrong_donor_control:
+        inference_prototypes, prototype_filter = _wrong_donor_ontology_intersection(
+            prototypes,
+            type_names,
+        )
+        prototype_filter["original_source_prototype_sha256"] = original_prototype_sha256
     if (
         not checkpoint_latent_space_id
         or not prototypes.latent_space_id
@@ -2500,6 +3106,29 @@ def command_predict(args: argparse.Namespace) -> int:
     )
     effective_confidence[bag.artifact_probability >= args.artifact_threshold] = 0.0
     set_seed(args.seed)
+    if args.image_feature_shuffle and args.graph_node_shuffle:
+        raise ValueError("image-feature and graph-node shuffle controls must be run separately")
+    control_transform: Optional[Mapping[str, object]] = None
+    inference_features = np.asarray(bag.features)
+    if args.image_feature_shuffle:
+        image_permutation, control_transform = _shuffle_control_transform(
+            "image_shuffle",
+            args.seed,
+            len(inference_features),
+        )
+        inference_features = inference_features[image_permutation]
+    inference_edge_index = bag.edge_index
+    inference_edge_weight = bag.edge_weight
+    if args.graph_node_shuffle:
+        node_permutation, control_transform = _shuffle_control_transform(
+            "graph_shuffle",
+            args.seed,
+            len(bag.nucleus_ids),
+        )
+        inference_edge_index = node_permutation[np.asarray(bag.edge_index, dtype=np.int64)]
+    elif args.no_graph:
+        inference_edge_index = np.empty((2, 0), dtype=np.int64)
+        inference_edge_weight = np.empty(0, dtype=np.float32)
     inference_device = resolve_device(args.device)
     use_mixed_precision = (
         inference_device.type == "cuda"
@@ -2512,14 +3141,14 @@ def command_predict(args: argparse.Namespace) -> int:
     inference_started = time.perf_counter()
     prediction = predict_cells(
         model,
-        bag.features,
+        inference_features,
         bag.coordinates_um,
         bag.nucleus_ids,
-        prototypes,
+        inference_prototypes,
         type_names,
         gene_names,
-        edge_index=bag.edge_index,
-        edge_weight=bag.edge_weight,
+        edge_index=inference_edge_index,
+        edge_weight=inference_edge_weight,
         latent_samples=args.latent_samples,
         probability_threshold=args.probability_threshold,
         segmentation_confidence=effective_confidence,
@@ -2531,7 +3160,7 @@ def command_predict(args: argparse.Namespace) -> int:
         donor_id=args.donor_id,
         slide_id=bag.slide_id,
         checkpoint_sha256=_sha256(args.checkpoint),
-        prototype_sha256=_sha256(args.prototypes),
+        prototype_sha256=original_prototype_sha256,
         histology_sha256=_sha256(args.histology),
         latent_space_id=checkpoint_latent_space_id,
         model_version=str(metadata.get("schema", __version__)),
@@ -2548,6 +3177,7 @@ def command_predict(args: argparse.Namespace) -> int:
         mixed_precision=args.mixed_precision,
         mc_chunk_size=args.mc_chunk_size,
         use_model_abstain=args.use_model_abstain,
+        allow_prototype_sample_mismatch=args.wrong_donor_control,
     )
     if inference_device.type == "cuda":
         torch.cuda.synchronize(inference_device)
@@ -2559,6 +3189,16 @@ def command_predict(args: argparse.Namespace) -> int:
         "genes": len(prediction.gene_names),
         "abstained": int(prediction.abstain.sum()),
         "refinement_round": prediction.refinement_round,
+        "negative_control": {
+            "prototype_only": bool(args.prototype_only),
+            "image_feature_shuffle": bool(args.image_feature_shuffle),
+            "graph_node_shuffle": bool(args.graph_node_shuffle),
+            "no_graph": bool(args.no_graph),
+            "wrong_donor": bool(args.wrong_donor_control),
+            "prototype_donor_id": prototypes.donor_id,
+            "prototype_filter": prototype_filter,
+            "transform": control_transform,
+        },
     }
     if args.telemetry_output:
         telemetry = {
@@ -2582,6 +3222,17 @@ def command_predict(args: argparse.Namespace) -> int:
             "genes": len(prediction.gene_names),
             "latent_samples": args.latent_samples,
             "mc_chunk_size": args.mc_chunk_size,
+            "negative_control": {
+                "prototype_only": bool(args.prototype_only),
+                "image_feature_shuffle": bool(args.image_feature_shuffle),
+                "graph_node_shuffle": bool(args.graph_node_shuffle),
+                "no_graph": bool(args.no_graph),
+                "wrong_donor": bool(args.wrong_donor_control),
+                "prototype_donor_id": prototypes.donor_id,
+                "prototype_filter": prototype_filter,
+                "seed": args.seed,
+                "transform": control_transform,
+            },
         }
         atomic_json_dump(telemetry, args.telemetry_output)
         report["telemetry_output"] = str(Path(args.telemetry_output).expanduser().resolve())
@@ -2730,9 +3381,32 @@ def command_evaluate(args: argparse.Namespace) -> int:
             if missing:
                 raise ValueError("prediction is missing truth genes: %s" % ", ".join(missing))
             order = np.asarray([lookup[name] for name in truth_genes], dtype=np.int64)
-            result["expression"] = expression_metrics(
-                prediction.expression_mean[:, order], truth["observed_expression"]
+            observed_expression = np.asarray(truth["observed_expression"])
+            if observed_expression.shape != (len(prediction.nucleus_ids), len(truth_genes)):
+                raise ValueError(
+                    "observed_expression must have shape (prediction cells, truth genes)"
+                )
+            public_expression = prediction.public_cell_expression_mean[:, order]
+            available = np.asarray(prediction.expression_mean_available, dtype=bool)
+            if available.shape != (len(prediction.nucleus_ids),):
+                raise ValueError("prediction expression_mean_available is not cell-aligned")
+            if not np.array_equal(available, np.isfinite(public_expression).all(axis=1)):
+                raise ValueError("public cell expression and expression_mean_available disagree")
+            if not available.any():
+                raise ValueError("prediction has no available public cell-level expression means")
+            expression_result = expression_metrics(
+                public_expression[available],
+                observed_expression[available],
             )
+            expression_result.update(
+                {
+                    "cells_total": int(len(available)),
+                    "cells_evaluated": int(available.sum()),
+                    "cells_unavailable_excluded": int((~available).sum()),
+                    "availability_policy": "prediction.expression_mean_available",
+                }
+            )
+            result["expression"] = expression_result
     if not result:
         raise ValueError("truth NPZ needs true_labels and/or observed_expression")
     if args.output:
@@ -2853,7 +3527,7 @@ def command_evaluate_spatial(args: argparse.Namespace) -> int:
         dtype=np.int64,
     )
     spot_expression, mass = _aggregate_spatial_values(
-        np.expm1(prediction.expression_mean[:, gene_order]),
+        np.expm1(prediction.internal_aggregate_expression_mean[:, gene_order]),
         len(spot_ids),
         dense_assignment,
         spot_index,
@@ -3143,6 +3817,26 @@ def build_parser() -> argparse.ArgumentParser:
     prototypes.add_argument("--seed", type=int, default=17)
     prototypes.set_defaults(func=command_build_prototypes)
 
+    residual_geometry = subparsers.add_parser(
+        "fit-residual-geometry",
+        help="fit frozen within-type RNA PCA bases and type-calibrated residual bounds",
+    )
+    residual_geometry.add_argument("--reference", required=True)
+    residual_geometry.add_argument("--prototypes")
+    residual_geometry.add_argument("--output", required=True)
+    residual_geometry.add_argument("--rank", type=int, default=4)
+    residual_geometry.add_argument(
+        "--type-name",
+        action="append",
+        help="authoritative model type order; repeat once per type",
+    )
+    residual_geometry.add_argument("--calibration-quantile", type=float, default=0.90)
+    residual_geometry.add_argument("--bound-fraction", type=float, default=0.50)
+    residual_geometry.add_argument("--minimum-bound", type=float, default=1.0e-3)
+    residual_geometry.add_argument("--maximum-bound", type=float)
+    residual_geometry.add_argument("--minimum-calibration-cells", type=int, default=3)
+    residual_geometry.set_defaults(func=command_fit_residual_geometry)
+
     fit_ood = subparsers.add_parser(
         "fit-ood",
         help="fit a shrinkage-Mahalanobis pathology-feature OOD detector",
@@ -3226,6 +3920,12 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--dropout", type=float, default=0.1)
     train.add_argument("--hard-type-routing", action="store_true")
     train.add_argument("--abstain-threshold", type=float, default=0.60)
+    train.add_argument("--uot-unknown-mass", type=float, default=0.05)
+    train.add_argument(
+        "--uot-unknown-mass-mode",
+        choices=("fixed", "targets_or_fixed", "model_estimate"),
+        default="fixed",
+    )
     train.add_argument(
         "--residual-rank",
         type=int,
@@ -3237,6 +3937,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="hard upper bound on each morphology residual's latent L2 norm",
+    )
+    train.add_argument(
+        "--residual-geometry",
+        help="validated RNAResidualGeometry NPZ with type bases and calibrated bounds",
+    )
+    train.add_argument(
+        "--finetune-residual-basis",
+        action="store_true",
+        help="allow an RNA-initialized residual basis to move (default: frozen)",
+    )
+    train.add_argument(
+        "--unsafe-allow-legacy-residual-geometry-provenance",
+        action="store_true",
+        help=(
+            "migration-only escape hatch for batches whose prototype/reference source files "
+            "or geometry identities are unavailable; observed identity mismatches still fail"
+        ),
     )
     train.add_argument("--allow-negative-expression", action="store_true")
     train.add_argument("--rna-vae-checkpoint")
@@ -3266,6 +3983,11 @@ def build_parser() -> argparse.ArgumentParser:
     refine.add_argument("--validation-batch", action="append", required=True)
     refine.add_argument("--output", required=True)
     refine.add_argument(
+        "--save-round-checkpoints",
+        action="store_true",
+        help="persist auditable candidate checkpoints for every refinement trajectory round",
+    )
+    refine.add_argument(
         "--view-predictions",
         action="append",
         help="DONOR::SAMPLE::BAG=NPZ with nucleus_ids and view_predictions",
@@ -3294,10 +4016,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="measured-prior weight (default 1.0 fixes it; lower values are sensitivities)",
     )
     refine.add_argument("--minimum-segmentation-confidence", type=float, default=0.50)
+    refine.add_argument("--uot-unknown-mass", type=float, default=0.05)
+    refine.add_argument(
+        "--uot-unknown-mass-mode",
+        choices=("fixed", "targets_or_fixed", "model_estimate"),
+        default="fixed",
+    )
     refine.add_argument("--maximum-prior-total-variation", type=float, default=0.10)
     refine.add_argument("--max-anchors-per-class", type=int, default=10000)
     refine.add_argument("--stable-rounds-required", type=int, default=1)
-    refine.add_argument("--objective-stability-tolerance", type=float, default=0.01)
+    refine.add_argument(
+        "--maximum-validation-loss-degradation",
+        type=float,
+        default=0.01,
+        help="absolute candidate-round loss degradation allowed before rollback",
+    )
+    refine.add_argument(
+        "--objective-relative-stability-tolerance",
+        type=float,
+        default=0.01,
+        help="relative weak-objective change treated as stable",
+    )
+    refine.add_argument(
+        "--objective-stability-tolerance",
+        type=float,
+        default=None,
+        help="deprecated alias that overrides both refinement tolerances",
+    )
+    refine.add_argument(
+        "--round-selection-mode",
+        choices=("fixed", "weak"),
+        default="fixed",
+        help="fixed uses a development-locked round count; weak is a legacy sensitivity",
+    )
+    refine.add_argument(
+        "--maximum-spatial-score-degradation",
+        type=float,
+        default=0.0,
+        help="programmatic spatial-selection tolerance (CLI fixed/weak modes only)",
+    )
     refine.add_argument("--allow-no-view-agreement", action="store_true")
     refine.add_argument("--learning-rate", type=float, default=1.0e-4)
     refine.add_argument("--adapter-learning-rate", type=float, default=1.0e-5)
@@ -3341,6 +4098,32 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--mc-chunk-size", type=int)
     predict.add_argument("--probability-threshold", type=float, default=0.60)
     predict.add_argument("--artifact-threshold", type=float, default=0.50)
+    predict.add_argument(
+        "--prototype-only",
+        action="store_true",
+        help="set the learned morphology residual gate to zero for a prototype-only control",
+    )
+    predict.add_argument(
+        "--image-feature-shuffle",
+        action="store_true",
+        help="permute complete morphology records across nuclei with --seed",
+    )
+    predict.add_argument(
+        "--wrong-donor-control",
+        action="store_true",
+        help="permit a mismatched donor/block prototype bank and record the negative control",
+    )
+    graph_control = predict.add_mutually_exclusive_group()
+    graph_control.add_argument(
+        "--graph-node-shuffle",
+        action="store_true",
+        help="degree-preserving random relabeling of graph nodes with --seed",
+    )
+    graph_control.add_argument(
+        "--no-graph",
+        action="store_true",
+        help="remove every graph edge for the no-context ablation",
+    )
     predict.add_argument(
         "--use-model-abstain",
         action="store_true",

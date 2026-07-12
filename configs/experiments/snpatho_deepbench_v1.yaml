@@ -36,7 +36,7 @@ inputs:
 image:
   canonical_mpp: 0.5
   patch_diameters_um: [32, 128, 384]
-  segmentation_primary: frozen_common_segmentation
+  segmentation_primary: spaceranger_4_1_frozen_common_segmentation
   segmentation_sensitivity: [CellViT, StarDist]
   feature_encoders: [OmiCLIP, pathology_foundation_model]
   explicit_morphology: true
@@ -59,6 +59,10 @@ rna:
   decoder_frozen: true
   primary_prior_update: fixed
   sensitivity_prior_max_tv: 0.05
+  residual_basis: within_type_rna_pca_frozen
+  residual_bound: type_specific_molecular_geometry
+  rare_type_policy: strongly_shrunken_single_prototype
+  retain_rare_types: true
 
 targets:
   genes: 500
@@ -81,6 +85,10 @@ optimization:
 refinement:
   maximum_rounds: 4
   broad_refinement_rounds: 2
+  maximum_validation_loss_degradation: 0.01
+  objective_relative_stability_tolerance: 0.01
+  round_selection_mode: fixed
+  maximum_spatial_score_degradation: 0.0
   e_step: detached_uot_responsibilities
   teacher_ema: 0.99
   minimum_probability: 0.90
@@ -90,14 +98,20 @@ refinement:
   anchors_revocable: true
   trusted_after_consecutive_rounds: 2
   revoke_probability_threshold: 0.70
+  uot_unknown_mass: 0.05
+  uot_unknown_mass_mode: fixed
+  unknown_mass_sensitivity: [0.00, 0.01, 0.05, 0.10, 0.20]
 
 randomness:
   primary_seeds: [17, 41, 89, 131, 197]
   ablation_seeds: [17, 41, 89]
 
 evaluation:
-  primary_baseline: matched_ffpe_r1_soft_type_mean
-  primary_baseline_sensitivity: matched_ffpe_r1_hard_type_mean
+  primary_baseline: joint_matched_ffpe_r1_hard_and_soft_type_means
+  primary_baselines:
+    - matched_ffpe_r1_hard_type_mean_hard_assigned_mass
+    - matched_ffpe_r1_soft_type_mean_expected_soft_mass
+  success_requires_all_primary_baselines: true
   primary_endpoint: paired_median_gene_spearman_delta
   primary_spot_minimum_nuclei: 3
   constant_prediction_correlation: zero
@@ -146,8 +160,15 @@ execution:
     primary_ffpe_snpatho_reference_manifest:
       path: ../../reports/snpatho_r1_reference_manifest.json
       sha256: aea4040a6e0e758b491fa4609c0734e6093bfe0277ce00946f090e067134c9b1
-    refined_predictions: null
-    five_seed_predictions: null
+    refined_predictions:
+      path: ../../reports/snpatho_refinement_v1_seed17_manifest.json
+      sha256: 4b981e42821a2055565e637c6f5a95c35eb1329bd209f33263feef1f0a04cb16
+    five_seed_predictions:
+      path: ../../reports/snpatho_refinement_v1_five_seed_manifest.json
+      sha256: 69b6fc797a69e14e549288ed5297298d124283dcc11107572c084fd2000c4b99
+    refinement_matrix_summary:
+      path: ../../reports/snpatho_refinement_matrix_v1_summary.json
+      sha256: aea29a49fbd00b1f8c3ed721345559ae4729b7c40cf2cf4db773de7ca7e14631
     alternative_workflow_references: null
     wrong_donor_predictions: null
     generic_atlas_predictions: null
@@ -162,4 +183,6 @@ execution:
     author_qc_tissue_fraction: null
     segmentation_sensitivity_predictions: null
     regional_384um_features: null
-    native_scanvi_checkpoint: null
+    native_scanvi_checkpoint:
+      path: ../../reports/snpatho_scanvi_r1_manifest.json
+      sha256: a55640d76e4b8a4d6413d7ba9b2e1b396ce582dbc7f7a1733861e08747d376c3

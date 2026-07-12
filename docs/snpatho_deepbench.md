@@ -1,219 +1,234 @@
-# snPATHO-DeepBench-v1
+# snPATHO-DeepBench-v1 retrospective result
 
-`snPATHO-DeepBench-v1` applies the attached full benchmark plan to every
-component supported by the frozen local artifacts. It is a **retrospective
-diagnostic**, not a replacement for `snPATHO-Locked-v0.2`, an untouched
-validation, or a compliant Track A result.
+This report does not replace or reinterpret `snPATHO-Locked-v0.2`.
 
-## Outcome
+## Scope and benchmark contracts
 
-The requested primary endpoint is not yet testable: there are no redesigned
-refined predictions, independently reannotated/scANVI-encoded R1 reference, or
-composition-adjustment inputs, and there is no frozen per-spot H&E tissue
-fraction. FFPE-only counts now support explicitly labeled integrated-annotation
-type-mean sensitivities, but not the requested refined primary contrast. The
-available historical round-0 diagnostic is negative.
+The available v0.2 artifacts form a retrospective capture-aware diagnostic. Although target H&E is an allowed input, v0.2 derived its OOD threshold from each target slide's 95th percentile. That target-specific calibration violates the external freeze, so these results establish neither Track A1 nor Track A2 compliance.
 
-| Specimen | Spots with >=3 nuclei | HEIR Spearman | Historical hard type mean | Final-record shuffle draw 0 | `median_g(rho_HEIR,g - rho_hist-hard,g)` | HEIR MSE | Hard type-mean MSE |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| 4066 | 4,209 | -0.0221 | 0.1144 | 0.0045 | -0.0896 | 0.2066 | 0.1863 |
-| 4399 | 4,050 | 0.0057 | 0.0000 | 0.0007 | 0.0057 | 0.0688 | 0.0726 |
-| 4411 | 2,668 | -0.0035 | -0.0039 | 0.0008 | 0.0061 | 0.0829 | 0.0850 |
-| **Equal-weight macro** | — | **-0.0066** | **0.0369** | **0.0020** | **-0.0259** | **0.1194** | **0.1146** |
+The required primary R1 reference is the matched **FFPE snPATHO-seq-only** reference. The historical v0.2 reference instead pools FFPE snPATHO-seq, frozen Flex, and frozen 3-prime nuclei; its results and type-mean baseline are therefore retrospective diagnostics, not the primary R1 comparison.
 
-The paired statistic shown for specimen (d) is exactly
-`median_g(rho_HEIR,dg - rho_historical-hard-type-mean,dg)`. It is not the
-difference between the two marginal medians. The macro value is the
-equal-weight mean of those three specimen statistics.
+Hash-bound FFPE-only count references and prototype banks are now consumed. The type-mean ladder separates hard-assigned mass, shared soft mass, expected soft mass, and equal-cell hard/soft estimands. It retains the published integrated-workflow annotation. A native-scANVI prototype-only control is scored in the development matrix, but the annotation and execution-provenance gates remain incomplete, so this is not the requested clean primary R1 comparison.
 
-The 10,000-resample paired specimen/gene abundance-stratified bootstrap gave a
-95% interval of `[-0.0829, 0.0081]` for the historical HEIR-minus-hard-type-mean
-delta. The **bootstrap fraction with delta > 0** was `0.2924`; this is neither a
-frequentist p-value nor a Bayesian probability of truth. This is not the plan's
-complete hierarchical bootstrap because connected spatial-block definitions
-were not frozen.
+Cell-to-spot weights in this diagnostic are **historical integrated-reference library-size weights**, not assay-corrected biological RNA-mass estimates. Both hard-argmax and probability-weighted soft historical type-mean baselines are reported under each explicit mass estimand. Missing prediction types fail closed; no global profile is substituted.
 
-The strengthened type-mean ladder is:
+The available null is a complete shuffle of final cell records across assigned nuclei. It does not substitute for the separately required shuffled-image-feature and coordinate-shuffled-graph controls.
 
-| Specimen | Historical hard Spearman / MSE | Historical soft Spearman / MSE | FFPE-R1 hard Spearman / MSE | FFPE-R1 soft Spearman / MSE |
-|---|---:|---:|---:|---:|
-| 4066 | 0.1144 / 0.1863 | 0.1332 / 0.2536 | 0.1166 / 0.1846 | 0.1336 / 0.2616 |
-| 4399 | 0.0000 / 0.0726 | -0.0442 / 0.0759 | 0.0000 / 0.0696 | -0.0426 / 0.0762 |
-| 4411 | -0.0039 / 0.0850 | -0.0048 / 0.0852 | -0.0036 / 0.0876 | -0.0056 / 0.0840 |
-| **Equal-weight macro** | **0.0369 / 0.1146** | **0.0280 / 0.1382** | **0.0377 / 0.1139** | **0.0284 / 0.1406** |
+Space Ranger supplies the common segmentation but no calibrated segmentation confidence. Historical v0.2 substituted a constant confidence of 1.0, making the >=0.50 anchor gate vacuous; refinement benchmarking remains blocked until that measurement is available.
 
-The FFPE-R1 columns use only `processing_method=FFPE_snPATHO`, but retain the
-published integrated-workflow `major_annotation`; they are retrospective
-annotation sensitivities, not clean reannotated/scANVI primary R1 baselines.
+Expression-detection AUROC uses observed expression > 0 as its label; top-10% Dice/Jaccard are the hotspot metrics. Exact top-decile sets break cutoff ties by ascending frozen spot-row index. Moran's I uses a directed, unweighted 6-NN graph that is not symmetrized or row-standardized.
 
-### Repeated final-cell-record shuffle null
+## Executability
 
-Draw 0 is retained for exact backward comparison. The scorer now also moves
-each assigned cell's complete expression-plus-library-size record in 100
-independently seeded deterministic permutations per specimen:
+| Component | Status | Reason |
+|---|---|---|
+| locked_round0_predictions | ready | Hash-frozen v0.2 predictions for all three specimens |
+| historical_integrated_hard_type_mean | ready | Hard argmax profile with shared soft expected RNA-mass weights derived from the v0.2 pooled multi-workflow reference |
+| historical_integrated_soft_type_mean | ready | Probability-weighted baseline derived from the v0.2 pooled multi-workflow reference |
+| historical_integrated_hard_assigned_mass_type_mean | ready | Hard argmax profile with hard-assigned type-median RNA-mass weights |
+| historical_integrated_equal_cell_type_means | ready | Hard and soft type-profile baselines with equal-cell aggregation |
+| historical_integrated_pseudobulk | ready | Derived from the v0.2 pooled integrated multi-workflow reference |
+| historical_final_cell_record_shuffle | ready | 100 deterministic independently seeded final-cell-record permutations are summarized compactly; draw 0 remains the single-method backward comparison. These historical permutations do not substitute for image-feature or graph shuffle controls; those controls are consumed separately by the native-scANVI refinement matrix |
+| historical_integrated_reference_library_size_weighting | ready | Type-median library sizes from the historical pooled multi-workflow reference |
+| primary_ffpe_snpatho_reference | partial_materialized_not_benchmark_ready | FFPE-snPATHO-only native scANVI references and rare-complete prototype banks are hash-validated, and the scored refinement matrix consumes the native prototype-only control. The labels still come from the published integrated-workflow annotation; an independent clean reannotation is absent, so this remains a sensitivity analysis. |
+| primary_spot_qc | partial | processed RDS spots are author-QC-whitelisted and positive-library with >=3 nuclei; the required >=50% per-spot H&E tissue fraction plus explicit exclusion flags and reasons are absent |
+| hierarchical_spatial_bootstrap | partial | paired donor/gene bootstrap is available; the historical run lacks frozen connected spatial-block definitions |
+| alternative_rna_raw_inputs | partial | downloaded integrated objects expose FFPE snPATHO, frozen SNAP snPATHO/Flex, and frozen 3-prime strata, but workflow-specific frozen references/predictions have not been prepared and no scFFPE stratum is present in those objects |
+| externally_frozen_ood_rule | blocked_noncompliant_historical_input | v0.2 recalibrated the OOD threshold from each target H&E slide's 95th percentile; the capture-aware historical run therefore does not establish Track A/A2 compliance |
+| segmentation_confidence_anchor_gate | blocked_nonfunctional_gate | Space Ranger exports no calibrated segmentation confidence and the refinement runs substitute 1.0, so the scored development matrix does not satisfy the primary benchmark's calibrated anchor-confidence requirement |
+| graph_sensitivity_and_rewiring | partial_consumed_via_refinement_matrix | The provenance-validated matrix consumes scored graph-shuffle and no-graph controls. The requested 8-NN, radius, multiscale, and degree-preserving rewiring sensitivities remain absent. |
+| refinement_trajectory_and_ablations | partial_consumed_via_refinement_matrix | The provenance-validated matrix consumes round 0/final predictions across five seeds, the complete round 1-4 score trajectory at the prespecified trajectory seed, and prototype-only/image-shuffle/graph-shuffle/no-graph/wrong-donor controls. E-step, prior-update, refinement-gate, and anchor/map stability analyses remain unscored. |
+| complete_negative_control_matrix | partial_consumed_via_refinement_matrix | Prototype-only, image-feature-shuffle, graph-shuffle, no-graph, and wrong-donor controls are consumed by the provenance-validated matrix. Label and prototype permutations, generic-atlas RNA, state omission, reference downsampling, block shuffles, toroidal shifts, and coordinate perturbations remain absent. |
+| seed_ensemble_stability | partial_consumed_performance_matrix_only | Five-seed prediction-level performance is consumed, but map, anchor, assignment-overlap, and between-model stability have not been scored; the matrix must not be interpreted as ensemble-stability evidence. |
+| track_a1_external_personalization | blocked_not_implemented_or_missing_artifact | No externally frozen H&E-plus-snRNA-only predictions exist |
+| track_b_leave_one_specimen_out | blocked_not_implemented_or_missing_artifact | No nested leave-one-specimen-out configurations or predictions are frozen |
+| independent_snpatho_reannotation | blocked_not_implemented_or_missing_artifact | Historical labels came from integrated workflow objects; no snPATHO-only frozen ontology and marker-review artifact exists |
+| reference_size_and_per_type_caps | blocked_not_implemented_or_missing_artifact | The requested five draws at 1k/2.5k/5k/all and 100/250/500/1k per-type caps were not generated |
+| hierarchical_ontology_scoring | blocked_not_implemented_or_missing_artifact | No frozen compartment/major-type/supported-subtype mapping and evaluation output is available |
+| manual_segmentation_roi_audit | blocked_not_implemented_or_missing_artifact | The 24 stratified ROIs per specimen and independent detection annotations do not exist |
+| image_multiscale_and_morphology_ablations | blocked_not_implemented_or_missing_artifact | The 32/128/384-um and explicit-morphology ablation predictions were not generated |
+| composition_controlled_residuals | blocked_not_implemented_or_missing_artifact | Five spatial-block folds, independent composition covariates, library covariates, and pathologist regions are absent |
+| manual_cell_type_benchmark | blocked_not_implemented_or_missing_artifact | No two-reviewer consensus nucleus labels or evaluation-only confidence scores exist |
+| spot_composition_consensus | blocked_not_implemented_or_missing_artifact | No frozen RCTD/cell2location/DestVI consensus artifact is available |
+| uncertainty_calibration_and_risk_coverage | blocked_not_implemented_or_missing_artifact | Historical artifacts do not contain full posterior ensembles or fixed-coverage evaluation outputs |
+| unknown_state_omission_stress_test | blocked_not_implemented_or_missing_artifact | Per-major-type reference-omission predictions were not generated |
+| core_model_ablation_matrix | blocked_not_implemented_or_missing_artifact | No-UOT, balanced-OT, query/final-latent UOT, no/low-rank residual, no covariance, fixed/updated prior, and initializer ablations are absent |
+| expanded_spatial_structure_metrics | blocked_not_implemented_or_missing_artifact | Geary C, semivariogram, spatial EMD, and boundary-localization scorers are not implemented in this executable subset |
+| per_gene_block_permutation_fdr | blocked_not_implemented_or_missing_artifact | Frozen connected blocks and block-permutation nulls needed for BH-FDR are absent |
+| biological_case_study_endpoints | blocked_not_implemented_or_missing_artifact | Prespecified HER2/DCIS/calcium, tumor-liver, and liver-resident program definitions and region labels are absent |
+| complete_computational_benchmark | blocked_not_implemented_or_missing_artifact | Historical inference telemetry exists, but segmentation, feature extraction, training, refinement, CPU memory, checkpoint/cache size, and energy are incomplete |
+| primary_ffpe_snpatho_reference_manifest | partial_consumed_retrospective_sensitivity | Hash-validated FFPE-only counts are consumed for the matched type-mean estimand ladder. Native scANVI references and rare-complete prototype banks are separately hash-validated, but the published integrated annotations are not an independent clean R1 reannotation. |
+| refined_predictions | consumed_via_provenance_validated_refinement_matrix | Round-0 and final refined predictions for every prespecified specimen and five-seed case are scored in the hash-bound matrix; strict ordering is fail |
+| five_seed_predictions | ready_provenance_validated_five_seed_matrix | Every prespecified specimen/seed PredictionBundle is hash-validated and bound to the native scANVI latent/expression identities. This establishes scored performance coverage, not map or anchor ensemble stability |
+| refinement_matrix_summary | consumed_provenance_validated_matrix_strict_ordering_failed | The compact summary is plan-hash-bound, covers every requested specimen, seed, round 0-4 trajectory artifact, prototype-only/image-shuffle/graph-shuffle/no-graph/wrong-donor control, and strict comparison, and reports strict ordering fail |
+| alternative_workflow_references | blocked_missing_artifact | No scFFPE/Flex/3-prime reference artifacts are frozen |
+| wrong_donor_predictions | consumed_via_provenance_validated_refinement_matrix | The wrong-donor prototype control is scored for every prespecified control case in the hash-bound refinement matrix; strict ordering is fail |
+| generic_atlas_predictions | blocked_missing_artifact | Generic-atlas HEIR predictions have not been generated |
+| h_and_e_only_predictions | blocked_missing_artifact | No RNA-free H&E prediction artifact is supplied |
+| image_shuffle_predictions | consumed_via_provenance_validated_refinement_matrix | The shuffled-image-feature control is scored for every prespecified control case in the hash-bound refinement matrix; strict ordering is fail |
+| graph_shuffle_predictions | consumed_via_provenance_validated_refinement_matrix | The shuffled-graph control is scored for every prespecified control case in the hash-bound refinement matrix; strict ordering is fail |
+| no_geometry_predictions | partial_no_graph_consumed_via_refinement_matrix | The hash-bound matrix consumes the prespecified no-graph control, but a dedicated no-geometry prediction that removes every spatial input remains absent; strict ordering is fail |
+| manual_nucleus_labels | blocked_missing_artifact | No evaluation-only consensus nucleus annotations are available |
+| spot_composition_covariates | blocked_missing_artifact | No frozen independent spot-composition covariates exist |
+| pathologist_regions | blocked_missing_artifact | No frozen pathologist-region artifact exists |
+| published_program_definitions | blocked_missing_artifact | The 15 published program definitions are not frozen locally |
+| author_qc_tissue_fraction | blocked_missing_artifact | The processed RDS materializes the author-QC spot whitelist, but explicit exclusion flags/reasons and the required >=50% per-spot H&E tissue fraction are absent |
+| segmentation_sensitivity_predictions | blocked_missing_artifact | Only the common Space Ranger nucleus set is frozen |
+| regional_384um_features | blocked_missing_artifact | Historical OmiCLIP features contain only 32 and 128 um scales |
+| native_scanvi_checkpoint | ready_recursively_hash_validated_native_scanvi | The external native model directory, decoder gene order and expression-normalization contract, per-specimen latent references, rare-complete prototype banks, and RNA residual geometries (source reference, latent identity, type order, rank, and bounds) were parsed and recursively hash-validated; published integrated annotations remain a declared sensitivity |
 
-| Specimen | HEIR Spearman | Null median | Null empirical 95% interval | HEIR percentile in null | Above upper bound? |
-|---|---:|---:|---:|---:|---|
-| 4066 | -0.0221 | 0.0011 | [-0.0016, 0.0043] | 0.00 | no |
-| 4399 | 0.0057 | 0.0004 | [-0.0017, 0.0028] | 1.00 | yes |
-| 4411 | -0.0035 | -0.0001 | [-0.0030, 0.0023] | 0.00 | no |
+## Locked-v0.2 versus DeepBench-v1 reconciliation
 
-The equal-weight specimen-macro null median is `0.00035`, with empirical 95%
-interval `[-0.00087, 0.00218]`. HEIR exceeds the per-specimen upper bound in
-only one case, so the required at-least-two rule fails. This record shuffle does
-not replace model reruns with shuffled image features or coordinates/graphs.
-
-The historical diagnostic fails the available decision criteria: the macro
-delta is negative, 4066 is below -0.01, and HEIR neither beats draw 0 nor exceeds
-the repeated-null upper bound in at least two specimens. HEIR improves median MSE over the historical
-type mean in 4399 and 4411, but not in 4066.
-
-## Why Locked-v0.2 and DeepBench-v1 differ
-
-The two reports use different estimands. Their numerical differences are
-expected and do not change either negative conclusion.
+The two reports use different estimands, so their values need not match.
 
 | Feature | Locked-v0.2 | DeepBench-v1 |
 |---|---|---|
-| Minimum nuclei per spot | >=1 | >=3 |
-| Cell aggregation | Equal-cell | Historical integrated-reference library-size weighting |
-| Type profile | Historical locked implementation | Pooled raw counts divided by full-library mass |
-| Constant prediction policy | Earlier metric implementation | Correlation fixed at zero when observed expression varies |
-| Shuffle | Historical spatial shuffle | Complete final-cell-record shuffle draw 0 plus separate 100-permutation null |
+| minimum_nuclei_per_spot | >=1 | >=3 |
+| cell_aggregation | equal-cell | historical_integrated_reference_library_size_weighted |
+| type_profile | historical locked implementation | pooled raw counts divided by full-library mass |
+| constant_prediction_policy | earlier metric implementation | correlation fixed at zero when observed expression varies |
+| shuffle | historical spatial shuffle | complete final-cell-record shuffle draw 0; repeated null reported separately |
 
-The corresponding macro median-gene Spearman values are HEIR `-0.0054`, type
-mean `0.0224`, and shuffle `0.0026` in Locked-v0.2, versus HEIR `-0.0066`, hard
-type mean `0.0369`, and final-record shuffle `0.0020` in DeepBench-v1.
+## Type-mean baseline estimands
 
-## Reference and spot audit
+The legacy hard method IDs remain available, but their shared-soft-mass estimand is now explicit.
 
-The historical `reference500.npz` files were exported from the complete
-integrated Seurat objects, not from FFPE snPATHO alone. The source
-`processing_method` fields contain:
+| Method | Reference | Cell profile | Cell RNA mass |
+|---|---|---|---|
+| historical_integrated_hard_type_mean_hard_assigned_type_mass | historical_integrated_multi_workflow_reference | hard_argmax_type_profile | hard_assigned_type_median_library_size |
+| historical_integrated_hard_type_mean | historical_integrated_multi_workflow_reference | hard_argmax_type_profile | shared_soft_expected_type_median_library_size |
+| historical_integrated_soft_type_mean | historical_integrated_multi_workflow_reference | probability_weighted_soft_type_profile | expected_soft_type_median_library_size |
+| historical_integrated_hard_type_mean_equal_cell | historical_integrated_multi_workflow_reference | hard_argmax_type_profile | equal_cell |
+| historical_integrated_soft_type_mean_equal_cell | historical_integrated_multi_workflow_reference | probability_weighted_soft_type_profile | equal_cell |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_hard_assigned_type_mass | matched_ffpe_snpatho_count_reference_integrated_annotation_sensitivity | hard_argmax_type_profile | hard_assigned_type_median_library_size |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean | matched_ffpe_snpatho_count_reference_integrated_annotation_sensitivity | hard_argmax_type_profile | shared_soft_expected_type_median_library_size |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean | matched_ffpe_snpatho_count_reference_integrated_annotation_sensitivity | probability_weighted_soft_type_profile | expected_soft_type_median_library_size |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_equal_cell | matched_ffpe_snpatho_count_reference_integrated_annotation_sensitivity | hard_argmax_type_profile | equal_cell |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean_equal_cell | matched_ffpe_snpatho_count_reference_integrated_annotation_sensitivity | probability_weighted_soft_type_profile | equal_cell |
 
-| Specimen | FFPE snPATHO | Frozen 3-prime | Frozen SNAP snPATHO/Flex | Total in historical reference |
-|---|---:|---:|---:|---:|
-| 4066 | 6,620 | 5,727 | 8,125 | 20,472 |
-| 4399 | 4,471 | 9,163 | 9,446 | 23,080 |
-| 4411 | 8,444 | 8,258 | 10,609 | 27,311 |
+## Reference type support
 
-No separate scFFPE stratum is present in these downloaded integrated objects.
-Consequently, the historical type-mean and pseudobulk controls are explicitly
-named `historical_integrated_*` and cannot be interpreted as the plan's R1
-FFPE-snPATHO-only controls.
+| Specimen | Prediction types | Supported | Missing | Hard fallback cells |
+|---|---:|---:|---|---:|
+| 4066 | 12 | 12 | none | 0 (0.0000) |
+| 4399 | 11 | 11 | none | 0 (0.0000) |
+| 4411 | 9 | 9 | none | 0 (0.0000) |
 
-The source hashes, exact `processing_method` totals, and complete
-workflow-by-`major_annotation` tables are committed in
-[`snpatho_reference_workflow_audit.json`](../reports/snpatho_reference_workflow_audit.json).
-No metadata rows were filtered for that audit.
+FFPE-only R1 count-reference support (integrated-annotation sensitivity):
 
-All prediction type names are supported by both their historical integrated and
-FFPE-only count references:
+| Specimen | Prediction types | Supported | Missing | Hard fallback cells |
+|---|---:|---:|---|---:|
+| 4066 | 12 | 12 | none | 0 (0.0000) |
+| 4399 | 11 | 11 | none | 0 (0.0000) |
+| 4411 | 9 | 9 | none | 0 (0.0000) |
 
-| Specimen | Prediction types | Historical supported | FFPE-R1 supported | Missing | Hard-fallback cells/fraction |
-|---|---:|---:|---:|---|---:|
-| 4066 | 12 | 12 | 12 | none | 0 / 0.0 |
-| 4399 | 11 | 11 | 11 | none | 0 / 0.0 |
-| 4411 | 9 | 9 | 9 | none | 0 / 0.0 |
+Count-reference support and prototype-bank support are distinct:
 
-The scorer now fails closed if a prediction type is absent; it never silently
-substitutes a global reference profile. Thus the recorded global-fallback count
-and soft fallback probability mass are both zero for these cases.
+| Specimen | Count-reference-supported types | Prototype-supported types | Prototype-omitted types |
+|---|---|---|---|
+| 4066 | B_cells, CAF, DC, Endothelial, Epithelial_basal, Epithelial_cancer, Epithelial_luminal, MAST, Macrophage, Myoepithelial, PVL, T_cells | B_cells, CAF, DC, Endothelial, Epithelial_basal, Epithelial_cancer, Epithelial_luminal, MAST, Macrophage, Myoepithelial, PVL, T_cells | none |
+| 4399 | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Lymphatic_endothelial, Macrophage, Mixed_lymphocytes, PVL, RBCs | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Lymphatic_endothelial, Macrophage, Mixed_lymphocytes, PVL, RBCs | none |
+| 4411 | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Macrophage, Mixed_lymphocytes, RBCs | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Macrophage, Mixed_lymphocytes, RBCs | none |
 
-Constant predictions are explicitly counted rather than hidden. The historical
-and FFPE-R1 hard baselines are constant for all 500 genes in 4399; the 4399 soft
-baselines have 2 and 44 constant genes, respectively. FFPE-R1 hard/soft have
-2/1 constant genes in 4066 and 7/3 in 4411. The spatially constant pseudobulk has
-500 in every case. These receive correlation zero when observed expression
-varies; there were no observed-constant exclusions.
+Native rare-complete support is reported separately from the legacy SVD sensitivity bank. Refined-run fairness uses the native bank:
 
-The processed Visium RDS objects materialize the author-QC whitelist. The
-DeepBench proxy additionally requires positive library size and at least three
-assigned Space Ranger nuclei:
+| Specimen | Fairness source | Native supported / omitted | Legacy supported / omitted |
+|---|---|---|---|
+| 4066 | native_scanvi_rare_complete_prototype_bank | B_cells, CAF, DC, Endothelial, Epithelial_basal, Epithelial_cancer, Epithelial_luminal, MAST, Macrophage, Myoepithelial, PVL, T_cells / none | B_cells, CAF, DC, Endothelial, Epithelial_basal, Epithelial_cancer, Macrophage, Myoepithelial, PVL, T_cells / Epithelial_luminal, MAST |
+| 4399 | native_scanvi_rare_complete_prototype_bank | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Lymphatic_endothelial, Macrophage, Mixed_lymphocytes, PVL, RBCs / none | CAF, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Macrophage, PVL / Cholangiocyte, Lymphatic_endothelial, Mixed_lymphocytes, RBCs |
+| 4411 | native_scanvi_rare_complete_prototype_bank | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Macrophage, Mixed_lymphocytes, RBCs / none | CAF, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Macrophage, Mixed_lymphocytes, RBCs / Cholangiocyte |
 
-| Specimen | Author-QC spots | >=1 nucleus | >=3 nuclei | >=5 nuclei |
-|---|---:|---:|---:|---:|
-| 4066 | 4,769 | 4,659 | 4,209 | 3,466 |
-| 4399 | 4,560 | 4,454 | 4,050 | 3,185 |
-| 4411 | 2,812 | 2,758 | 2,668 | 2,496 |
+## Type-probability map audit
 
-The required `>=50%` H&E tissue-fraction field and explicit author-QC exclusion
-flags/reasons are unavailable, so this remains a partial spot-QC proxy.
+Hard occupancy and hard/soft spot-mixture variation are computed over assigned nuclei in the primary evaluated spots.
 
-## What the executable scorer covers
+| Specimen | Occupied hard types | Hard assignments | Mean normalized entropy | Hard-mixture constant types | Soft-mixture constant types |
+|---|---:|---|---:|---|---|
+| 4066 | 2 | B_cells=0, CAF=10091, DC=0, Endothelial=0, Epithelial_basal=0, Epithelial_cancer=28511, Epithelial_luminal=0, MAST=0, Macrophage=0, Myoepithelial=0, PVL=0, T_cells=0 | 0.656925 | B_cells, DC, Endothelial, Epithelial_basal, Epithelial_luminal, MAST, Macrophage, Myoepithelial, PVL, T_cells | none |
+| 4399 | 1 | CAF=0, Cholangiocyte=0, Endothelial=0, Epithelial_cancer=28180, Hepatocyte=0, LSEC=0, Lymphatic_endothelial=0, Macrophage=0, Mixed_lymphocytes=0, PVL=0, RBCs=0 | 0.382165 | CAF, Cholangiocyte, Endothelial, Epithelial_cancer, Hepatocyte, LSEC, Lymphatic_endothelial, Macrophage, Mixed_lymphocytes, PVL, RBCs | none |
+| 4411 | 2 | CAF=0, Cholangiocyte=0, Endothelial=0, Epithelial_cancer=31768, Hepatocyte=1857, LSEC=0, Macrophage=0, Mixed_lymphocytes=0, RBCs=0 | 0.510953 | CAF, Cholangiocyte, Endothelial, LSEC, Macrophage, Mixed_lymphocytes, RBCs | none |
 
-- hash revalidation of the immutable locked plan, report, prediction, truth,
-  reference, checkpoint, panel, and target-isolation contracts;
-- historical integrated-reference library-size weighting and equal-cell spot
-  aggregation performed in linear space; the historical weights are not
-  assay-corrected biological RNA-mass estimates;
-- hard-argmax and probability-weighted soft predicted-cell-type means constructed
-  from pooled raw counts divided by pooled full-library mass;
-- all-cell, selective, equal-cell, historical integrated and FFPE-R1 hard/soft
-  type-mean, pseudobulk, and complete final-cell-record shuffle views;
-- gene Spearman/Pearson/MSE/MAE/concordance, expression-detection AUROC,
-  top-10% hotspot Dice/Jaccard, location cosine/Spearman/MAE, and Moran's-I
-  agreement;
-- an exact-size top-10% hotspot rule with descending expression and ascending
-  frozen spot-row index as the deterministic cutoff tie breaker;
-- Moran's I on a directed, unweighted 6-nearest-neighbor graph that is neither
-  symmetrized nor row-standardized; this is a historical sensitivity graph, not
-  Visium hex-lattice adjacency;
-- the required rule that a constant prediction receives correlation zero when
-  observed expression varies, while constant observed genes are excluded with
-  an explicit reason;
-- per-gene TSV rows, explicit constant counts, equal-weight specimen macro
-  summaries, paired deltas, 100-per-specimen shuffle-null summaries, and 10,000
-  retrospective bootstrap replicates.
+## Historical round-0 diagnostic
 
-The repeated final-cell-record shuffle is not the plan's shuffled-image-feature or
-coordinate-shuffled-graph control. The v0.2 run also used target-H&E-derived OOD
-calibration, making it noncompliant with the external freeze for both A1 and A2.
-Space Ranger remains the default and common segmentation, but its historical
-confidence was substituted as constant `1.0`; therefore the refinement
-confidence gate is vacuous until a calibrated measurement is supplied.
+The paired statistic is `median_g(rho_HEIR,g - rho_historical-integrated-hard-type-mean,g)`; it is not the difference between the two marginal medians.
 
-## Still blocked
+| Specimen | Median paired per-gene delta | MSE improvement vs hard type mean |
+|---|---:|---:|
+| 4066 | -0.089628 | -0.020298 |
+| 4399 | 0.005702 | 0.003778 |
+| 4411 | 0.006076 | 0.002119 |
 
-The executable readiness ledger records the exact status and reason for every
-missing track. Major blockers are refined and five-seed predictions,
-alternative-workflow references/predictions, wrong-donor predictions,
-generic-atlas and H&E-only runs,
-image/graph shuffles, 384-µm features, program definitions, manual nucleus
-labels, composition covariates, pathologist regions, segmentation sensitivity,
-spatial blocks, and a native scANVI checkpoint.
+## Repeated final-cell-record shuffle null
 
-The R1 manifest is consumed as a retrospective sensitivity. Other registered
-optional artifacts remain `registered_not_implemented` until a schema-specific
-scorer consumes them; merely providing a path can never mark the full plan
-complete.
+The preserved draw-0 method is one member of a 100-per-specimen null. Expression and its library-size weight move together. This retrospective record shuffle does not replace image-feature or coordinate/graph reruns.
 
-The FFPE-only counts and SVD fallback prototypes are hash-manifested in
-[`snpatho_r1_reference_manifest.json`](../reports/snpatho_r1_reference_manifest.json).
-The scorer consumes the counts for hard/soft type-mean sensitivities using
-FFPE-only type-median library-size weights. Those labels came from the published
-integrated-workflow annotation, so these are not clean primary R1 results. The
-native-scANVI prototype-only/no-residual prediction and redesigned-refinement
-contrast remain unavailable.
+| Specimen | HEIR median-gene Spearman | Null median | Null empirical 95% interval | HEIR percentile in null | Above null upper? |
+|---|---:|---:|---:|---:|---|
+| 4066 | -0.022134 | 0.001058 | [-0.001573, 0.004288] | 0.000 | no |
+| 4399 | 0.005702 | 0.000396 | [-0.001688, 0.002768] | 1.000 | yes |
+| 4411 | -0.003504 | -0.000088 | [-0.002973, 0.002320] | 0.000 | no |
 
-## Reproduce
+The equal-weight specimen-macro null median was **0.000347**, with empirical 95% interval **[-0.000867, 0.002183]**. HEIR exceeded the specimen null upper bound in one of three cases, so the prespecified at-least-two rule failed.
 
-```bash
-conda run -n hne python scripts/benchmark_snpatho_deepbench.py \
-  --plan configs/experiments/snpatho_deepbench_v1.yaml \
-  --output artifacts/snpatho/deepbench_v1/report.json \
-  --tsv artifacts/snpatho/deepbench_v1/report.tsv \
-  --markdown artifacts/snpatho/deepbench_v1/report.md
-```
+## Equal-weight specimen macro summaries
 
-The final 100-permutation local run completed in 143.94 seconds with
-approximately 1.69 GiB peak RSS.
-This command re-scores frozen predictions; it does not rerun historical CUDA
-model inference. The compact committed result is
-`reports/snpatho_deepbench_v1_summary.json`; the full JSON/TSV/Markdown outputs
-remain in ignored `artifacts/` storage.
+| Method | Median-gene Spearman | Median-gene MSE | Spot coverage |
+|---|---:|---:|---:|
+| heir_round0_historical_integrated_reference_library_size_weighted | -0.006645 | 0.119435 | 1.000000 |
+| heir_round0_historical_integrated_reference_library_size_weighted_nonabstained | -0.002905 | 0.112608 | 0.936638 |
+| heir_round0_equal_cell | -0.006968 | 0.119504 | 1.000000 |
+| historical_integrated_hard_type_mean_hard_assigned_type_mass | 0.036932 | 0.114915 | 1.000000 |
+| historical_integrated_hard_type_mean | 0.036853 | 0.114635 | 1.000000 |
+| historical_integrated_soft_type_mean | 0.028037 | 0.138230 | 1.000000 |
+| historical_integrated_hard_type_mean_equal_cell | 0.036932 | 0.114536 | 1.000000 |
+| historical_integrated_soft_type_mean_equal_cell | 0.028335 | 0.138615 | 1.000000 |
+| historical_integrated_snrna_pseudobulk | 0.000000 | 0.118924 | 1.000000 |
+| heir_final_cell_record_shuffle_historical_integrated_reference_library_size_weighted | 0.001978 | 0.119865 | 1.000000 |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_hard_assigned_type_mass | -0.033400 | 0.173240 | 1.000000 |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean | -0.032600 | 0.176071 | 1.000000 |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean | -0.038313 | 0.174913 | 1.000000 |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_equal_cell | -0.029407 | 0.201001 | 1.000000 |
+| r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean_equal_cell | -0.035291 | 0.199777 | 1.000000 |
+| refined_heir_matched_ffpe_r1_reference_library_size_weighted | -0.040944 | 0.165701 | 1.000000 |
 
-The locked report SHA-256 remains
-`d002e601ffc0f1b69d141d507906f839815d305af9055780b38ff72bb4c12d65`.
-The final DeepBench plan/JSON/TSV/Markdown SHA-256 values are recorded in
-`reports/snpatho_deepbench_v1_summary.json`.
+## Constant-prediction audit
+
+Only nonzero counts are listed. A constant prediction receives correlation zero when observed expression varies; an observed-constant gene is excluded.
+
+| Specimen | Method | Prediction-constant scored zero | Observed-constant excluded |
+|---|---|---:|---:|
+| 4066 | historical_integrated_snrna_pseudobulk | 500 | 0 |
+| 4066 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_hard_assigned_type_mass | 1 | 0 |
+| 4066 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean | 1 | 0 |
+| 4066 | r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean | 1 | 0 |
+| 4066 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_equal_cell | 1 | 0 |
+| 4066 | r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean_equal_cell | 1 | 0 |
+| 4399 | historical_integrated_hard_type_mean_hard_assigned_type_mass | 500 | 0 |
+| 4399 | historical_integrated_hard_type_mean | 500 | 0 |
+| 4399 | historical_integrated_soft_type_mean | 2 | 0 |
+| 4399 | historical_integrated_hard_type_mean_equal_cell | 500 | 0 |
+| 4399 | historical_integrated_soft_type_mean_equal_cell | 2 | 0 |
+| 4399 | historical_integrated_snrna_pseudobulk | 500 | 0 |
+| 4399 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_hard_assigned_type_mass | 56 | 0 |
+| 4399 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean | 56 | 0 |
+| 4399 | r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean | 44 | 0 |
+| 4399 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_equal_cell | 56 | 0 |
+| 4399 | r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean_equal_cell | 44 | 0 |
+| 4411 | historical_integrated_snrna_pseudobulk | 500 | 0 |
+| 4411 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_hard_assigned_type_mass | 3 | 0 |
+| 4411 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean | 3 | 0 |
+| 4411 | r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean | 3 | 0 |
+| 4411 | r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_equal_cell | 3 | 0 |
+| 4411 | r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean_equal_cell | 3 | 0 |
+
+Macro mean of specimen median paired per-gene Spearman deltas: **-0.025950**.
+
+Bootstrap fraction with delta > 0: **0.2924** (this is neither a p-value nor a posterior probability).
+
+Requested refined-versus-type-mean endpoint: **developmental_joint_contrast_only_not_primary**.
+
+Developmental seed-17 joint matched-R1 contrast: **passes_developmental_joint_contrast**. This one-seed contrast is reported separately and cannot unlock a full-primary claim.
+
+Full-primary refinement matrix: completeness **complete**; strict ordering **fail**.
+
+Spot QC is a partial proxy. Inclusion in the processed RDS materializes the author-QC whitelist, but explicit per-spot exclusion flags/reasons and the required >=50% H&E tissue-fraction field are not present in the historical truth contract.

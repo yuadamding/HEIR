@@ -78,7 +78,13 @@ class RefinementConfig:
     maximum_prior_total_variation: float = 0.10
     max_anchors_per_class: int = 10000
     stable_rounds_required: int = 1
-    objective_stability_tolerance: float = 0.01
+    maximum_validation_loss_degradation: float = 0.01
+    objective_relative_stability_tolerance: float = 0.01
+    round_selection_mode: str = "fixed"
+    maximum_spatial_score_degradation: float = 0.0
+    # Deprecated compatibility field for v0.1 experiment files/checkpoints.
+    # When supplied, it overrides both explicit tolerances.
+    objective_stability_tolerance: Optional[float] = None
     # Anchor lifecycle requires two agreeing rounds before an anchor becomes
     # trusted, so a one-round broad phase cannot affect parent supervision.
     broad_refinement_rounds: int = 2
@@ -100,8 +106,19 @@ class RefinementConfig:
             raise ValueError("maximum_prior_total_variation must be non-negative")
         if self.max_anchors_per_class <= 0 or self.stable_rounds_required <= 0:
             raise ValueError("anchor cap and stable_rounds_required must be positive")
-        if self.objective_stability_tolerance < 0:
+        if self.maximum_validation_loss_degradation < 0:
+            raise ValueError("maximum_validation_loss_degradation must be non-negative")
+        if self.objective_relative_stability_tolerance < 0:
+            raise ValueError("objective_relative_stability_tolerance must be non-negative")
+        if (
+            self.objective_stability_tolerance is not None
+            and self.objective_stability_tolerance < 0
+        ):
             raise ValueError("objective_stability_tolerance must be non-negative")
+        if self.round_selection_mode not in {"fixed", "spatial", "weak"}:
+            raise ValueError("round_selection_mode must be fixed, spatial, or weak")
+        if self.maximum_spatial_score_degradation < 0:
+            raise ValueError("maximum_spatial_score_degradation must be non-negative")
         if self.broad_refinement_rounds < 0 or self.broad_refinement_rounds > self.maximum_rounds:
             raise ValueError("broad_refinement_rounds must lie within maximum_rounds")
         if self.broad_refinement_rounds == 1:
@@ -121,6 +138,18 @@ class RefinementConfig:
     @property
     def prior_new_weight(self) -> float:
         return 1.0 - self.prior_old_weight
+
+    @property
+    def validation_loss_degradation(self) -> float:
+        if self.objective_stability_tolerance is not None:
+            return self.objective_stability_tolerance
+        return self.maximum_validation_loss_degradation
+
+    @property
+    def relative_stability_tolerance(self) -> float:
+        if self.objective_stability_tolerance is not None:
+            return self.objective_stability_tolerance
+        return self.objective_relative_stability_tolerance
 
 
 @dataclass(frozen=True)

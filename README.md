@@ -24,7 +24,8 @@ The repository contains a runnable HEIR core and a development-only refinement r
 - a transferable RNA VAE fallback, scVI-decoder export, and frozen scGPT teacher objective;
 - shrunken sample/type RNA prototypes;
 - a graph-aware, hierarchical prototype model with a zero-initialized,
-  type-conditioned low-rank residual whose latent L2 norm is hard-bounded;
+  RNA-PCA-informed type-conditioned low-rank residual whose latent L2 norm is
+  bounded relative to measured type-specific molecular geometry;
 - differentiable unbalanced optimal transport with prespecified fixed unknown
   mass, or explicit unknown targets, in the primary path;
 - composition, pseudobulk, marker/program, residual, cycle, hierarchy, graph, anchor, and uncertainty objectives;
@@ -32,9 +33,10 @@ The repository contains a runnable HEIR core and a development-only refinement r
 - two parent-gated rounds followed by fine refinement, with an EMA teacher,
   revocable anchors, independent-view gates, a validated round-0 rollback target,
   and fixed measured priors by default;
-- H&E-only distillation, calibration, OOD detection, abstention, v7
-  known-state-conditional inference intervals (suppressed on abstention while
-  legacy v2-v6 arrays remain labeled and unchanged), biological baselines, and
+- H&E-only distillation, calibration, OOD detection, abstention, v8
+  known-state-conditional expression availability and intervals (public cell
+  means are fail-closed on abstention while finite internal aggregate values
+  and legacy migrations remain explicit), biological baselines, and
   donor-aware metrics;
 - pull-request and main-branch CI for formatting, lint, and the unit/synthetic suite;
 - synthetic, unit, and local-data smoke paths.
@@ -85,6 +87,19 @@ conda run -n hne heir build-prototypes \
 ```
 
 The SVD is fitted once on an allowed development reference and reused with `--latent-transform` for every other specimen; HEIR rejects independently refitted or merely same-width latent spaces. This B1 command is a local smoke path, not the paper-grade molecular model. For the latter, use donor-validated scVI/scANVI and `SCVIAdapter.export_transferable_decoder_checkpoint`, which writes the gene order, training donors, latent ID, and decoder-only flag required by `heir train`.
+
+For snPATHO, the native FFPE-only CUDA stage is reproducible but remains in its
+own heavy environment. Its native checkpoint and distilled decoder are written
+to `../HEIR_assets/pretrained`, while only hash-bound latent/reference artifacts
+return to the ignored run directory:
+
+```bash
+PYTHONPATH=src conda run -n scdiffeq python scripts/train_snpatho_scanvi.py
+```
+
+The current input labels are the published integrated-workflow annotations;
+the script records them as an annotation sensitivity and does not call them an
+independent clean reannotation.
 
 When `--reference-with-latent` is used, downstream `assemble-batch` must consume
 that emitted reference. The prototype artifact is hash-bound to the enriched
@@ -157,8 +172,35 @@ explicitly labeled hard/soft integrated-annotation sensitivities, writes per-gen
 and equal-weight specimen summaries, and records every
 unavailable track without substituting weaker evidence. The available
 historical round-0 diagnostic is also negative (equal-weight mean across
-specimens of `median_g(rho_HEIR,dg - rho_hard-type-mean,dg)`: -0.0259); the requested refined
-FFPE-snPATHO-only primary endpoint is not yet testable.
+specimens of `median_g(rho_HEIR,dg - rho_hard-type-mean,dg)`: -0.0259).
+
+The native-scANVI refined endpoint is now testable as an opened-cohort
+developmental sensitivity, not as the requested clean-R1 primary endpoint. The
+native model uses FFPE-snPATHO counts with the published integrated-workflow
+annotations; those labels are not an independent clean reannotation. All five
+prespecified endpoint seeds (17, 41, 89, 131, and 197) and the three control
+seeds (17, 41, and 89) are complete. The refinement matrix scored all 93 of 93
+requested artifacts, but strict ordering failed: 49 of 108 checks passed and 59
+failed. All 18 directed wrong-donor cases are present; their all-directed mean
+refined-minus-control paired median gene-Spearman delta is -0.0040. Its overall
+status is `blocked_evidence`, with missing clean independent
+reannotation, generic-atlas, label-permutation, state-omission,
+reference-downsampling, and untouched-external-cohort evidence. The seed-17
+fixed unknown-mass sweep is also blocked: only 1 of 15 paired cases has both
+checkpoints bound to a serialized fixed-mass setting. The other 14 cases cannot
+be rescued by a post-hoc recipe-adoption manifest. See the hash-bound
+[compact refinement-matrix summary](reports/snpatho_refinement_matrix_v1_summary.json).
+The machine-readable [unknown-mass evidence report](reports/snpatho_unknown_mass_sensitivity_v1.json)
+records the checkpoint-provenance failures and the one evaluable pair.
+The v2 refinement run manifest recursively validates all 138 canonical stage
+recipes and current output hashes. Its final validation pass conservatively
+records all 138 outputs as adopted, verifies the source-bound CLI identity and
+all shuffle transformation hashes, and honestly records
+`execution_provenance_verified=false`; the matrix remains development evidence
+and cannot unlock a full-primary claim even if its numerical ordering passed.
+Full per-gene JSON, TSV, and Markdown reports remain under the ignored
+`artifacts/` tree; only compact summaries and manifests under `reports/` are
+tracked.
 
 For refinement development, use only a development cohort with spatial truth.
 The separate orchestrator enforces the prespecified
@@ -252,7 +294,8 @@ prespecified B2 exclusion). Its current local derivatives do not provide the
 registered spatial truth required to validate redesigned refinement.
 
 The three snPATHO samples (4066, 4399, 4411) have a completed historical locked
-round-0 Visium benchmark, but the clean-R1/refined full plan remains incomplete
+round-0 Visium benchmark and a completed native-scANVI refinement development
+matrix. The clean-independent-annotation/full-primary plan remains incomplete,
 and these already opened cases cannot serve as a new untouched confirmation.
 Their spatial measurements must not enter personalized optimization. No
 downloaded cohort currently supports the full proposed refined validation claim.
@@ -260,8 +303,9 @@ downloaded cohort currently supports the full proposed refined validation claim.
 See [data.md](docs/data.md), [method.md](docs/method.md),
 [validation.md](docs/validation.md), and
 [snpatho_pipeline.md](docs/snpatho_pipeline.md), and
-[snpatho_deepbench.md](docs/snpatho_deepbench.md) for the scientific and
-engineering contracts and retrospective benchmark status.
+[snpatho_deepbench.md](docs/snpatho_deepbench.md), plus
+[refinement_redesign.md](docs/refinement_redesign.md), for the scientific and
+engineering contracts and retrospective development status.
 
 ## Repository map
 

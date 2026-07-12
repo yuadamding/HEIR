@@ -1,0 +1,53 @@
+{
+  "schema": "heir.snpatho_scanvi_r1_manifest.v1",
+  "status": "native_scanvi_with_published_integrated_annotation_sensitivity",
+  "workflow_filter": "processing_method == FFPE_snPATHO",
+  "annotation_provenance": "major_annotation copied from the published integrated-workflow object; not an independent clean reannotation",
+  "expression_space_id": "log1p-cpm-10000-v1",
+  "expression_transform": "full_library_10000_then_panel_log1p_v2",
+  "gene_panel_sha256": "22ddb91188b3b124d5cf3ec0f7ae81017399d141e39647b0dce80675119fe927",
+  "native_model": {
+    "external_path": "../HEIR_assets/pretrained/snpatho_scanvi_r1_v1",
+    "sha256": "7eaa88c03f9578eaa06c2db9b8e548220b19e740b92d841fd8aed25a5a0f9c89",
+    "scvi_tools_version": "1.4.2",
+    "scvi_epochs": 100,
+    "scanvi_epochs": 50,
+    "latent_dim": 32,
+    "cuda": true
+  },
+  "distilled_decoder": {
+    "external_path": "../HEIR_assets/pretrained/snpatho_scanvi_r1_v1_decoder.pt",
+    "sha256": "c50c3e9c62c347785a90fc9ae557e3bcd2b34a409d648e72cd27a776088e78cf",
+    "distillation_epochs": 100
+  },
+  "latent_space_id": "sha256:7eaa88c03f9578eaa06c2db9b8e548220b19e740b92d841fd8aed25a5a0f9c89",
+  "specimens": {
+    "4066": {
+      "cells": 6620,
+      "latent_reference": "artifacts/snpatho/r1_scanvi/4066/reference500_scanvi.npz",
+      "latent_reference_sha256": "b59d7ff28b8027db619988f4c2367eebacc6b8611114ddfdf3ee4d87337fe717",
+      "rare_complete_prototypes": "artifacts/snpatho/r1_scanvi/4066/prototypes_rare_complete.npz",
+      "rare_complete_prototypes_sha256": "976930188896d975490f9bcd9353425d8b6ddb2f13b593b806b0d002bcca6575",
+      "residual_geometry": "artifacts/snpatho/r1_scanvi/4066/residual_geometry_rare_complete.npz",
+      "residual_geometry_sha256": "e0360ccbbb8985d206508f36956fe6e9a6faa30a938dcefee5e4ea5a1ae7eac0"
+    },
+    "4399": {
+      "cells": 4471,
+      "latent_reference": "artifacts/snpatho/r1_scanvi/4399/reference500_scanvi.npz",
+      "latent_reference_sha256": "37f84d1faeed30d3973c279f02e4d92d320525531e8f4f607a2590d473b11db7",
+      "rare_complete_prototypes": "artifacts/snpatho/r1_scanvi/4399/prototypes_rare_complete.npz",
+      "rare_complete_prototypes_sha256": "c600a15bdd6f36c9062cb53ca77ab5c826f41ee09ec58ee89ca7b850ab467d78",
+      "residual_geometry": "artifacts/snpatho/r1_scanvi/4399/residual_geometry_rare_complete.npz",
+      "residual_geometry_sha256": "d8a16846d6b2ae9344de601b09191161d244957e33a8134ff30ad8c342f2a985"
+    },
+    "4411": {
+      "cells": 8444,
+      "latent_reference": "artifacts/snpatho/r1_scanvi/4411/reference500_scanvi.npz",
+      "latent_reference_sha256": "1e58d39702d55e51e1aa2331e1ced682571046bf69ea46fe2f92851c85011fa7",
+      "rare_complete_prototypes": "artifacts/snpatho/r1_scanvi/4411/prototypes_rare_complete.npz",
+      "rare_complete_prototypes_sha256": "797726217a7e03670468909668c3193a463a4616bdee5ff98a79c7f5c173d060",
+      "residual_geometry": "artifacts/snpatho/r1_scanvi/4411/residual_geometry_rare_complete.npz",
+      "residual_geometry_sha256": "87c960890e00c13f4477fceaa7db3c6aa05b26123634c21eda24528144b2cc46"
+    }
+  }
+}

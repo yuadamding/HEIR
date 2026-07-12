@@ -41,6 +41,7 @@ class RefinementRound:
     uot_marginal_residual: float = 0.0
     prior_total_variation: float = 0.0
     committed: bool = True
+    spatial_validation_score: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,8 @@ class RefinementResult:
     sample_prototype_weights: Mapping[str, np.ndarray]
     round_zero_validation_loss: Optional[float] = None
     selected_round: int = 0
+    round_zero_spatial_validation_score: Optional[float] = None
+    round_state_dicts: Tuple[Mapping[str, torch.Tensor], ...] = ()
 
 
 class IterativeRefiner:
@@ -60,11 +63,17 @@ class IterativeRefiner:
         trainer_factory: Callable[[], HEIRTrainer],
         config: RefinementConfig,
         device: str = "cpu",
+        spatial_validation_scorer: Optional[
+            Callable[[torch.nn.Module, Sequence[HEIRTrainingBatch]], float]
+        ] = None,
     ) -> None:
         config.validate()
         self.trainer_factory = trainer_factory
         self.config = config
         self.device = resolve_device(device)
+        self.spatial_validation_scorer = spatial_validation_scorer
+        if self.config.round_selection_mode == "spatial" and spatial_validation_scorer is None:
+            raise ValueError("spatial round selection requires a frozen spatial validation scorer")
 
     @staticmethod
     def _model_state(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
@@ -192,9 +201,14 @@ class IterativeRefiner:
                 device=self.device,
                 dtype=values.morphology.dtype,
             )
-            parent_constraints = parent_tensor.index_select(
-                1,
-                torch.tensor(mapping, dtype=torch.long, device=self.device),
+            # The hierarchical fine posterior already contains the parent
+            # posterior once.  Use a binary parent-support mask here so broad
+            # transport cannot multiply the same evidence into compatibility a
+            # second time.  Ties are resolved deterministically by argmax.
+            selected_parent = parent_tensor.argmax(dim=1)
+            fine_parent = torch.tensor(mapping, dtype=torch.long, device=self.device)
+            parent_constraints = (fine_parent.unsqueeze(0) == selected_parent.unsqueeze(1)).to(
+                dtype=values.morphology.dtype
             )
             constraints = (
                 parent_constraints if constraints is None else constraints * parent_constraints
@@ -267,6 +281,7 @@ class IterativeRefiner:
             )
         anchor_states: Dict[Tuple[str, str, str, str], AnchorLifecycle] = {}
         audit: List[RefinementRound] = []
+        candidate_states: List[Mapping[str, torch.Tensor]] = []
         stable_rounds = 0
         reason = "maximum_rounds"
         working_batches = list(training_batches)
@@ -288,6 +303,14 @@ class IterativeRefiner:
             trainer,
             validation_batches,
         )
+        round_zero_spatial_score = (
+            None
+            if self.spatial_validation_scorer is None
+            else float(self.spatial_validation_scorer(trainer.model, validation_batches))
+        )
+        if round_zero_spatial_score is not None and not np.isfinite(round_zero_spatial_score):
+            raise FloatingPointError("non-finite round-0 spatial validation score")
+        global_best_spatial_score = round_zero_spatial_score
         global_best_loss = round_zero_validation_loss
         global_best_round = 0
         global_best_state = self._model_state(trainer.model)
@@ -632,12 +655,28 @@ class IterativeRefiner:
             )
             objective_relative_change = float(relative.max(initial=0.0))
             validation_loss = float(result.best_validation_loss)
-            # Reuse the configured absolute objective tolerance as the
-            # trust-region delta to preserve the public configuration API.
-            round_committed = bool(
+            candidate_states.append(self._model_state(trainer.model))
+            weak_safety_passed = bool(
                 np.isfinite(validation_loss)
-                and validation_loss <= global_best_loss + self.config.objective_stability_tolerance
+                and validation_loss <= global_best_loss + self.config.validation_loss_degradation
             )
+            spatial_validation_score = (
+                None
+                if self.spatial_validation_scorer is None
+                else float(self.spatial_validation_scorer(trainer.model, validation_batches))
+            )
+            if spatial_validation_score is not None and not np.isfinite(spatial_validation_score):
+                spatial_validation_score = -float("inf")
+            spatial_selection_passed = bool(
+                self.config.round_selection_mode != "spatial"
+                or (
+                    global_best_spatial_score is not None
+                    and spatial_validation_score is not None
+                    and spatial_validation_score
+                    >= global_best_spatial_score - self.config.maximum_spatial_score_degradation
+                )
+            )
+            round_committed = weak_safety_passed and spatial_selection_passed
             audit.append(
                 RefinementRound(
                     round_id=round_id,
@@ -659,6 +698,7 @@ class IterativeRefiner:
                     uot_marginal_residual=mean_marginal_residual,
                     prior_total_variation=float(prior_total_variation),
                     committed=round_committed,
+                    spatial_validation_score=spatial_validation_score,
                 )
             )
             if not round_committed:
@@ -677,7 +717,34 @@ class IterativeRefiner:
             working_batches = refined_batches
             anchor_states = candidate_anchor_states
             committed_priors = {key: value.copy() for key, value in candidate_priors.items()}
-            if validation_loss <= global_best_loss:
+            if self.config.round_selection_mode == "fixed":
+                # Target cohorts use a development-locked round count. Weak
+                # objectives are safety checks only; every safe fixed round is
+                # retained rather than interpreted as spatial evidence.
+                global_best_loss = validation_loss
+                global_best_round = round_id
+                global_best_state = self._model_state(trainer.model)
+                global_best_teacher_state = self._teacher_state(teacher)
+                global_best_batches = list(working_batches)
+                global_best_anchors = self._anchor_states(anchor_states)
+                global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
+            elif self.config.round_selection_mode == "spatial" and (
+                global_best_spatial_score is None
+                or (
+                    spatial_validation_score is not None
+                    and spatial_validation_score > global_best_spatial_score
+                )
+            ):
+                assert spatial_validation_score is not None
+                global_best_spatial_score = spatial_validation_score
+                global_best_loss = validation_loss
+                global_best_round = round_id
+                global_best_state = self._model_state(trainer.model)
+                global_best_teacher_state = self._teacher_state(teacher)
+                global_best_batches = list(working_batches)
+                global_best_anchors = self._anchor_states(anchor_states)
+                global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
+            elif self.config.round_selection_mode == "weak" and validation_loss <= global_best_loss:
                 global_best_loss = validation_loss
                 global_best_round = round_id
                 global_best_state = self._model_state(trainer.model)
@@ -687,12 +754,13 @@ class IterativeRefiner:
                 global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
             previous_objectives = objective_values
             objectives_stable = (
-                objective_relative_change <= self.config.objective_stability_tolerance
+                objective_relative_change <= self.config.relative_stability_tolerance
             )
             # A stable parent phase is not terminal: at least one fine round
             # must run after the configured broad schedule.
             if (
-                not parent_only_round
+                self.config.round_selection_mode != "fixed"
+                and not parent_only_round
                 and previous_total
                 and changed_fraction < 0.01
                 and objectives_stable
@@ -710,4 +778,6 @@ class IterativeRefiner:
             global_best_priors,
             round_zero_validation_loss,
             global_best_round,
+            round_zero_spatial_score,
+            tuple(candidate_states),
         )

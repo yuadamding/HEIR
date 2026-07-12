@@ -271,6 +271,11 @@ class HEIRModel(nn.Module):
             self.parent_type_head = nn.Linear(hidden_dim, config.num_parent_types)
             mapping = torch.tensor(config.fine_to_parent, dtype=torch.long)
         self.register_buffer("fine_to_parent_index", mapping, persistent=True)
+        self.register_buffer(
+            "residual_type_max_norms",
+            torch.full((config.num_cell_types,), config.residual_max_norm),
+            persistent=False,
+        )
 
         self.prototype_query_head = nn.Linear(hidden_dim, config.latent_dim)
         self.residual_mu_head: Optional[nn.Linear]
@@ -301,6 +306,12 @@ class HEIRModel(nn.Module):
             # RNA prototype before any image-supported correction is learned.
             nn.init.zeros_(self.residual_coefficient_head.weight)
             nn.init.zeros_(self.residual_coefficient_head.bias)
+            # Start stochastic refinement close to the routed RNA prototype as
+            # well.  A random variance head made training samples depart from
+            # the prototype even though the deterministic coefficient mean was
+            # exactly zero.
+            nn.init.zeros_(self.residual_logvar_head.weight)
+            nn.init.constant_(self.residual_logvar_head.bias, -6.0)
             nn.init.zeros_(self.residual_gate_head.weight)
             nn.init.constant_(self.residual_gate_head.bias, -2.0)
         self.unknown_head = nn.Linear(hidden_dim, 1)
@@ -697,7 +708,10 @@ class HEIRModel(nn.Module):
                 type_probabilities,
                 self.residual_type_basis,
             )
-            residual_gate = self.config.residual_max_norm * torch.sigmoid(
+            cell_residual_max_norm = type_probabilities @ self.residual_type_max_norms.to(
+                dtype=type_probabilities.dtype
+            )
+            residual_gate = cell_residual_max_norm * torch.sigmoid(
                 self.residual_gate_head(embedding).squeeze(-1)
             )
             residual_mu = self._bounded_low_rank_residual(
@@ -906,6 +920,59 @@ class HEIRModel(nn.Module):
         for parameter in self.expression_decoder.parameters():
             parameter.requires_grad_(not freeze)
 
+    @torch.no_grad()
+    def configure_residual_geometry(
+        self,
+        type_bases: Tensor,
+        type_max_norms: Tensor,
+        *,
+        freeze_basis: bool = True,
+    ) -> None:
+        """Install RNA-derived within-type bases and calibrated latent bounds.
+
+        ``type_bases`` must contain one orthonormal latent-by-rank basis per
+        modeled type. ``type_max_norms`` expresses the allowed displacement in
+        the same frozen RNA latent geometry. The configuration scalar remains
+        only the backward-compatible fallback before geometry is installed.
+        """
+
+        if self.config.legacy_unrestricted_residual or self.residual_type_basis is None:
+            raise ValueError("RNA residual geometry requires the restricted residual model")
+        expected_basis = (
+            self.config.num_cell_types,
+            self.config.latent_dim,
+            self.config.residual_rank,
+        )
+        if tuple(type_bases.shape) != expected_basis:
+            raise ValueError("type_bases has the wrong shape")
+        if tuple(type_max_norms.shape) != (self.config.num_cell_types,):
+            raise ValueError("type_max_norms must contain one value per cell type")
+        if not torch.isfinite(type_bases).all() or not torch.isfinite(type_max_norms).all():
+            raise ValueError("residual geometry must be finite")
+        if bool((type_max_norms <= 0).any()):
+            raise ValueError("type_max_norms must be positive")
+        gram = type_bases.transpose(1, 2) @ type_bases
+        identity = torch.eye(
+            self.config.residual_rank,
+            device=type_bases.device,
+            dtype=type_bases.dtype,
+        ).expand_as(gram)
+        if not torch.allclose(gram, identity, atol=1.0e-4, rtol=1.0e-4):
+            raise ValueError("type_bases must be orthonormal")
+        self.residual_type_basis.copy_(
+            type_bases.to(
+                device=self.residual_type_basis.device,
+                dtype=self.residual_type_basis.dtype,
+            )
+        )
+        self.residual_type_max_norms.copy_(
+            type_max_norms.to(
+                device=self.residual_type_max_norms.device,
+                dtype=self.residual_type_max_norms.dtype,
+            )
+        )
+        self.residual_type_basis.requires_grad_(not freeze_basis)
+
     def checkpoint(self) -> Dict[str, Any]:
         """Create a self-describing checkpoint."""
 
@@ -913,6 +980,12 @@ class HEIRModel(nn.Module):
             "schema": _HEIR_CHECKPOINT_SCHEMA,
             "config": self.config.to_dict(),
             "state_dict": self.state_dict(),
+            "residual_geometry": {
+                "type_max_norms": self.residual_type_max_norms.detach().cpu(),
+                "basis_trainable": bool(
+                    self.residual_type_basis is not None and self.residual_type_basis.requires_grad
+                ),
+            },
         }
 
     @classmethod
@@ -944,6 +1017,14 @@ class HEIRModel(nn.Module):
             config_values["legacy_unrestricted_residual"] = True
         model = cls(HEIRConfig.from_dict(config_values))
         model.load_state_dict(checkpoint["state_dict"], strict=strict)
+        geometry = checkpoint.get("residual_geometry")
+        if geometry is not None and not model.config.legacy_unrestricted_residual:
+            norms = torch.as_tensor(geometry["type_max_norms"])
+            if norms.shape != model.residual_type_max_norms.shape:
+                raise ValueError("checkpoint residual geometry has the wrong type count")
+            model.residual_type_max_norms.copy_(norms.to(model.residual_type_max_norms))
+            assert model.residual_type_basis is not None
+            model.residual_type_basis.requires_grad_(bool(geometry.get("basis_trainable", True)))
         return model
 
 

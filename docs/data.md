@@ -20,7 +20,7 @@ mean that every derived artifact has already been built.
 
 | Downloaded data | Full proposed benchmark locally complete? | Valid role now | Decisive limitation |
 |---|---|---|---|
-| snPATHO-seq breast cancer (3 specimens) | **No; historical round-0 benchmark only** | Truth-scored retrospective development/diagnostic | No redesigned refined predictions or clean reannotated/scANVI R1; all three cases have been opened and cannot be a new untouched confirmation |
+| snPATHO-seq breast cancer (3 specimens) | **No; native-scANVI development matrix complete, full primary blocked** | Historical result plus redesigned matched-R1 development matrix | All three truths were opened; published integrated annotations are not an independent clean reannotation, so this cannot be a new untouched confirmation |
 | NatCommun/MOSAIC (15 usable sections, 13 donors) | **Not currently** | Personalized inference, matched-vs-generic/wrong-reference ablations, runtime and spatial-plausibility checks | Raw Visium FASTQs and slide metadata are present, but no processed registered matrix or exact local reference is available for reproducible reprocessing |
 | spatialDLPFC snapshot | **No** | Coordinate/format smoke tests only | Full-resolution H&E and spatial-expression objects are absent |
 | HEST prostate ST (35 samples) | **No, not nucleus-resolved** | Spot-level expression baselines and transfer pretraining | Only approximately 1000-pixel embedded images; no matched snRNA reference |
@@ -30,11 +30,14 @@ mean that every derived artifact has already been built.
 Consequently, **no downloaded cohort currently completes the proposed refined,
 clean-R1, untouched validation**. snPATHO is the only downloaded cohort with a
 completed truth-scored historical run and can support retrospective development
-diagnostics. NatCommun is still scientifically important: it tests whether a
-sample-matched molecular prior improves over generic, wrong-donor, and permuted
-priors. Its existing local derivatives cannot establish per-cell or spot-level
-spatial accuracy; a future reproducible Visium reprocessing could change that
-assessment.
+diagnostics. Its native-scANVI development matrix scored 93 of 93 requested
+artifacts across five endpoint seeds and three control seeds, but the strict
+ordering criterion failed (49 passes and 59 failures) and the overall status is
+`blocked_evidence`. NatCommun is still scientifically important: it tests
+whether a sample-matched molecular prior improves over generic, wrong-donor,
+and permuted priors. Its existing local derivatives cannot establish per-cell
+or spot-level spatial accuracy; a future reproducible Visium reprocessing could
+change that assessment.
 
 ## NatCommun/MOSAIC development cohort
 
@@ -76,7 +79,7 @@ The local Visium metadata do not contain meaningful spot cell-type labels, so th
 locked benchmark can score gene-expression reconstruction but must not describe
 composition as observed ground truth unless an independent annotation is added.
 
-Current derived-artifact status (2026-07-10): all three specimens have audited
+Current derived-artifact status (2026-07-11): all three specimens have audited
 full-resolution H&E, converted single-nucleus references, Space Ranger nucleus
 segmentations, CUDA OmiCLIP pathology features, hash-bound training/inference
 artifacts, and frozen Visium truth. The completed run evaluated 40,739, 31,499,
@@ -87,10 +90,28 @@ summary `reports/snpatho_v0_2_summary.json`.
 FFPE-snPATHO-only count references have also been isolated for all three cases
 with exact workflow filters and hashes in
 `reports/snpatho_r1_reference_manifest.json`. Their `major_annotation` labels
-come from the published integrated-workflow objects, and their latent/prototype
-adapter is an SVD development fallback rather than primary scANVI. They support
-explicit hard/soft type-mean sensitivity analyses, not the requested clean R1
-refined primary endpoint.
+come from the published integrated-workflow objects rather than an independent
+clean reannotation. Native scANVI now supplies the hash-bound molecular latent,
+reference, prototypes, residual geometry, and external decoder/checkpoint
+lineage recorded in `reports/snpatho_scanvi_r1_manifest.json`; this is no longer
+the earlier SVD fallback path. Five endpoint seeds and three-seed controls are
+complete, and `reports/snpatho_refinement_matrix_v1_summary.json` records the
+93-of-93 matrix and failed strict ordering. These opened-cohort results are
+developmental annotation sensitivities, not the requested clean-R1 or untouched
+primary endpoint.
+
+The matrix summary lists seven remaining evidence gaps: clean independent
+reannotation, a generic-atlas control, label permutation, state omission,
+reference downsampling, a complete checkpoint-bound unknown-mass sweep, and an
+untouched external cohort. The separate fixed
+unknown-mass sweep has only 1 of 15 checkpoint-bound cases, so its cross-mass
+conclusion is blocked and does not rescue the failed ordering. The current
+138-stage run manifest conservatively records all outputs as recursively
+hash-validated adoptions. The source-bound CLI and all shuffle transformation
+hashes validate, but adoption is not proof of each output's original execution
+source, so the execution-provenance gate is false. Full per-gene benchmark artifacts remain ignored under
+`artifacts/`; compact hash-bound summaries and manifests under `reports/` are
+the version-controlled record.
 
 ## DLPFC limitation
 

@@ -12,19 +12,21 @@ import csv
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 import numpy as np
+import torch
 import yaml  # type: ignore[import-untyped]
 from scipy import sparse  # type: ignore[import-untyped]
 from scipy.spatial import cKDTree  # type: ignore[import-untyped]
 from scipy.stats import rankdata  # type: ignore[import-untyped]
 
-from heir.data import RNAReference, SpatialTruthArtifact
+from heir.data import PrototypeSet, RNAReference, SpatialTruthArtifact
 from heir.expression import EXPRESSION_TARGET_SUM
 from heir.inference import PredictionBundle
+from heir.prior.residual_geometry import RNAResidualGeometry
 from heir.utils import atomic_json_dump, sha256_file
 
 from .snpatho import SnPathoBenchmarkResult, load_snpatho_plan, run_snpatho_benchmark
@@ -39,22 +41,93 @@ SELECTIVE_METHOD = "heir_round0_historical_integrated_reference_library_size_wei
 EQUAL_CELL_METHOD = "heir_round0_equal_cell"
 TYPE_MEAN_METHOD = "historical_integrated_hard_type_mean"
 SOFT_TYPE_MEAN_METHOD = "historical_integrated_soft_type_mean"
+HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD = "historical_integrated_hard_type_mean_hard_assigned_type_mass"
+EQUAL_CELL_HARD_TYPE_MEAN_METHOD = "historical_integrated_hard_type_mean_equal_cell"
+EQUAL_CELL_SOFT_TYPE_MEAN_METHOD = "historical_integrated_soft_type_mean_equal_cell"
 PSEUDOBULK_METHOD = "historical_integrated_snrna_pseudobulk"
 SHUFFLE_METHOD = (
     "heir_final_cell_record_shuffle_historical_integrated_reference_library_size_weighted"
 )
 R1_HARD_TYPE_MEAN_METHOD = "r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean"
 R1_SOFT_TYPE_MEAN_METHOD = "r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean"
+R1_HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD = (
+    "r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_hard_assigned_type_mass"
+)
+R1_EQUAL_CELL_HARD_TYPE_MEAN_METHOD = (
+    "r1_ffpe_snpatho_integrated_annotation_sensitivity_hard_type_mean_equal_cell"
+)
+R1_EQUAL_CELL_SOFT_TYPE_MEAN_METHOD = (
+    "r1_ffpe_snpatho_integrated_annotation_sensitivity_soft_type_mean_equal_cell"
+)
+REFINED_R1_METHOD = "refined_heir_matched_ffpe_r1_reference_library_size_weighted"
+REQUESTED_PRIMARY_CONTRAST = "refined_heir_minus_joint_matched_ffpe_r1_hard_and_soft_type_mean"
 HISTORICAL_LIBRARY_SIZE_AGGREGATION = "historical_integrated_reference_library_size_weighted"
 R1_LIBRARY_SIZE_AGGREGATION = (
     "ffpe_snpatho_reference_type_median_library_size_weighted_integrated_annotation_sensitivity"
 )
 R1_MANIFEST_SCHEMA = "heir.snpatho_r1_reference_manifest.v1"
+REFINED_PREDICTION_MANIFEST_SCHEMA = "heir.snpatho_refined_prediction_manifest.v1"
+NATIVE_SCANVI_MANIFEST_SCHEMA = "heir.snpatho_scanvi_r1_manifest.v1"
+CLEAN_REANNOTATION_MANIFEST_SCHEMA = "heir.snpatho_clean_reannotation_manifest.v1"
+FIVE_SEED_PREDICTION_MANIFEST_SCHEMA = "heir.snpatho_five_seed_refinement_manifest.v1"
+REFINEMENT_RUN_MANIFEST_SCHEMA = "heir.snpatho_refinement_run_manifest.v2"
+REFINEMENT_MATRIX_PUBLIC_SUMMARY_SCHEMA = "heir.snpatho_refinement_matrix_public_summary.v1"
+REFINEMENT_MATRIX_REPORT_SCHEMA = "heir.snpatho_refinement_matrix.v1"
+PRIMARY_GATE_SUPPORT_SCHEMA = "heir.snpatho_deepbench_primary_gate_support.v1"
+REFINEMENT_MATRIX_CONTROLS = (
+    "prototype_only",
+    "image_shuffle",
+    "graph_shuffle",
+    "no_graph",
+    "wrong_donor",
+)
+
+PRIMARY_MATCHED_R1_BASELINES = (
+    R1_HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD,
+    R1_SOFT_TYPE_MEAN_METHOD,
+)
+
+PRIMARY_GATE_SUPPORT_CONTRACTS: Mapping[str, Tuple[str, str, Mapping[str, object]]] = {
+    "composition_adjusted_residuals_hash_validated": (
+        "spot_composition_covariates",
+        "composition_adjusted_residuals",
+        {
+            "spatial_block_folds": 5,
+            "independent_composition_covariates": True,
+            "library_size_covariate": True,
+            "pathologist_region_covariate": True,
+            "primary_endpoint_evaluated": True,
+            "primary_endpoint_pass": True,
+        },
+    ),
+    "required_he_tissue_fraction_qc_hash_validated": (
+        "author_qc_tissue_fraction",
+        "he_tissue_fraction_qc",
+        {
+            "minimum_he_tissue_fraction": 0.50,
+            "primary_spot_filter_applied": True,
+            "explicit_author_qc_exclusion_flag": True,
+            "explicit_author_qc_removal_reason": True,
+        },
+    ),
+    "calibrated_segmentation_confidence_hash_validated": (
+        "segmentation_sensitivity_predictions",
+        "calibrated_segmentation_confidence",
+        {
+            "minimum_segmentation_confidence": 0.50,
+            "calibrated_confidence_measurement": True,
+            "independent_calibration_labels": True,
+            "constant_substitution": False,
+            "anchor_gate_applied": True,
+        },
+    ),
+}
 
 OPTIONAL_ARTIFACTS = (
     "primary_ffpe_snpatho_reference_manifest",
     "refined_predictions",
     "five_seed_predictions",
+    "refinement_matrix_summary",
     "alternative_workflow_references",
     "wrong_donor_predictions",
     "generic_atlas_predictions",
@@ -71,6 +144,111 @@ OPTIONAL_ARTIFACTS = (
     "regional_384um_features",
     "native_scanvi_checkpoint",
 )
+
+
+def _baseline_estimands() -> Dict[str, Dict[str, str]]:
+    """Return the explicit profile-by-cell-mass baseline ladder.
+
+    The historical method identifiers are retained for report compatibility.
+    Their estimand metadata makes the previously implicit shared-soft-mass
+    weighting visible, while the additive methods expose hard-assigned mass
+    and equal-cell controls.
+    """
+
+    historical = "historical_integrated_multi_workflow_reference"
+    r1 = "matched_ffpe_snpatho_count_reference_integrated_annotation_sensitivity"
+
+    def estimand(
+        reference: str,
+        profile: str,
+        mass: str,
+        label: str,
+        probability_source: str,
+    ) -> Dict[str, str]:
+        return {
+            "reference": reference,
+            "cell_expression_profile": profile,
+            "cell_rna_mass": mass,
+            "label": label,
+            "cell_type_probability_source": probability_source,
+        }
+
+    historical_probability = "historical_round0_prediction"
+    matched_r1_probability = (
+        "refined_prediction_under_test_when_registered_else_historical_round0_sensitivity"
+    )
+    return {
+        HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD: estimand(
+            historical,
+            "hard_argmax_type_profile",
+            "hard_assigned_type_median_library_size",
+            "hard profile + hard-assigned type mass",
+            historical_probability,
+        ),
+        TYPE_MEAN_METHOD: estimand(
+            historical,
+            "hard_argmax_type_profile",
+            "shared_soft_expected_type_median_library_size",
+            "hard profile + shared soft mass",
+            historical_probability,
+        ),
+        SOFT_TYPE_MEAN_METHOD: estimand(
+            historical,
+            "probability_weighted_soft_type_profile",
+            "expected_soft_type_median_library_size",
+            "soft profile + expected soft mass",
+            historical_probability,
+        ),
+        EQUAL_CELL_HARD_TYPE_MEAN_METHOD: estimand(
+            historical,
+            "hard_argmax_type_profile",
+            "equal_cell",
+            "equal-cell hard type mean",
+            historical_probability,
+        ),
+        EQUAL_CELL_SOFT_TYPE_MEAN_METHOD: estimand(
+            historical,
+            "probability_weighted_soft_type_profile",
+            "equal_cell",
+            "equal-cell soft type mean",
+            historical_probability,
+        ),
+        R1_HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD: estimand(
+            r1,
+            "hard_argmax_type_profile",
+            "hard_assigned_type_median_library_size",
+            "hard profile + hard-assigned type mass",
+            matched_r1_probability,
+        ),
+        R1_HARD_TYPE_MEAN_METHOD: estimand(
+            r1,
+            "hard_argmax_type_profile",
+            "shared_soft_expected_type_median_library_size",
+            "hard profile + shared soft mass",
+            matched_r1_probability,
+        ),
+        R1_SOFT_TYPE_MEAN_METHOD: estimand(
+            r1,
+            "probability_weighted_soft_type_profile",
+            "expected_soft_type_median_library_size",
+            "soft profile + expected soft mass",
+            matched_r1_probability,
+        ),
+        R1_EQUAL_CELL_HARD_TYPE_MEAN_METHOD: estimand(
+            r1,
+            "hard_argmax_type_profile",
+            "equal_cell",
+            "equal-cell hard type mean",
+            matched_r1_probability,
+        ),
+        R1_EQUAL_CELL_SOFT_TYPE_MEAN_METHOD: estimand(
+            r1,
+            "probability_weighted_soft_type_profile",
+            "equal_cell",
+            "equal-cell soft type mean",
+            matched_r1_probability,
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -96,6 +274,304 @@ class DeepBenchPlan:
     specification: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class NativeResidualGeometry:
+    """Recursively validated RNA residual geometry for one native specimen."""
+
+    path: Path
+    sha256: str
+    type_names: Tuple[str, ...]
+    rank: int
+    latent_dim: int
+    bounds: Tuple[float, ...]
+    source_reference_sha256: str
+    latent_transform_sha256: str
+    basis: np.ndarray = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class NativeScanviManifest:
+    """Validated identity of the external native-scANVI molecular teacher."""
+
+    path: Path
+    sha256: str
+    latent_space_id: str
+    expression_space_id: str
+    native_model_sha256: str
+    decoder_sha256: str
+    annotation_status: str
+    specimen_prototype_sha256: Mapping[str, str]
+    specimen_prototype_type_names: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
+    specimen_residual_geometry: Mapping[str, NativeResidualGeometry] = field(default_factory=dict)
+    decoder_gene_names: Tuple[str, ...] = ()
+    expression_normalization_contract: str = ""
+    clean_reannotation_manifest_sha256: Optional[str] = None
+    validated_clean_reannotation: bool = False
+
+    @property
+    def clean_annotation_complete(self) -> bool:
+        return self.validated_clean_reannotation
+
+
+@dataclass(frozen=True)
+class RefinedPredictionArtifact:
+    """A prediction whose model, refinement, telemetry, and RNA lineage are bound."""
+
+    path: Path
+    sha256: str
+    prediction: PredictionBundle
+    checkpoint: Path
+    checkpoint_sha256: str
+    refinement_audit: Path
+    refinement_audit_sha256: str
+    telemetry: Optional[Path]
+    telemetry_sha256: Optional[str]
+    refined_prototype: Path
+    refined_prototype_sha256: str
+    native_prototype_sha256: str
+
+
+@dataclass(frozen=True)
+class FiveSeedPredictionManifest:
+    """Validated five-seed prediction matrix and its declared control coverage."""
+
+    path: Path
+    sha256: str
+    predictions: Mapping[Tuple[str, int], PredictionBundle]
+    control_names: Tuple[str, ...]
+    execution_provenance_verified: bool = False
+
+
+@dataclass(frozen=True)
+class RefinementMatrixSummary:
+    """Validated compact score matrix used by the full-primary evidence gate."""
+
+    path: Path
+    sha256: str
+    matrix_status: str
+    strict_ordering_status: str
+    samples: Tuple[str, ...]
+    seeds: Tuple[int, ...]
+    control_seeds: Tuple[int, ...]
+    control_names: Tuple[str, ...]
+    requested_artifact_count: int
+    scored_artifact_count: int
+    overall_status: str
+    primary_evidence_status: str
+    evidence_blocker_count: int
+    execution_provenance_blocker_count: int
+    execution_provenance_verified: bool = False
+    wrong_donor_coverage_complete: bool = False
+    wrong_donor_pairing_count: int = 0
+    expected_wrong_donor_pairing_count: int = 0
+    missing_wrong_donor_case_count: int = 0
+
+    @property
+    def matrix_complete(self) -> bool:
+        return (
+            self.matrix_status == "complete"
+            and self.scored_artifact_count == self.requested_artifact_count
+            and self.wrong_donor_coverage_complete
+        )
+
+    @property
+    def strict_ordering_pass(self) -> bool:
+        return self.matrix_complete and self.strict_ordering_status == "pass"
+
+    @property
+    def required_followup_evidence_complete(self) -> bool:
+        return (
+            self.primary_evidence_status == "complete"
+            and self.evidence_blocker_count == 0
+            and self.execution_provenance_blocker_count == 0
+        )
+
+
+def _require_sha256(value: object, name: str) -> str:
+    digest = str(value)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("%s must be a lowercase SHA-256 digest" % name)
+    return digest
+
+
+def _directory_sha256(path: Path) -> str:
+    """Hash a directory using the native-scANVI training export contract."""
+
+    if not path.is_dir():
+        raise ValueError("native scANVI model directory is absent: %s" % path)
+    digest = hashlib.sha256()
+    files = sorted(item for item in path.rglob("*") if item.is_file())
+    if not files:
+        raise ValueError("native scANVI model directory is empty")
+    for source in files:
+        digest.update(str(source.relative_to(path)).encode("utf-8"))
+        digest.update(b"\0")
+        with source.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def _resolve_artifact(base: Path, value: object, name: str) -> Path:
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("%s path is missing" % name)
+    result = Path(raw).expanduser()
+    if not result.is_absolute():
+        result = (base / result).resolve()
+    return result
+
+
+def _validate_file_hash(path: Path, digest: object, name: str) -> str:
+    expected = _require_sha256(digest, name + "_sha256")
+    if not path.is_file() or sha256_file(path) != expected:
+        raise ValueError("%s is absent or hash-mismatched" % name)
+    return expected
+
+
+def _gene_panel_order(path: Path) -> Tuple[str, ...]:
+    """Read the canonical ordered gene column from a frozen panel TSV."""
+
+    genes: List[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            gene = stripped.split("\t", 1)[0].strip()
+            if gene:
+                genes.append(gene)
+    if not genes or len(set(genes)) != len(genes):
+        raise ValueError("native scANVI gene panel must contain unique ordered genes")
+    return tuple(genes)
+
+
+def _validate_decoder_contract(
+    decoder_path: Path,
+    payload: Mapping[str, Any],
+    native: Mapping[str, Any],
+    repository_root: Path,
+    sample_ids: Sequence[str],
+    *,
+    latent_space_id: str,
+    expression_space_id: str,
+) -> Tuple[Tuple[str, ...], str, int]:
+    """Bind decoder gene order and normalization semantics to the frozen panel."""
+
+    panel_sha256 = _require_sha256(payload.get("gene_panel_sha256"), "gene_panel_sha256")
+    panel_path = _resolve_artifact(
+        repository_root,
+        payload.get("gene_panel", "manifests/gene_panel_snpatho_500.tsv"),
+        "native_scanvi_gene_panel",
+    )
+    _validate_file_hash(panel_path, panel_sha256, "native_scanvi_gene_panel")
+    panel_genes = _gene_panel_order(panel_path)
+    expression_contract = str(payload.get("expression_transform", "")).strip()
+    if not expression_contract:
+        raise ValueError("native scANVI manifest lacks expression_transform")
+    latent_dim = native.get("latent_dim")
+    if isinstance(latent_dim, bool) or not isinstance(latent_dim, int) or latent_dim <= 0:
+        raise ValueError("native scANVI latent_dim must be a positive integer")
+
+    try:
+        checkpoint = torch.load(decoder_path, map_location="cpu", weights_only=True)
+    except Exception as error:
+        raise ValueError("distilled decoder checkpoint cannot be parsed") from error
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError("distilled decoder checkpoint must be a mapping")
+    config = checkpoint.get("config")
+    metadata = checkpoint.get("metadata")
+    if not isinstance(config, Mapping) or not isinstance(metadata, Mapping):
+        raise ValueError("distilled decoder lacks config or metadata")
+    if metadata.get("schema") != "heir.scvi_distilled_decoder.v2":
+        raise ValueError("distilled decoder has an unsupported metadata schema")
+    raw_gene_names = metadata.get("gene_names")
+    if not isinstance(raw_gene_names, list) or any(
+        not isinstance(value, str) or not value for value in raw_gene_names
+    ):
+        raise ValueError("distilled decoder gene_names must be a non-empty string list")
+    gene_names = tuple(raw_gene_names)
+    if gene_names != panel_genes:
+        raise ValueError("distilled decoder gene order differs from the frozen gene panel")
+    expected_metadata = {
+        "latent_space_id": latent_space_id,
+        "expression_space_id": expression_space_id,
+        "expression_normalization_contract": expression_contract,
+        "decoder_only": True,
+    }
+    for name, value in expected_metadata.items():
+        if metadata.get(name) != value:
+            raise ValueError("distilled decoder %s differs from its manifest" % name)
+    if tuple(metadata.get("training_donors", ())) != tuple(sample_ids):
+        raise ValueError("distilled decoder training donors differ from DeepBench specimens")
+    normalization = metadata.get("expression_normalization")
+    expected_normalization = {
+        "method": "scvi.get_normalized_expression",
+        "library_size": float(EXPRESSION_TARGET_SUM),
+        "library_basis": "full-transcriptome",
+        "gene_selection": "after-library-normalization",
+        "transform": "log1p",
+        "version": 2,
+    }
+    if normalization != expected_normalization:
+        raise ValueError("distilled decoder expression normalization contract is incomplete")
+    expected_config = {
+        "input_dim": len(gene_names),
+        "latent_dim": latent_dim,
+        "nonnegative_output": True,
+    }
+    for name, value in expected_config.items():
+        if config.get(name) != value:
+            raise ValueError("distilled decoder config %s differs from its manifest" % name)
+    return gene_names, expression_contract, latent_dim
+
+
+def _validate_clean_reannotation_contract(
+    value: object,
+    repository_root: Path,
+    sample_ids: Sequence[str],
+) -> str:
+    """Validate the separately materialized independent-reannotation evidence."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "independent clean reannotation status requires a hash-bound reannotation manifest"
+        )
+    manifest_path = _resolve_artifact(
+        repository_root,
+        value.get("manifest"),
+        "clean_reannotation_manifest",
+    )
+    manifest_sha256 = _validate_file_hash(
+        manifest_path,
+        value.get("manifest_sha256"),
+        "clean_reannotation_manifest",
+    )
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        contract = json.load(handle)
+    if not isinstance(contract, Mapping) or contract.get("schema") != (
+        CLEAN_REANNOTATION_MANIFEST_SCHEMA
+    ):
+        raise ValueError("clean reannotation manifest has an unsupported schema")
+    if contract.get("status") != "complete":
+        raise ValueError("clean reannotation manifest is not complete")
+    if contract.get("workflow_filter") != "processing_method == FFPE_snPATHO":
+        raise ValueError("clean reannotation manifest does not isolate FFPE-snPATHO")
+    if tuple(contract.get("sample_ids", ())) != tuple(sample_ids):
+        raise ValueError("clean reannotation manifest does not cover DeepBench specimens")
+    if contract.get("label_source") != "independent_clean_reannotation":
+        raise ValueError("clean reannotation label source is not independent")
+    if contract.get("qc_complete") is not True or contract.get("adjudication_complete") is not True:
+        raise ValueError("clean reannotation QC and adjudication must both be complete")
+    for role in ("annotation_table", "ontology", "qc_report", "adjudication_record"):
+        artifact = contract.get(role)
+        if not isinstance(artifact, Mapping):
+            raise ValueError("clean reannotation manifest lacks %s" % role)
+        artifact_path = _resolve_artifact(manifest_path.parent, artifact.get("path"), role)
+        _validate_file_hash(artifact_path, artifact.get("sha256"), role)
+    return manifest_sha256
+
+
 def _validate_r1_reference_identity(
     reference: RNAReference,
     section_id: str,
@@ -115,6 +591,1013 @@ def _validate_r1_reference_identity(
         raise ValueError("R1 reference block identity differs from its FFPE specimen")
     if not expected_source or reference.source_count_sha256 != expected_source:
         raise ValueError("R1 reference source-count lineage differs from its H5AD manifest")
+
+
+def _load_native_scanvi_manifest(
+    path: Optional[Path],
+    sample_ids: Sequence[str],
+    *,
+    manifest_sha256: Optional[str] = None,
+) -> Optional[NativeScanviManifest]:
+    """Parse and recursively hash-check the native-scANVI identity manifest."""
+
+    if path is None:
+        return None
+    if not path.is_file():
+        raise ValueError("native scANVI manifest is absent")
+    observed_manifest_sha256 = sha256_file(path)
+    if manifest_sha256 is not None and observed_manifest_sha256 != _require_sha256(
+        manifest_sha256, "native_scanvi_manifest_sha256"
+    ):
+        raise ValueError("native scANVI manifest is hash-mismatched")
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping) or payload.get("schema") != NATIVE_SCANVI_MANIFEST_SCHEMA:
+        raise ValueError("native scANVI manifest has an unsupported schema")
+    native_status = str(payload.get("status", ""))
+    supported_statuses = {
+        "native_scanvi_with_published_integrated_annotation_sensitivity": (
+            "published_integrated_annotation_sensitivity_not_clean_reannotation"
+        ),
+        "native_scanvi_with_independent_clean_reannotation": (
+            "independent_clean_reannotation_complete"
+        ),
+    }
+    if native_status not in supported_statuses:
+        raise ValueError("native scANVI manifest status is not the declared sensitivity")
+    if payload.get("workflow_filter") != "processing_method == FFPE_snPATHO":
+        raise ValueError("native scANVI manifest does not isolate FFPE-snPATHO")
+    annotation_status = str(
+        payload.get(
+            "annotation_status",
+            supported_statuses[native_status],
+        )
+    )
+    if annotation_status not in {
+        "published_integrated_annotation_sensitivity_not_clean_reannotation",
+        "independent_clean_reannotation_complete",
+    }:
+        raise ValueError("native scANVI annotation status is unsupported")
+    if annotation_status != supported_statuses[native_status]:
+        raise ValueError("native scANVI model and annotation statuses are inconsistent")
+    if (
+        annotation_status != "independent_clean_reannotation_complete"
+        and not str(payload.get("annotation_provenance", "")).strip()
+    ):
+        raise ValueError("native scANVI integrated-label sensitivity lacks annotation provenance")
+
+    native = payload.get("native_model")
+    decoder = payload.get("distilled_decoder")
+    if not isinstance(native, Mapping) or not isinstance(decoder, Mapping):
+        raise ValueError("native scANVI manifest lacks model or decoder identity")
+    repository_root = path.parent.parent
+    native_path = _resolve_artifact(repository_root, native.get("external_path"), "native_model")
+    native_sha256 = _require_sha256(native.get("sha256"), "native_model_sha256")
+    if _directory_sha256(native_path) != native_sha256:
+        raise ValueError("native scANVI model directory is hash-mismatched")
+    decoder_path = _resolve_artifact(
+        repository_root,
+        decoder.get("external_path"),
+        "distilled_decoder",
+    )
+    decoder_sha256 = _validate_file_hash(
+        decoder_path,
+        decoder.get("sha256"),
+        "distilled_decoder",
+    )
+    latent_space_id = str(payload.get("latent_space_id", ""))
+    if latent_space_id != "sha256:" + native_sha256:
+        raise ValueError("native scANVI latent-space identity differs from its model hash")
+    expression_space_id = str(payload.get("expression_space_id", "")).strip()
+    if not expression_space_id:
+        raise ValueError("native scANVI manifest lacks expression_space_id")
+    decoder_gene_names, expression_contract, latent_dim = _validate_decoder_contract(
+        decoder_path,
+        payload,
+        native,
+        repository_root,
+        sample_ids,
+        latent_space_id=latent_space_id,
+        expression_space_id=expression_space_id,
+    )
+    clean_reannotation_sha256: Optional[str] = None
+    if annotation_status == "independent_clean_reannotation_complete":
+        clean_reannotation_sha256 = _validate_clean_reannotation_contract(
+            payload.get("clean_reannotation"),
+            repository_root,
+            sample_ids,
+        )
+    elif payload.get("clean_reannotation") is not None:
+        raise ValueError(
+            "clean reannotation evidence is inconsistent with integrated-label sensitivity"
+        )
+
+    specimens = payload.get("specimens")
+    if not isinstance(specimens, Mapping) or set(specimens) != set(sample_ids):
+        raise ValueError("native scANVI manifest must contain every DeepBench specimen")
+    prototype_hashes: Dict[str, str] = {}
+    prototype_type_names: Dict[str, Tuple[str, ...]] = {}
+    residual_geometries: Dict[str, NativeResidualGeometry] = {}
+    for section_id in sample_ids:
+        raw = specimens[section_id]
+        if not isinstance(raw, Mapping):
+            raise ValueError("native scANVI specimen entry must be a mapping")
+        latent_path = _resolve_artifact(
+            repository_root,
+            raw.get("latent_reference"),
+            "native_latent_reference_%s" % section_id,
+        )
+        latent_reference_sha256 = _validate_file_hash(
+            latent_path,
+            raw.get("latent_reference_sha256"),
+            "native_latent_reference_%s" % section_id,
+        )
+        reference = RNAReference.load_npz(latent_path)
+        if (
+            reference.sample_id != section_id
+            or set(reference.sample_ids.astype(str).tolist()) != {section_id}
+            or set(reference.donor_ids.astype(str).tolist()) != {section_id}
+            or reference.latent_space_id != latent_space_id
+            or reference.latent.shape != (reference.counts.shape[0], latent_dim)
+        ):
+            raise ValueError("native scANVI latent reference identity differs for %s" % section_id)
+        if tuple(str(value) for value in reference.gene_ids.tolist()) != decoder_gene_names:
+            raise ValueError("native scANVI reference gene order differs for %s" % section_id)
+        if raw.get("cells") is not None and raw.get("cells") != reference.counts.shape[0]:
+            raise ValueError("native scANVI reference cell count differs for %s" % section_id)
+        prototype_path = _resolve_artifact(
+            repository_root,
+            raw.get("rare_complete_prototypes"),
+            "native_prototypes_%s" % section_id,
+        )
+        prototype_sha256 = _validate_file_hash(
+            prototype_path,
+            raw.get("rare_complete_prototypes_sha256"),
+            "native_prototypes_%s" % section_id,
+        )
+        prototypes = PrototypeSet.load_npz(prototype_path)
+        if (
+            prototypes.donor_id != section_id
+            or set(prototypes.sample_ids.astype(str).tolist()) != {section_id}
+            or prototypes.latent_space_id != latent_space_id
+            or prototypes.means.shape[1] != latent_dim
+            or prototypes.source_reference_sha256 != latent_reference_sha256
+        ):
+            raise ValueError("native scANVI prototype identity differs for %s" % section_id)
+        ordered_prototype_types = tuple(
+            dict.fromkeys(str(value) for value in prototypes.cell_type_labels.tolist())
+        )
+        reference_types = {str(value) for value in reference.cell_type_labels.tolist()}
+        if set(ordered_prototype_types) != reference_types:
+            raise ValueError(
+                "native scANVI rare-complete prototypes omit reference types for %s" % section_id
+            )
+
+        geometry_path = _resolve_artifact(
+            repository_root,
+            raw.get("residual_geometry"),
+            "native_residual_geometry_%s" % section_id,
+        )
+        geometry_sha256 = _validate_file_hash(
+            geometry_path,
+            raw.get("residual_geometry_sha256"),
+            "native_residual_geometry_%s" % section_id,
+        )
+        geometry = RNAResidualGeometry.from_npz(geometry_path)
+        geometry_types = tuple(str(value) for value in geometry.type_names.tolist())
+        expected_cell_counts = np.asarray(
+            [
+                np.count_nonzero(reference.cell_type_labels.astype(str) == type_name)
+                for type_name in geometry_types
+            ],
+            dtype=np.int64,
+        )
+        expected_prototype_counts = np.asarray(
+            [
+                np.count_nonzero(prototypes.cell_type_labels.astype(str) == type_name)
+                for type_name in geometry_types
+            ],
+            dtype=np.int64,
+        )
+        if (
+            geometry.latent_space_id != latent_space_id
+            or geometry.latent_dim != latent_dim
+            or geometry.source_reference_sha256 != latent_reference_sha256
+            or geometry.latent_transform_sha256 != prototypes.latent_transform_sha256
+            or geometry.training_donors != (section_id,)
+            or geometry_types != ordered_prototype_types
+            or not np.array_equal(geometry.n_cells, expected_cell_counts)
+            or not np.array_equal(geometry.n_prototypes, expected_prototype_counts)
+        ):
+            raise ValueError("native residual geometry lineage differs for %s" % section_id)
+        prototype_hashes[section_id] = prototype_sha256
+        prototype_type_names[section_id] = ordered_prototype_types
+        residual_geometries[section_id] = NativeResidualGeometry(
+            path=geometry_path,
+            sha256=geometry_sha256,
+            type_names=geometry_types,
+            rank=geometry.rank,
+            latent_dim=geometry.latent_dim,
+            bounds=tuple(float(value) for value in geometry.residual_type_max_norm.tolist()),
+            source_reference_sha256=geometry.source_reference_sha256,
+            latent_transform_sha256=geometry.latent_transform_sha256,
+            basis=geometry.residual_type_basis,
+        )
+    if len({geometry.rank for geometry in residual_geometries.values()}) != 1:
+        raise ValueError("native residual geometry rank differs across specimens")
+    return NativeScanviManifest(
+        path=path,
+        sha256=observed_manifest_sha256,
+        latent_space_id=latent_space_id,
+        expression_space_id=expression_space_id,
+        native_model_sha256=native_sha256,
+        decoder_sha256=decoder_sha256,
+        annotation_status=annotation_status,
+        specimen_prototype_sha256=prototype_hashes,
+        specimen_prototype_type_names=prototype_type_names,
+        specimen_residual_geometry=residual_geometries,
+        decoder_gene_names=decoder_gene_names,
+        expression_normalization_contract=expression_contract,
+        clean_reannotation_manifest_sha256=clean_reannotation_sha256,
+        validated_clean_reannotation=clean_reannotation_sha256 is not None,
+    )
+
+
+def _negative_control_metadata_is_clean(value: object, section_id: str, seed: int) -> bool:
+    if value is False:
+        return True
+    if not isinstance(value, Mapping):
+        return False
+    expected_false = (
+        "graph_node_shuffle",
+        "image_feature_shuffle",
+        "no_graph",
+        "prototype_only",
+        "wrong_donor",
+    )
+    return (
+        all(value.get(name) is False for name in expected_false)
+        and str(value.get("prototype_donor_id", "")) == section_id
+        and value.get("seed") == seed
+    )
+
+
+def _validate_refined_checkpoint_metadata(
+    checkpoint: Path,
+    *,
+    section_id: str,
+    seed: int,
+    selected_round: int,
+    native_scanvi: NativeScanviManifest,
+    native_prototype_sha256: str,
+) -> None:
+    """Bind the refined model metadata to the native decoder and source prototype."""
+
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if not isinstance(payload, Mapping) or payload.get("schema") != "heir.model.v3":
+        raise ValueError("refined checkpoint has an unsupported schema")
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping) or metadata.get("schema") != "heir.refined_model.v1":
+        raise ValueError("refined checkpoint lacks refined-model metadata")
+    expected = {
+        "seed": seed,
+        "refinement_round": selected_round,
+        "latent_space_id": native_scanvi.latent_space_id,
+        "expression_space_id": native_scanvi.expression_space_id,
+        "rna_vae_sha256": native_scanvi.decoder_sha256,
+    }
+    for name, value in expected.items():
+        if metadata.get(name) != value:
+            raise ValueError("refined checkpoint %s lineage differs for %s" % (name, section_id))
+    if metadata.get("training_donors") != [section_id] or metadata.get(
+        "refinement_training_donors"
+    ) != [section_id]:
+        raise ValueError("refined checkpoint donor identity differs for %s" % section_id)
+    geometry = native_scanvi.specimen_residual_geometry.get(section_id)
+    if geometry is None:
+        raise ValueError("native residual geometry is unavailable for %s" % section_id)
+    metadata_geometry = _resolve_artifact(
+        checkpoint.parent,
+        metadata.get("residual_geometry"),
+        "refined_checkpoint_residual_geometry",
+    )
+    if (
+        metadata_geometry != geometry.path
+        or metadata.get("residual_geometry_sha256") != geometry.sha256
+    ):
+        raise ValueError("refined checkpoint residual geometry lineage differs for %s" % section_id)
+    if metadata.get("residual_basis_trainable") is not False:
+        raise ValueError("refined checkpoint residual basis must remain frozen")
+    if tuple(metadata.get("type_names", ())) != geometry.type_names:
+        raise ValueError("refined checkpoint residual type order differs for %s" % section_id)
+    if native_scanvi.decoder_gene_names and tuple(metadata.get("gene_names", ())) != (
+        native_scanvi.decoder_gene_names
+    ):
+        raise ValueError("refined checkpoint decoder gene order differs for %s" % section_id)
+    config = payload.get("config")
+    state_dict = payload.get("state_dict")
+    checkpoint_geometry = payload.get("residual_geometry")
+    if (
+        not isinstance(config, Mapping)
+        or not isinstance(state_dict, Mapping)
+        or not isinstance(checkpoint_geometry, Mapping)
+    ):
+        raise ValueError("refined checkpoint lacks model or residual geometry state")
+    expected_config = {
+        "num_cell_types": len(geometry.type_names),
+        "latent_dim": geometry.latent_dim,
+        "residual_rank": geometry.rank,
+    }
+    if native_scanvi.decoder_gene_names:
+        expected_config["expression_dim"] = len(native_scanvi.decoder_gene_names)
+    for name, value in expected_config.items():
+        if config.get(name) != value:
+            raise ValueError("refined checkpoint residual %s differs for %s" % (name, section_id))
+    if checkpoint_geometry.get("basis_trainable") is not False:
+        raise ValueError("refined checkpoint serialized residual basis must remain frozen")
+    if (
+        checkpoint_geometry.get("type_max_norms") is None
+        or state_dict.get("residual_type_basis") is None
+    ):
+        raise ValueError("refined checkpoint lacks residual basis or bounds")
+    checkpoint_bounds = torch.as_tensor(checkpoint_geometry["type_max_norms"])
+    expected_bounds = torch.as_tensor(geometry.bounds, dtype=checkpoint_bounds.dtype)
+    if checkpoint_bounds.shape != expected_bounds.shape or not torch.allclose(
+        checkpoint_bounds.cpu(), expected_bounds, rtol=1.0e-6, atol=1.0e-7
+    ):
+        raise ValueError("refined checkpoint residual bounds differ for %s" % section_id)
+    checkpoint_basis = torch.as_tensor(state_dict["residual_type_basis"])
+    expected_basis = torch.as_tensor(
+        np.array(geometry.basis, copy=True), dtype=checkpoint_basis.dtype
+    )
+    if checkpoint_basis.shape != expected_basis.shape or not torch.allclose(
+        checkpoint_basis.cpu(), expected_basis, rtol=1.0e-6, atol=1.0e-7
+    ):
+        raise ValueError("refined checkpoint residual basis differs for %s" % section_id)
+    source_hashes = {
+        str(digest)
+        for collection_name in (
+            "training_batches",
+            "validation_batches",
+            "refinement_training_batches",
+            "refinement_validation_batches",
+        )
+        for row in (
+            metadata.get(collection_name, [])
+            if isinstance(metadata.get(collection_name, []), list)
+            else []
+        )
+        if isinstance(row, Mapping)
+        for digest in (
+            row.get("source_sha256", []) if isinstance(row.get("source_sha256", []), list) else []
+        )
+    }
+    if native_prototype_sha256 not in source_hashes:
+        raise ValueError("refined checkpoint is not bound to its native prototype source")
+
+
+def _load_refined_prediction_manifest(
+    path: Optional[Path],
+    sample_ids: Sequence[str],
+    native_scanvi: Optional[NativeScanviManifest] = None,
+) -> Dict[str, RefinedPredictionArtifact]:
+    """Load a fully provenance-bound seed-17 refined sensitivity run."""
+
+    if path is None:
+        return {}
+    if native_scanvi is None:
+        raise ValueError("refined predictions require a validated native scANVI manifest")
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping) or payload.get("schema") != (
+        REFINED_PREDICTION_MANIFEST_SCHEMA
+    ):
+        raise ValueError("refined prediction manifest has an unsupported schema")
+    if payload.get("analysis_role") != (
+        "development_native_scanvi_published_annotation_sensitivity"
+    ):
+        raise ValueError("refined predictions are not declared as an integrated-label sensitivity")
+    seed = payload.get("seed")
+    selected_round = payload.get("selected_round")
+    if seed != 17:
+        raise ValueError("refined prediction manifest must freeze development seed 17")
+    if (
+        isinstance(selected_round, bool)
+        or not isinstance(selected_round, int)
+        or selected_round <= 0
+    ):
+        raise ValueError("refined prediction manifest must select a post-refinement round")
+    if payload.get("round_selection_mode") != "fixed":
+        raise ValueError("refined prediction manifest must use frozen fixed-round selection")
+    if payload.get("native_scanvi_manifest_sha256") != native_scanvi.sha256:
+        raise ValueError("refined predictions are not bound to the native scANVI manifest")
+    native_manifest_path = _resolve_artifact(
+        path.parent,
+        payload.get("native_scanvi_manifest"),
+        "native_scanvi_manifest",
+    )
+    if native_manifest_path != native_scanvi.path.resolve():
+        raise ValueError("refined predictions name a different native scANVI manifest")
+    if payload.get("latent_space_id") != native_scanvi.latent_space_id:
+        raise ValueError("refined prediction latent space differs from native scANVI")
+    if payload.get("expression_space_id") != native_scanvi.expression_space_id:
+        raise ValueError("refined prediction expression space differs from native scANVI")
+    rows = payload.get("cases")
+    if not isinstance(rows, list):
+        raise ValueError("refined prediction manifest cases must be a list")
+    result: Dict[str, RefinedPredictionArtifact] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("refined prediction manifest case must be a mapping")
+        section_id = str(raw.get("section_id", ""))
+        if not section_id or section_id in result:
+            raise ValueError("refined prediction manifest section IDs must be unique")
+        prediction_path = _resolve_artifact(path.parent, raw.get("predictions"), "prediction")
+        prediction_sha256 = _validate_file_hash(
+            prediction_path,
+            raw.get("predictions_sha256"),
+            "refined_prediction_%s" % section_id,
+        )
+        prediction = PredictionBundle.from_npz(prediction_path)
+        if prediction.sample_id != section_id or prediction.donor_id != section_id:
+            raise ValueError("refined prediction sample/donor identity differs for %s" % section_id)
+        if prediction.inference_seed != seed:
+            raise ValueError("refined prediction inference seed differs for %s" % section_id)
+        if prediction.refinement_round != selected_round or prediction.refinement_round <= 0:
+            raise ValueError("refined prediction round differs for %s" % section_id)
+        if prediction.latent_space_id != native_scanvi.latent_space_id:
+            raise ValueError("refined prediction latent space differs for %s" % section_id)
+        if prediction.expression_space_id != native_scanvi.expression_space_id:
+            raise ValueError("refined prediction expression space differs for %s" % section_id)
+
+        checkpoint = _resolve_artifact(path.parent, raw.get("checkpoint"), "checkpoint")
+        checkpoint_sha256 = _validate_file_hash(
+            checkpoint,
+            raw.get("checkpoint_sha256"),
+            "refined_checkpoint_%s" % section_id,
+        )
+        if prediction.checkpoint_sha256 != checkpoint_sha256:
+            raise ValueError("refined prediction checkpoint lineage differs for %s" % section_id)
+        refinement_audit = _resolve_artifact(
+            path.parent,
+            raw.get("refinement_audit"),
+            "refinement_audit",
+        )
+        refinement_audit_sha256 = _validate_file_hash(
+            refinement_audit,
+            raw.get("refinement_audit_sha256"),
+            "refinement_audit_%s" % section_id,
+        )
+        with refinement_audit.open("r", encoding="utf-8") as handle:
+            audit = json.load(handle)
+        if not isinstance(audit, Mapping) or audit.get("selected_round") != selected_round:
+            raise ValueError("refinement audit selected round differs for %s" % section_id)
+        rounds = audit.get("rounds")
+        if not isinstance(rounds, list) or not any(
+            isinstance(round_row, Mapping)
+            and round_row.get("round_id") == selected_round
+            and round_row.get("committed") is True
+            for round_row in rounds
+        ):
+            raise ValueError(
+                "refinement audit lacks the committed selected round for %s" % section_id
+            )
+
+        refined_prototype = _resolve_artifact(
+            path.parent,
+            raw.get("refined_prototype"),
+            "refined_prototype",
+        )
+        refined_prototype_sha256 = _validate_file_hash(
+            refined_prototype,
+            raw.get("refined_prototype_sha256"),
+            "refined_prototype_%s" % section_id,
+        )
+        if prediction.prototype_sha256 != refined_prototype_sha256:
+            raise ValueError("refined prediction prototype lineage differs for %s" % section_id)
+        prototypes = PrototypeSet.load_npz(refined_prototype)
+        if (
+            prototypes.donor_id != section_id
+            or set(prototypes.sample_ids.astype(str).tolist()) != {section_id}
+            or prototypes.latent_space_id != native_scanvi.latent_space_id
+        ):
+            raise ValueError("refined prototype identity differs for %s" % section_id)
+        prototype_artifacts = audit.get("prototype_artifacts")
+        expected_key = "%s::%s" % (section_id, section_id)
+        if not isinstance(prototype_artifacts, Mapping) or expected_key not in prototype_artifacts:
+            raise ValueError("refinement audit lacks its refined prototype for %s" % section_id)
+        audit_prototype = _resolve_artifact(
+            refinement_audit.parent,
+            prototype_artifacts[expected_key],
+            "audited_refined_prototype",
+        )
+        if audit_prototype != refined_prototype:
+            raise ValueError("refinement audit prototype path differs for %s" % section_id)
+        native_prototype_sha256 = _require_sha256(
+            raw.get("native_prototype_sha256"),
+            "native_prototype_sha256",
+        )
+        if native_prototype_sha256 != native_scanvi.specimen_prototype_sha256.get(section_id):
+            raise ValueError(
+                "refined prediction native prototype lineage differs for %s" % section_id
+            )
+        _validate_refined_checkpoint_metadata(
+            checkpoint,
+            section_id=section_id,
+            seed=seed,
+            selected_round=selected_round,
+            native_scanvi=native_scanvi,
+            native_prototype_sha256=native_prototype_sha256,
+        )
+
+        telemetry_path: Optional[Path] = None
+        telemetry_sha256: Optional[str] = None
+        control_metadata: object = raw.get("negative_control", payload.get("negative_control"))
+        if raw.get("telemetry") is not None or raw.get("telemetry_sha256") is not None:
+            telemetry_path = _resolve_artifact(path.parent, raw.get("telemetry"), "telemetry")
+            telemetry_sha256 = _validate_file_hash(
+                telemetry_path,
+                raw.get("telemetry_sha256"),
+                "refined_telemetry_%s" % section_id,
+            )
+            with telemetry_path.open("r", encoding="utf-8") as handle:
+                telemetry_payload = json.load(handle)
+            if (
+                not isinstance(telemetry_payload, Mapping)
+                or telemetry_payload.get("schema") != "heir.inference_telemetry.v1"
+                or telemetry_payload.get("prediction_sha256") != prediction_sha256
+            ):
+                raise ValueError(
+                    "refined prediction telemetry identity differs for %s" % section_id
+                )
+            control_metadata = telemetry_payload.get("negative_control")
+        if not _negative_control_metadata_is_clean(control_metadata, section_id, seed):
+            raise ValueError("refined prediction is a negative control or lacks control provenance")
+        result[section_id] = RefinedPredictionArtifact(
+            path=prediction_path,
+            sha256=prediction_sha256,
+            prediction=prediction,
+            checkpoint=checkpoint,
+            checkpoint_sha256=checkpoint_sha256,
+            refinement_audit=refinement_audit,
+            refinement_audit_sha256=refinement_audit_sha256,
+            telemetry=telemetry_path,
+            telemetry_sha256=telemetry_sha256,
+            refined_prototype=refined_prototype,
+            refined_prototype_sha256=refined_prototype_sha256,
+            native_prototype_sha256=native_prototype_sha256,
+        )
+    if set(result) != set(sample_ids):
+        raise ValueError("refined prediction manifest must cover every DeepBench specimen")
+    return result
+
+
+def _load_five_seed_prediction_manifest(
+    path: Optional[Path],
+    sample_ids: Sequence[str],
+    seeds: Sequence[int],
+    native_scanvi: Optional[NativeScanviManifest],
+) -> Optional[FiveSeedPredictionManifest]:
+    """Validate the full specimen-by-seed matrix used to unlock primary claims."""
+
+    if path is None:
+        return None
+    if native_scanvi is None:
+        raise ValueError("five-seed predictions require a validated native scANVI manifest")
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping) or payload.get("schema") not in {
+        FIVE_SEED_PREDICTION_MANIFEST_SCHEMA,
+        REFINEMENT_RUN_MANIFEST_SCHEMA,
+    }:
+        raise ValueError("five-seed prediction manifest has an unsupported schema")
+    analysis_role = payload.get("analysis_role")
+    expected_analysis_role = (
+        "prespecified_five_seed_native_scanvi_clean_annotation_primary"
+        if native_scanvi.clean_annotation_complete
+        else "prespecified_five_seed_native_scanvi_integrated_annotation_sensitivity"
+    )
+    if analysis_role != expected_analysis_role:
+        raise ValueError("five-seed predictions lack an explicit evidence role")
+    expected_seeds = tuple(int(value) for value in seeds)
+    if tuple(payload.get("seeds", ())) != expected_seeds:
+        raise ValueError("five-seed prediction manifest does not use the prespecified seeds")
+    if tuple(payload.get("samples", ())) != tuple(sample_ids):
+        raise ValueError("five-seed prediction manifest does not use every specimen")
+    if payload.get("negative_control") is not False:
+        raise ValueError("five-seed primary predictions lack a no-negative-control declaration")
+    if payload.get("native_scanvi_manifest_sha256") != native_scanvi.sha256:
+        raise ValueError("five-seed predictions are not bound to native scANVI")
+    if payload.get("latent_space_id") != native_scanvi.latent_space_id:
+        raise ValueError("five-seed prediction latent space differs from native scANVI")
+    if payload.get("expression_space_id") != native_scanvi.expression_space_id:
+        raise ValueError("five-seed prediction expression space differs from native scANVI")
+    rows = payload.get("cases")
+    if not isinstance(rows, list):
+        raise ValueError("five-seed prediction manifest cases must be a list")
+    predictions: Dict[Tuple[str, int], PredictionBundle] = {}
+    for raw in rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("five-seed prediction case must be a mapping")
+        section_id = str(raw.get("section_id", ""))
+        seed = raw.get("seed")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("five-seed prediction case seed must be an integer")
+        key = (section_id, seed)
+        if section_id not in sample_ids or seed not in expected_seeds or key in predictions:
+            raise ValueError("five-seed prediction case identity is invalid or duplicated")
+        prediction_path = _resolve_artifact(
+            path.parent,
+            raw.get("predictions"),
+            "five_seed_prediction",
+        )
+        _validate_file_hash(
+            prediction_path,
+            raw.get("predictions_sha256"),
+            "five_seed_prediction_%s_%d" % key,
+        )
+        prediction = PredictionBundle.from_npz(prediction_path)
+        if (
+            prediction.sample_id != section_id
+            or prediction.donor_id != section_id
+            or prediction.inference_seed != seed
+            or prediction.refinement_round <= 0
+            or prediction.latent_space_id != native_scanvi.latent_space_id
+            or prediction.expression_space_id != native_scanvi.expression_space_id
+        ):
+            raise ValueError("five-seed PredictionBundle provenance differs for %s/%d" % key)
+        predictions[key] = prediction
+    expected = {(section_id, seed) for section_id in sample_ids for seed in expected_seeds}
+    if set(predictions) != expected:
+        raise ValueError("five-seed prediction manifest does not cover the full matrix")
+    controls = payload.get("controls_available", [])
+    if not isinstance(controls, list) or any(not isinstance(value, str) for value in controls):
+        raise ValueError("five-seed controls_available must be a string list")
+    return FiveSeedPredictionManifest(
+        path=path,
+        sha256=sha256_file(path),
+        predictions=predictions,
+        control_names=tuple(sorted(set(controls))),
+        execution_provenance_verified=bool(
+            payload.get("schema") == REFINEMENT_RUN_MANIFEST_SCHEMA
+            and isinstance(payload.get("execution"), Mapping)
+            and payload["execution"].get("execution_provenance_verified") is True
+        ),
+    )
+
+
+def _load_refinement_matrix_summary(
+    path: Optional[Path],
+    sample_ids: Sequence[str],
+    seeds: Sequence[int],
+    control_seeds: Sequence[int],
+    *,
+    minimum_nuclei: int,
+    frozen_plan_sha256: str,
+    native_scanvi: Optional[NativeScanviManifest],
+    summary_sha256: Optional[str],
+) -> Optional[RefinementMatrixSummary]:
+    """Validate the compact matrix result consumed by full-primary gating.
+
+    This parser deliberately validates the score coverage and outcome rather
+    than treating the existence of the five-seed PredictionBundle manifest as
+    evidence that the prespecified comparisons passed.
+    """
+
+    if path is None:
+        if summary_sha256 is not None:
+            raise ValueError("refinement matrix summary hash is set without a path")
+        return None
+    if native_scanvi is None:
+        raise ValueError("refinement matrix summary requires a validated native scANVI manifest")
+    if summary_sha256 is None:
+        raise ValueError("refinement matrix summary must be hash-bound by the DeepBench plan")
+    validated_sha256 = _validate_file_hash(
+        path,
+        summary_sha256,
+        "refinement_matrix_summary",
+    )
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, Mapping) or payload.get("schema") != (
+        REFINEMENT_MATRIX_PUBLIC_SUMMARY_SCHEMA
+    ):
+        raise ValueError("refinement matrix summary has an unsupported schema")
+    if payload.get("report_schema") != REFINEMENT_MATRIX_REPORT_SCHEMA:
+        raise ValueError("refinement matrix summary report schema is invalid")
+    expected_role = (
+        "native_scanvi_clean_independent_reannotation_primary"
+        if native_scanvi.clean_annotation_complete
+        else "native_scanvi_published_integrated_annotation_sensitivity"
+    )
+    if payload.get("analysis_role") != expected_role:
+        raise ValueError("refinement matrix summary analysis role differs from native scANVI")
+
+    request = payload.get("request")
+    if not isinstance(request, Mapping):
+        raise ValueError("refinement matrix summary request must be a mapping")
+
+    def integer_tuple(value: object, name: str) -> Tuple[int, ...]:
+        if not isinstance(value, list) or any(
+            isinstance(item, bool) or not isinstance(item, int) for item in value
+        ):
+            raise ValueError("refinement matrix %s must be an integer list" % name)
+        return tuple(value)
+
+    requested_samples = request.get("samples")
+    if not isinstance(requested_samples, list) or any(
+        not isinstance(value, str) for value in requested_samples
+    ):
+        raise ValueError("refinement matrix request samples must be a string list")
+    expected_samples = tuple(str(value) for value in sample_ids)
+    if tuple(requested_samples) != expected_samples:
+        raise ValueError("refinement matrix summary does not cover the requested specimens")
+    expected_seeds = tuple(int(value) for value in seeds)
+    requested_seeds = integer_tuple(request.get("seeds"), "request seeds")
+    if requested_seeds != expected_seeds:
+        raise ValueError("refinement matrix summary does not cover the prespecified seeds")
+    expected_control_seeds = tuple(int(value) for value in control_seeds)
+    requested_control_seeds = integer_tuple(
+        request.get("control_seeds"),
+        "request control seeds",
+    )
+    if requested_control_seeds != expected_control_seeds:
+        raise ValueError("refinement matrix summary does not cover the ablation seeds")
+    requested_controls = request.get("controls")
+    if not isinstance(requested_controls, list) or tuple(requested_controls) != (
+        REFINEMENT_MATRIX_CONTROLS
+    ):
+        raise ValueError("refinement matrix summary does not cover the required controls")
+    trajectory_seed = request.get("trajectory_seed")
+    if (
+        isinstance(trajectory_seed, bool)
+        or not isinstance(trajectory_seed, int)
+        or not expected_seeds
+        or trajectory_seed != expected_seeds[0]
+    ):
+        raise ValueError("refinement matrix trajectory seed is not the prespecified seed")
+    if request.get("minimum_nuclei") != minimum_nuclei:
+        raise ValueError("refinement matrix minimum-nuclei policy differs from DeepBench")
+    raw_pairings = request.get("wrong_donor_pairings")
+    if raw_pairings is None:
+        legacy_target = request.get("wrong_donor_target")
+        legacy_source = request.get("wrong_donor_source")
+        raw_pairings = [{"target": legacy_target, "source": legacy_source}]
+    if not isinstance(raw_pairings, list):
+        raise ValueError("refinement matrix wrong-donor pairings must be a list")
+    wrong_donor_pairings = []
+    for row in raw_pairings:
+        if not isinstance(row, Mapping):
+            raise ValueError("refinement matrix wrong-donor pairing is malformed")
+        target = row.get("target")
+        source = row.get("source")
+        if target not in expected_samples or source not in expected_samples or target == source:
+            raise ValueError("refinement matrix wrong-donor request is invalid")
+        wrong_donor_pairings.append((str(target), str(source)))
+    if len(set(wrong_donor_pairings)) != len(wrong_donor_pairings):
+        raise ValueError("refinement matrix wrong-donor pairings are duplicated")
+    expected_wrong_donor_pairings = {
+        (target, source)
+        for target in expected_samples
+        for source in expected_samples
+        if source != target
+    }
+    wrong_donor_coverage_complete = set(wrong_donor_pairings) == expected_wrong_donor_pairings
+    missing_wrong_donor_pairings = expected_wrong_donor_pairings - set(wrong_donor_pairings)
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise ValueError("refinement matrix artifact counts must be a mapping")
+    requested_count = artifacts.get("requested")
+    scored_count = artifacts.get("scored")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (requested_count, scored_count)
+    ):
+        raise ValueError("refinement matrix artifact counts must be non-negative integers")
+    expected_count = (
+        2 * len(expected_samples) * len(expected_seeds)
+        + 3 * len(expected_samples)
+        + 4 * len(expected_samples) * len(expected_control_seeds)
+        + len(wrong_donor_pairings) * len(expected_control_seeds)
+    )
+    if requested_count != expected_count or scored_count > requested_count:
+        raise ValueError("refinement matrix requested artifact coverage is inconsistent")
+
+    matrix_status = payload.get("matrix_status")
+    strict_status = payload.get("strict_ordering_status")
+    if matrix_status not in {"complete", "blocked"}:
+        raise ValueError("refinement matrix completeness status is invalid")
+    if strict_status not in {"pass", "fail", "blocked"}:
+        raise ValueError("refinement matrix strict-ordering status is invalid")
+    matrix_complete = requested_count == scored_count == expected_count
+    if (matrix_status == "complete") != matrix_complete:
+        raise ValueError("refinement matrix completeness status contradicts artifact coverage")
+
+    strict = payload.get("strict_ordering")
+    if not isinstance(strict, Mapping) or strict.get("status") != strict_status:
+        raise ValueError("refinement matrix strict-ordering statuses are inconsistent")
+    by_check = strict.get("by_check")
+    check_counts = strict.get("check_counts")
+    if not isinstance(by_check, Mapping) or not isinstance(check_counts, Mapping):
+        raise ValueError("refinement matrix strict-ordering coverage is malformed")
+    sample_seed_count = len(expected_samples) * len(expected_seeds)
+    control_case_count = len(expected_samples) * len(expected_control_seeds)
+    expected_check_totals = {
+        "refined_gt_round0": sample_seed_count,
+        "refined_gt_hard_baseline": sample_seed_count,
+        "refined_gt_soft_baseline": sample_seed_count,
+        "refined_gt_prototype_only": control_case_count,
+        "round0_gt_prototype_only": control_case_count,
+        "refined_gt_image_shuffle": control_case_count,
+        "refined_gt_graph_shuffle": control_case_count,
+        "refined_gt_no_graph": control_case_count,
+        "refined_gt_wrong_donor": len(wrong_donor_pairings) * len(expected_control_seeds),
+    }
+    if set(by_check) != set(expected_check_totals):
+        raise ValueError("refinement matrix strict-ordering checks are incomplete")
+    observed_counts = {"total": 0, "pass": 0, "fail": 0, "blocked": 0}
+    for name, expected_total in expected_check_totals.items():
+        row = by_check[name]
+        if not isinstance(row, Mapping):
+            raise ValueError("refinement matrix strict-ordering check is malformed")
+        values = {key: row.get(key) for key in observed_counts}
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values.values()
+        ):
+            raise ValueError("refinement matrix strict-ordering counts are malformed")
+        if values["total"] != expected_total or values["total"] != (
+            values["pass"] + values["fail"] + values["blocked"]
+        ):
+            raise ValueError("refinement matrix strict-ordering check coverage is inconsistent")
+        for key, value in values.items():
+            observed_counts[key] += value
+    for key, value in observed_counts.items():
+        if check_counts.get(key) != value:
+            raise ValueError("refinement matrix strict-ordering aggregate counts are inconsistent")
+    if matrix_complete:
+        if observed_counts["blocked"]:
+            raise ValueError("complete refinement matrix contains blocked ordering checks")
+        expected_strict_status = "fail" if observed_counts["fail"] else "pass"
+    else:
+        expected_strict_status = "blocked"
+    if strict_status != expected_strict_status:
+        raise ValueError("refinement matrix strict-ordering outcome contradicts check counts")
+
+    blockers = payload.get("blockers")
+    if not isinstance(blockers, Mapping):
+        raise ValueError("refinement matrix blockers must be a mapping")
+    matrix_blocker_count = blockers.get("matrix_count")
+    if (
+        isinstance(matrix_blocker_count, bool)
+        or not isinstance(matrix_blocker_count, int)
+        or matrix_blocker_count < 0
+        or (matrix_complete and matrix_blocker_count != 0)
+        or (not matrix_complete and matrix_blocker_count == 0)
+    ):
+        raise ValueError("refinement matrix blocker count contradicts completeness")
+
+    count_names = (
+        "total_count",
+        "matrix_count",
+        "evidence_count",
+        "execution_provenance_count",
+    )
+    blocker_counts = {name: blockers.get(name) for name in count_names}
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in blocker_counts.values()
+    ):
+        raise ValueError("refinement matrix blocker counts must be non-negative integers")
+    evidence_blocker_count = blocker_counts["evidence_count"]
+    execution_blocker_count = blocker_counts["execution_provenance_count"]
+    if blocker_counts["total_count"] != (
+        blocker_counts["matrix_count"] + evidence_blocker_count + execution_blocker_count
+    ):
+        raise ValueError("refinement matrix blocker category counts are inconsistent")
+    by_code = blockers.get("by_code")
+    by_requirement = blockers.get("by_requirement")
+    groups = blockers.get("groups")
+    if (
+        not isinstance(by_code, Mapping)
+        or not isinstance(by_requirement, Mapping)
+        or not isinstance(groups, list)
+    ):
+        raise ValueError("refinement matrix compact blocker detail is malformed")
+
+    def _validated_count_sum(values: Mapping[str, Any], name: str) -> int:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in values.values()
+        ):
+            raise ValueError("refinement matrix %s counts are malformed" % name)
+        return sum(int(value) for value in values.values())
+
+    if _validated_count_sum(by_code, "blocker-code") != blocker_counts["total_count"]:
+        raise ValueError("refinement matrix blocker-code counts are inconsistent")
+    if _validated_count_sum(by_requirement, "blocker-requirement") > blocker_counts["total_count"]:
+        raise ValueError("refinement matrix blocker-requirement counts are inconsistent")
+    grouped_count = 0
+    for group in groups:
+        if not isinstance(group, Mapping):
+            raise ValueError("refinement matrix blocker group is malformed")
+        count = group.get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("refinement matrix blocker group count is malformed")
+        grouped_count += count
+    if grouped_count != blocker_counts["total_count"]:
+        raise ValueError("refinement matrix blocker group counts are inconsistent")
+
+    primary_evidence_status = payload.get("primary_evidence_status")
+    if primary_evidence_status not in {"complete", "blocked"}:
+        raise ValueError("refinement matrix primary-evidence status is invalid")
+    expected_primary_evidence_status = (
+        "complete" if evidence_blocker_count == 0 and execution_blocker_count == 0 else "blocked"
+    )
+    if primary_evidence_status != expected_primary_evidence_status:
+        raise ValueError("refinement matrix primary-evidence status contradicts blocker counts")
+    execution_provenance_verified = payload.get("execution_provenance_verified")
+    if not isinstance(execution_provenance_verified, bool) or (
+        execution_provenance_verified != (execution_blocker_count == 0)
+    ):
+        raise ValueError("refinement matrix execution-provenance status contradicts blocker counts")
+    overall_status = payload.get("status")
+    expected_overall_status = (
+        "blocked_matrix"
+        if not matrix_complete
+        else (
+            "blocked_evidence"
+            if primary_evidence_status == "blocked"
+            else ("complete_ordering_failed" if strict_status == "fail" else "complete")
+        )
+    )
+    if overall_status != expected_overall_status:
+        raise ValueError("refinement matrix overall status contradicts component statuses")
+
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("refinement matrix provenance must be a mapping")
+    manifests = provenance.get("manifests")
+    if not isinstance(manifests, Mapping):
+        raise ValueError("refinement matrix manifest provenance must be a mapping")
+    native_provenance = manifests.get("native_r1")
+    truth_provenance = manifests.get("frozen_truth")
+    if not isinstance(native_provenance, Mapping) or not isinstance(truth_provenance, Mapping):
+        raise ValueError("refinement matrix manifest provenance is incomplete")
+    if native_provenance.get("sha256") != native_scanvi.sha256:
+        raise ValueError("refinement matrix is not bound to the native scANVI manifest")
+    if truth_provenance.get("sha256") != frozen_plan_sha256:
+        raise ValueError("refinement matrix is not bound to the frozen truth plan")
+    inputs = provenance.get("inputs")
+    if not isinstance(inputs, Mapping) or set(inputs) != set(expected_samples):
+        raise ValueError("refinement matrix input provenance does not cover every specimen")
+    for sample in expected_samples:
+        row = inputs[sample]
+        if not isinstance(row, Mapping):
+            raise ValueError("refinement matrix specimen provenance is malformed")
+        truth = row.get("truth")
+        reference = row.get("native_r1_reference")
+        if not isinstance(truth, Mapping) or not isinstance(reference, Mapping):
+            raise ValueError("refinement matrix specimen provenance is incomplete")
+        if truth.get("hash_validation") != "matched_frozen_truth_manifest":
+            raise ValueError("refinement matrix truth provenance is invalid")
+        if reference.get("hash_validation") != "matched_native_scanvi_manifest":
+            raise ValueError("refinement matrix native-reference provenance is invalid")
+        _require_sha256(truth.get("sha256"), "refinement_matrix_truth_%s_sha256" % sample)
+        _require_sha256(
+            reference.get("sha256"),
+            "refinement_matrix_reference_%s_sha256" % sample,
+        )
+
+    if not wrong_donor_coverage_complete:
+        matrix_status = "blocked"
+        strict_status = "blocked"
+        overall_status = "blocked_matrix"
+
+    return RefinementMatrixSummary(
+        path=path,
+        sha256=validated_sha256,
+        matrix_status=str(matrix_status),
+        strict_ordering_status=str(strict_status),
+        samples=expected_samples,
+        seeds=expected_seeds,
+        control_seeds=expected_control_seeds,
+        control_names=REFINEMENT_MATRIX_CONTROLS,
+        requested_artifact_count=requested_count,
+        scored_artifact_count=scored_count,
+        overall_status=str(overall_status),
+        primary_evidence_status=str(primary_evidence_status),
+        evidence_blocker_count=evidence_blocker_count,
+        execution_provenance_blocker_count=execution_blocker_count,
+        execution_provenance_verified=execution_provenance_verified,
+        wrong_donor_coverage_complete=wrong_donor_coverage_complete,
+        wrong_donor_pairing_count=len(wrong_donor_pairings),
+        expected_wrong_donor_pairing_count=len(expected_wrong_donor_pairings),
+        missing_wrong_donor_case_count=(
+            len(missing_wrong_donor_pairings) * len(expected_control_seeds)
+        ),
+    )
 
 
 def _nested(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -145,7 +1628,12 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
     _require_equal(payload, "prohibited", "inputs", "target_visium_expression_before_freeze")
     _require_equal(payload, "prohibited", "inputs", "target_rctd_before_freeze")
     _require_equal(payload, [32, 128, 384], "image", "patch_diameters_um")
-    _require_equal(payload, "frozen_common_segmentation", "image", "segmentation_primary")
+    _require_equal(
+        payload,
+        "spaceranger_4_1_frozen_common_segmentation",
+        "image",
+        "segmentation_primary",
+    )
     _require_equal(payload, ["CellViT", "StarDist"], "image", "segmentation_sensitivity")
     _require_equal(payload, 12, "graph", "knn")
     _require_equal(payload, 50, "graph", "radius_um")
@@ -156,6 +1644,10 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
     _require_equal(payload, 10, "rna", "maximum_prototypes_per_type")
     _require_equal(payload, True, "rna", "decoder_frozen")
     _require_equal(payload, "fixed", "rna", "primary_prior_update")
+    _require_equal(payload, "within_type_rna_pca_frozen", "rna", "residual_basis")
+    _require_equal(payload, "type_specific_molecular_geometry", "rna", "residual_bound")
+    _require_equal(payload, "strongly_shrunken_single_prototype", "rna", "rare_type_policy")
+    _require_equal(payload, True, "rna", "retain_rare_types")
     _require_equal(payload, 500, "targets", "genes")
     _require_equal(payload, 15, "targets", "programs", "published_robust_nmf_clusters")
     _require_equal(payload, "detached_uot_responsibilities", "refinement", "e_step")
@@ -168,19 +1660,32 @@ def validate_deepbench_specification(payload: Mapping[str, Any]) -> None:
     _require_equal(payload, 2, "refinement", "minimum_view_agreement")
     _require_equal(payload, 2, "refinement", "trusted_after_consecutive_rounds")
     _require_equal(payload, 0.70, "refinement", "revoke_probability_threshold")
-    _require_equal(payload, [17, 41, 89, 131, 197], "randomness", "primary_seeds")
+    _require_equal(payload, 0.05, "refinement", "uot_unknown_mass")
+    _require_equal(payload, "fixed", "refinement", "uot_unknown_mass_mode")
     _require_equal(
         payload,
-        "matched_ffpe_r1_soft_type_mean",
+        [0.0, 0.01, 0.05, 0.1, 0.2],
+        "refinement",
+        "unknown_mass_sensitivity",
+    )
+    _require_equal(payload, [17, 41, 89, 131, 197], "randomness", "primary_seeds")
+    _require_equal(payload, [17, 41, 89], "randomness", "ablation_seeds")
+    _require_equal(
+        payload,
+        "joint_matched_ffpe_r1_hard_and_soft_type_means",
         "evaluation",
         "primary_baseline",
     )
     _require_equal(
         payload,
-        "matched_ffpe_r1_hard_type_mean",
+        [
+            "matched_ffpe_r1_hard_type_mean_hard_assigned_mass",
+            "matched_ffpe_r1_soft_type_mean_expected_soft_mass",
+        ],
         "evaluation",
-        "primary_baseline_sensitivity",
+        "primary_baselines",
     )
+    _require_equal(payload, True, "evaluation", "success_requires_all_primary_baselines")
     _require_equal(
         payload,
         "paired_median_gene_spearman_delta",
@@ -339,7 +1844,7 @@ def _load_r1_references(
     plan: DeepBenchPlan,
     *,
     gene_panel_sha256: str,
-) -> Dict[str, Tuple[RNAReference, Dict[str, Any]]]:
+) -> Dict[str, Tuple[RNAReference, PrototypeSet, Dict[str, Any]]]:
     """Load hash-bound FFPE-only references as annotation-sensitivity controls."""
 
     manifest = plan.optional_artifacts["primary_ffpe_snpatho_reference_manifest"]
@@ -373,7 +1878,7 @@ def _load_r1_references(
     if not isinstance(specimens, Mapping) or set(specimens) != set(plan.sample_ids):
         raise ValueError("R1 reference manifest must contain exactly the DeepBench specimens")
     repository_root = manifest.parent.parent
-    references: Dict[str, Tuple[RNAReference, Dict[str, Any]]] = {}
+    references: Dict[str, Tuple[RNAReference, PrototypeSet, Dict[str, Any]]] = {}
     for section_id in plan.sample_ids:
         raw = specimens[section_id]
         if not isinstance(raw, Mapping):
@@ -397,14 +1902,36 @@ def _load_r1_references(
         observed_counts = {str(name): int(count) for name, count in zip(labels, counts)}
         if observed_counts != {str(name): int(count) for name, count in expected_counts.items()}:
             raise ValueError("R1 reference cell-type counts differ from its manifest")
+        prototype_path = (repository_root / str(raw["prototypes"])).resolve()
+        prototype_sha256 = str(raw["prototypes_sha256"])
+        if not prototype_path.is_file() or sha256_file(prototype_path) != prototype_sha256:
+            raise ValueError("R1 prototype bank is absent or hash-mismatched: %s" % section_id)
+        prototypes = PrototypeSet.load_npz(prototype_path)
+        if set(np.asarray(prototypes.sample_ids).astype(str).tolist()) != {section_id}:
+            raise ValueError("R1 prototype sample identity differs from its specimen")
+        if prototypes.donor_id != section_id or prototypes.block_id != "%s_FFPE" % section_id:
+            raise ValueError("R1 prototype donor/block identity differs from its specimen")
+        if prototypes.source_reference_sha256 != str(raw["latent_reference_sha256"]):
+            raise ValueError("R1 prototype source-reference lineage differs from its manifest")
+        count_types = set(observed_counts)
+        prototype_types = set(np.asarray(prototypes.cell_type_labels).astype(str).tolist())
+        expected_supported = {str(value) for value in raw["prototype_supported_types"]}
+        expected_omitted = {str(value) for value in raw["prototype_omitted_rare_types"]}
+        if prototype_types != expected_supported:
+            raise ValueError("R1 prototype-supported types differ from its manifest")
+        if prototype_types - count_types or count_types - prototype_types != expected_omitted:
+            raise ValueError("R1 prototype-omitted types differ from its count reference")
         references[section_id] = (
             reference,
+            prototypes,
             {
                 "manifest_sha256": plan.optional_artifact_sha256[
                     "primary_ffpe_snpatho_reference_manifest"
                 ],
                 "reference_path": str(reference_path),
                 "reference_sha256": expected_sha256,
+                "prototype_path": str(prototype_path),
+                "prototype_sha256": prototype_sha256,
                 "selected_observations": selected,
                 "filter": dict(cast(Mapping[str, Any], payload["filter"])),
                 "annotation_provenance": annotation.get("provenance"),
@@ -504,6 +2031,112 @@ def _normalized_type_probabilities(prediction: PredictionBundle) -> np.ndarray:
     return probabilities / total
 
 
+def _type_map_diagnostics(
+    prediction: PredictionBundle,
+    spot_index: np.ndarray,
+    evaluated_spots: np.ndarray,
+) -> Dict[str, Any]:
+    """Audit hard occupancy, soft uncertainty, and spot-mixture variability."""
+
+    probabilities = _normalized_type_probabilities(prediction)
+    indices = np.asarray(spot_index, dtype=np.int64)
+    selected_spots = np.asarray(evaluated_spots, dtype=bool)
+    if indices.shape != (len(probabilities),):
+        raise ValueError("type-map spot assignments must align to prediction cells")
+    if selected_spots.ndim != 1 or np.any(indices >= len(selected_spots)):
+        raise ValueError("type-map evaluated spots are misaligned")
+    assigned = np.flatnonzero(indices >= 0)
+    selected_cells = assigned[selected_spots[indices[assigned]]]
+    selected_spot_indices = np.flatnonzero(selected_spots)
+    if not len(selected_cells) or not len(selected_spot_indices):
+        raise ValueError("type-map diagnostics require assigned cells in evaluated spots")
+    names = tuple(str(value) for value in prediction.type_names.tolist())
+    hard = probabilities.argmax(axis=1)
+    hard_counts = np.bincount(hard[selected_cells], minlength=len(names)).astype(np.int64)
+    cell_count_by_spot = np.bincount(
+        indices[selected_cells],
+        minlength=len(selected_spots),
+    ).astype(np.float64)
+    if np.any(cell_count_by_spot[selected_spots] <= 0):
+        raise ValueError("type-map evaluated spots require at least one assigned cell")
+    spot_mixture: Dict[str, Any] = {}
+    for type_index, name in enumerate(names):
+        hard_spot_count = np.bincount(
+            indices[selected_cells],
+            weights=(hard[selected_cells] == type_index).astype(np.float64),
+            minlength=len(selected_spots),
+        )
+        soft_spot_mass = np.bincount(
+            indices[selected_cells],
+            weights=probabilities[selected_cells, type_index],
+            minlength=len(selected_spots),
+        )
+        hard_fraction = hard_spot_count[selected_spots] / cell_count_by_spot[selected_spots]
+        soft_fraction = soft_spot_mass[selected_spots] / cell_count_by_spot[selected_spots]
+
+        def variation(values: np.ndarray) -> Dict[str, Any]:
+            standard_deviation = float(np.std(values))
+            return {
+                "spatial_standard_deviation": standard_deviation,
+                "spatially_constant": bool(np.ptp(values) <= 1.0e-12),
+                "minimum": float(np.min(values)),
+                "maximum": float(np.max(values)),
+            }
+
+        spot_mixture[name] = {
+            "hard_assignment_fraction": variation(hard_fraction),
+            "soft_expected_fraction": variation(soft_fraction),
+        }
+    if len(names) == 1:
+        normalized_entropy = np.zeros(len(selected_cells), dtype=np.float64)
+    else:
+        selected_probabilities = probabilities[selected_cells]
+        entropy = -np.sum(
+            np.where(
+                selected_probabilities > 0,
+                selected_probabilities * np.log(np.maximum(selected_probabilities, 1.0e-300)),
+                0.0,
+            ),
+            axis=1,
+        )
+        normalized_entropy = entropy / math.log(len(names))
+    return {
+        "scope": "assigned nuclei in primary evaluated spots",
+        "cells_evaluated": int(len(selected_cells)),
+        "spots_evaluated": int(len(selected_spot_indices)),
+        "hard_assignment_counts": {
+            name: int(hard_counts[index]) for index, name in enumerate(names)
+        },
+        "hard_assignment_fractions": {
+            name: float(hard_counts[index] / len(selected_cells))
+            for index, name in enumerate(names)
+        },
+        "occupied_hard_type_count": int(np.sum(hard_counts > 0)),
+        "occupied_hard_types": [name for index, name in enumerate(names) if hard_counts[index] > 0],
+        "unoccupied_hard_types": [
+            name for index, name in enumerate(names) if hard_counts[index] == 0
+        ],
+        "normalized_probability_entropy": {
+            "mean": float(np.mean(normalized_entropy)),
+            "median": float(np.median(normalized_entropy)),
+            "p95": float(np.quantile(normalized_entropy, 0.95)),
+            "minimum": float(np.min(normalized_entropy)),
+            "maximum": float(np.max(normalized_entropy)),
+        },
+        "per_type_spot_mixture": spot_mixture,
+        "hard_spot_mixture_spatially_constant_types": [
+            name
+            for name in names
+            if spot_mixture[name]["hard_assignment_fraction"]["spatially_constant"]
+        ],
+        "soft_spot_mixture_spatially_constant_types": [
+            name
+            for name in names
+            if spot_mixture[name]["soft_expected_fraction"]["spatially_constant"]
+        ],
+    }
+
+
 def _reference_type_support(
     reference: RNAReference,
     prediction: PredictionBundle,
@@ -536,10 +2169,84 @@ def _reference_type_support(
     }
 
 
+def _reference_prototype_type_support(
+    reference: RNAReference,
+    prediction: PredictionBundle,
+    prototypes: PrototypeSet,
+) -> Dict[str, Any]:
+    """Describe the legacy SVD sensitivity prototype bank."""
+
+    prototype_types = tuple(
+        dict.fromkeys(str(value) for value in np.asarray(prototypes.cell_type_labels).tolist())
+    )
+    return _prototype_type_support(
+        reference,
+        prediction,
+        prototype_types,
+        source="legacy_svd_sensitivity_prototype_bank",
+        policy="types below the frozen minimum cell count are omitted and reserved for unknown",
+    )
+
+
+def _prototype_type_support(
+    reference: RNAReference,
+    prediction: PredictionBundle,
+    prototype_types: Sequence[str],
+    *,
+    source: str,
+    policy: str,
+) -> Dict[str, Any]:
+    """Separate count-reference support from one explicitly named prototype bank."""
+
+    count_types = tuple(
+        sorted({str(value) for value in np.asarray(reference.cell_type_labels).tolist()})
+    )
+    ordered_prototype_types = tuple(dict.fromkeys(str(value) for value in prototype_types))
+    count_set = set(count_types)
+    prototype_set = set(ordered_prototype_types)
+    unexpected = tuple(sorted(prototype_set - count_set))
+    if unexpected:
+        raise ValueError(
+            "prototype bank contains types absent from its count reference: %s"
+            % ", ".join(unexpected)
+        )
+    prediction_types = tuple(str(value) for value in prediction.type_names.tolist())
+    return {
+        "count_reference_supported_types": list(count_types),
+        "prototype_supported_types": list(ordered_prototype_types),
+        "prototype_omitted_types": list(sorted(count_set - prototype_set)),
+        "count_reference_supported_prediction_types": [
+            name for name in prediction_types if name in count_set
+        ],
+        "prototype_supported_prediction_types": [
+            name for name in prediction_types if name in prototype_set
+        ],
+        "prototype_omitted_prediction_types": [
+            name for name in prediction_types if name in count_set and name not in prototype_set
+        ],
+        "prototype_support_source": source,
+        "prototype_support_policy": policy,
+    }
+
+
 def _cell_rna_mass(reference: RNAReference, prediction: PredictionBundle) -> np.ndarray:
+    """Return the shared soft expected type-median library-size weight."""
+
     _, medians = _reference_linear_profiles(reference, prediction.type_names.tolist())
     probabilities = _normalized_type_probabilities(prediction)
     mass = probabilities.dot(medians)
+    return mass / max(float(np.median(mass)), 1.0e-12)
+
+
+def _hard_assigned_cell_rna_mass(
+    reference: RNAReference,
+    prediction: PredictionBundle,
+) -> np.ndarray:
+    """Return the median library size of each cell's hard argmax type."""
+
+    _, medians = _reference_linear_profiles(reference, prediction.type_names.tolist())
+    hard_types = _normalized_type_probabilities(prediction).argmax(axis=1)
+    mass = medians[hard_types]
     return mass / max(float(np.median(mass)), 1.0e-12)
 
 
@@ -562,6 +2269,20 @@ def _soft_type_mean_cells(
     profiles, _ = _reference_linear_profiles(reference, prediction.type_names.tolist())
     probabilities = _normalized_type_probabilities(prediction)
     return np.log1p(probabilities.dot(profiles)).astype(np.float32)
+
+
+def _matched_r1_baseline_cell_values(
+    reference: RNAReference,
+    refined_prediction: PredictionBundle,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build both primary R1 baselines from the refined method's own type map."""
+
+    return (
+        _cell_rna_mass(reference, refined_prediction),
+        _hard_assigned_cell_rna_mass(reference, refined_prediction),
+        _type_mean_cells(reference, refined_prediction),
+        _soft_type_mean_cells(reference, refined_prediction),
+    )
 
 
 def _safe_correlation(
@@ -945,16 +2666,41 @@ def _repeated_final_record_shuffle_null(
     return _compact_shuffle_distribution(statistics), first_spots, first_mass, statistics
 
 
-def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
+def _readiness(
+    plan: DeepBenchPlan,
+    *,
+    native_scanvi: Optional[NativeScanviManifest] = None,
+    refined_predictions_validated: bool = False,
+    five_seed_predictions: Optional[FiveSeedPredictionManifest] = None,
+    refinement_matrix_summary: Optional[RefinementMatrixSummary] = None,
+) -> Tuple[Dict[str, Any], ...]:
+    matrix_complete = bool(
+        refinement_matrix_summary is not None and refinement_matrix_summary.matrix_complete
+    )
+    matrix_controls = set(refinement_matrix_summary.control_names) if matrix_complete else set()
+    matrix_strict_status = (
+        None
+        if refinement_matrix_summary is None
+        else refinement_matrix_summary.strict_ordering_status
+    )
     ready = [
         ("locked_round0_predictions", "Hash-frozen v0.2 predictions for all three specimens"),
         (
             "historical_integrated_hard_type_mean",
-            "Hard argmax baseline derived from the v0.2 pooled multi-workflow reference",
+            "Hard argmax profile with shared soft expected RNA-mass weights derived from the "
+            "v0.2 pooled multi-workflow reference",
         ),
         (
             "historical_integrated_soft_type_mean",
             "Probability-weighted baseline derived from the v0.2 pooled multi-workflow reference",
+        ),
+        (
+            "historical_integrated_hard_assigned_mass_type_mean",
+            "Hard argmax profile with hard-assigned type-median RNA-mass weights",
+        ),
+        (
+            "historical_integrated_equal_cell_type_means",
+            "Hard and soft type-profile baselines with equal-cell aggregation",
         ),
         (
             "historical_integrated_pseudobulk",
@@ -964,8 +2710,17 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
             "historical_final_cell_record_shuffle",
             "%d deterministic independently seeded final-cell-record permutations are "
             "summarized compactly; draw 0 remains the single-method backward comparison. "
-            "Neither satisfies image-feature or coordinate/graph shuffle controls"
-            % plan.final_cell_record_shuffle_permutations,
+            "%s"
+            % (
+                plan.final_cell_record_shuffle_permutations,
+                (
+                    "These historical permutations do not substitute for image-feature or "
+                    "graph shuffle controls; those controls are consumed separately by the "
+                    "native-scANVI refinement matrix"
+                    if matrix_complete
+                    else ("Neither satisfies image-feature or coordinate/graph shuffle controls")
+                ),
+            ),
         ),
         (
             "historical_integrated_reference_library_size_weighting",
@@ -975,13 +2730,30 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
     records: List[Dict[str, Any]] = [
         {"component": name, "status": "ready", "reason": reason} for name, reason in ready
     ]
+    primary_reference_reason = (
+        "FFPE-snPATHO-only native scANVI references and rare-complete prototype banks are "
+        "hash-validated, and the scored refinement matrix consumes the native prototype-only "
+        "control. The labels still come from the published integrated-workflow annotation; "
+        "an independent clean reannotation is absent, so this remains a sensitivity analysis."
+        if native_scanvi is not None and matrix_complete and "prototype_only" in matrix_controls
+        else (
+            "FFPE-snPATHO-only native scANVI references and rare-complete prototype banks are "
+            "hash-validated, but the labels come from the published integrated-workflow "
+            "annotation and no scored prototype-only matrix is available; an independent "
+            "clean reannotation is absent."
+            if native_scanvi is not None
+            else (
+                "FFPE-snPATHO-only count artifacts are hash-manifested, but use the published "
+                "integrated-workflow annotation and have no independent clean reannotation, "
+                "primary scANVI encoding, or prototype-only prediction/scorer; materialized "
+                "SVD fallback prototypes remain development-only"
+            )
+        )
+    )
     partial = {
         "primary_ffpe_snpatho_reference": (
             "partial_materialized_not_benchmark_ready",
-            "FFPE-snPATHO-only count artifacts are hash-manifested, but use the published "
-            "integrated-workflow annotation and have no independent clean reannotation, "
-            "primary scANVI encoding, or prototype-only prediction/scorer; materialized SVD "
-            "fallback prototypes remain development-only",
+            primary_reference_reason,
         ),
         "primary_spot_qc": (
             "partial",
@@ -1007,8 +2779,17 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
         ),
         "segmentation_confidence_anchor_gate": (
             "blocked_nonfunctional_gate",
-            "Space Ranger exports no calibrated segmentation confidence and v0.2 substituted "
-            "1.0, so the >=0.50 anchor gate is vacuous and refinement is not benchmark-ready",
+            (
+                "Space Ranger exports no calibrated segmentation confidence and the refinement "
+                "runs substitute 1.0, so the scored development matrix does not satisfy the "
+                "primary benchmark's calibrated anchor-confidence requirement"
+                if matrix_complete
+                else (
+                    "Space Ranger exports no calibrated segmentation confidence and v0.2 "
+                    "substituted 1.0, so the >=0.50 anchor gate is vacuous and refinement is "
+                    "not benchmark-ready"
+                )
+            ),
         ),
     }
     records.extend(
@@ -1093,6 +2874,49 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
             "training, refinement, CPU memory, checkpoint/cache size, and energy are incomplete"
         ),
     }
+    if matrix_complete:
+        for component, reason in {
+            "graph_sensitivity_and_rewiring": (
+                "The provenance-validated matrix consumes scored graph-shuffle and no-graph "
+                "controls. The requested 8-NN, radius, multiscale, and degree-preserving "
+                "rewiring sensitivities remain absent."
+            ),
+            "refinement_trajectory_and_ablations": (
+                "The provenance-validated matrix consumes round 0/final predictions across "
+                "five seeds, the complete round 1-4 score trajectory at the prespecified "
+                "trajectory seed, and prototype-only/image-shuffle/graph-shuffle/no-graph/"
+                "wrong-donor controls. E-step, prior-update, refinement-gate, and anchor/map "
+                "stability analyses remain unscored."
+            ),
+            "complete_negative_control_matrix": (
+                "Prototype-only, image-feature-shuffle, graph-shuffle, no-graph, and "
+                "wrong-donor controls are consumed by the provenance-validated matrix. Label "
+                "and prototype permutations, generic-atlas RNA, state omission, reference "
+                "downsampling, block shuffles, toroidal shifts, and coordinate perturbations "
+                "remain absent."
+            ),
+        }.items():
+            blocked_plan_components.pop(component)
+            records.append(
+                {
+                    "component": component,
+                    "status": "partial_consumed_via_refinement_matrix",
+                    "reason": reason,
+                }
+            )
+    if five_seed_predictions is not None or matrix_complete:
+        blocked_plan_components.pop("seed_ensemble_stability")
+        records.append(
+            {
+                "component": "seed_ensemble_stability",
+                "status": "partial_consumed_performance_matrix_only",
+                "reason": (
+                    "Five-seed prediction-level performance is consumed, but map, anchor, "
+                    "assignment-overlap, and between-model stability have not been scored; "
+                    "the matrix must not be interpreted as ensemble-stability evidence."
+                ),
+            }
+        )
     records.extend(
         {
             "component": name,
@@ -1107,6 +2931,9 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
         ),
         "refined_predictions": "No post-redesign refined predictions are supplied",
         "five_seed_predictions": "Only the historical seed-17 prediction is frozen",
+        "refinement_matrix_summary": (
+            "No hash-bound compact refinement score matrix is registered"
+        ),
         "alternative_workflow_references": "No scFFPE/Flex/3-prime reference artifacts are frozen",
         "wrong_donor_predictions": "Wrong-donor HEIR predictions have not been generated",
         "generic_atlas_predictions": "Generic-atlas HEIR predictions have not been generated",
@@ -1130,16 +2957,114 @@ def _readiness(plan: DeepBenchPlan) -> Tuple[Dict[str, Any], ...]:
         "regional_384um_features": "Historical OmiCLIP features contain only 32 and 128 um scales",
         "native_scanvi_checkpoint": "The historical molecular decoder is the B1 SVD/MLP fallback",
     }
+    matrix_control_artifacts = {
+        "wrong_donor_predictions": (
+            "wrong_donor",
+            "wrong-donor prototype control",
+        ),
+        "image_shuffle_predictions": (
+            "image_shuffle",
+            "shuffled-image-feature control",
+        ),
+        "graph_shuffle_predictions": (
+            "graph_shuffle",
+            "shuffled-graph control",
+        ),
+    }
     for name in OPTIONAL_ARTIFACTS:
         artifact = plan.optional_artifacts[name]
         if name == "primary_ffpe_snpatho_reference_manifest" and artifact is not None:
             status = "partial_consumed_retrospective_sensitivity"
             reason = (
-                "Hash-validated FFPE-only counts are consumed for hard/soft type-mean "
-                "sensitivities, but integrated published annotations are not a clean R1 "
-                "reannotation, the SVD prototype adapter is not primary scANVI, and no "
-                "prototype-only/refined scorer is available"
+                "Hash-validated FFPE-only counts are consumed for the matched type-mean "
+                "estimand ladder. Native scANVI references and rare-complete prototype banks "
+                "are separately hash-validated, but the published integrated annotations are "
+                "not an independent clean R1 reannotation."
+                if native_scanvi is not None
+                else (
+                    "Hash-validated FFPE-only counts and SVD fallback prototype banks are "
+                    "consumed for the type-mean ladder, but no primary native-scANVI "
+                    "reference or independent clean R1 reannotation is available."
+                )
             )
+        elif name == "refined_predictions" and matrix_complete:
+            status = "consumed_via_provenance_validated_refinement_matrix"
+            reason = (
+                "Round-0 and final refined predictions for every prespecified specimen and "
+                "five-seed case are scored in the hash-bound matrix; strict ordering is %s"
+                % matrix_strict_status
+            )
+        elif name == "refined_predictions" and refined_predictions_validated:
+            status = "consumed_provenance_validated_development_refined_predictions"
+            reason = (
+                "PredictionBundle sample/donor/seed/round, checkpoint, refinement audit, "
+                "telemetry, refined/native prototypes, latent space, and expression space are "
+                "hash-bound; the result remains a one-seed integrated-label sensitivity"
+            )
+        elif name == "five_seed_predictions" and five_seed_predictions is not None:
+            status = "ready_provenance_validated_five_seed_matrix"
+            reason = (
+                "Every prespecified specimen/seed PredictionBundle is hash-validated and bound "
+                "to the native scANVI latent/expression identities. This establishes scored "
+                "performance coverage, not map or anchor ensemble stability"
+            )
+        elif name == "five_seed_predictions" and matrix_complete:
+            status = "consumed_via_provenance_validated_refinement_matrix"
+            reason = (
+                "The hash-bound score matrix covers every prespecified specimen and seed; "
+                "this establishes performance coverage, not map or anchor ensemble stability"
+            )
+        elif name == "refinement_matrix_summary" and refinement_matrix_summary is not None:
+            status = (
+                "ready_provenance_validated_matrix_strict_ordering_passed"
+                if refinement_matrix_summary.strict_ordering_pass
+                else "consumed_provenance_validated_matrix_strict_ordering_failed"
+            )
+            reason = (
+                "The compact summary is plan-hash-bound, covers every requested specimen, "
+                "seed, round 0-4 trajectory artifact, prototype-only/image-shuffle/graph-"
+                "shuffle/no-graph/wrong-donor control, and strict comparison, and reports "
+                "strict ordering %s" % refinement_matrix_summary.strict_ordering_status
+            )
+        elif name == "native_scanvi_checkpoint" and native_scanvi is not None:
+            status = "ready_recursively_hash_validated_native_scanvi"
+            reason = (
+                "The external native model directory, decoder gene order and expression-"
+                "normalization contract, per-specimen latent references, rare-complete "
+                "prototype banks, and RNA residual geometries (source reference, latent "
+                "identity, type order, rank, and bounds) were parsed and recursively hash-"
+                "validated; published integrated annotations remain a declared sensitivity"
+            )
+        elif (
+            matrix_complete
+            and name in matrix_control_artifacts
+            and matrix_control_artifacts[name][0] in matrix_controls
+        ):
+            status = "consumed_via_provenance_validated_refinement_matrix"
+            reason = (
+                "The %s is scored for every prespecified control case in the hash-bound "
+                "refinement matrix; strict ordering is %s"
+                % (matrix_control_artifacts[name][1], matrix_strict_status)
+            )
+        elif name == "no_geometry_predictions" and matrix_complete:
+            status = "partial_no_graph_consumed_via_refinement_matrix"
+            reason = (
+                "The hash-bound matrix consumes the prespecified no-graph control, but a "
+                "dedicated no-geometry prediction that removes every spatial input remains "
+                "absent; strict ordering is %s" % matrix_strict_status
+            )
+        elif (
+            name
+            in {
+                "refined_predictions",
+                "five_seed_predictions",
+                "refinement_matrix_summary",
+                "native_scanvi_checkpoint",
+            }
+            and artifact is not None
+        ):
+            status = "registered_but_not_provenance_validated"
+            reason = "The artifact was registered but no parsed provenance object was supplied"
         else:
             status = (
                 "registered_not_implemented" if artifact is not None else "blocked_missing_artifact"
@@ -1202,11 +3127,317 @@ def _bootstrap_macro_delta(
     }
 
 
+def _requested_refined_primary_contrasts(
+    cases: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Evaluate the joint hard-and-soft matched-R1 success requirement when possible."""
+
+    contrast_methods = {
+        "matched_ffpe_r1_hard": R1_HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD,
+        "matched_ffpe_r1_soft": R1_SOFT_TYPE_MEAN_METHOD,
+    }
+    contract: Dict[str, Any] = {
+        "joint_contrast": REQUESTED_PRIMARY_CONTRAST,
+        "refined_method": REFINED_R1_METHOD,
+        "evidence_scope": "developmental_one_seed_integrated_label_sensitivity",
+        "full_primary_claim": False,
+        "required_baseline_methods": list(PRIMARY_MATCHED_R1_BASELINES),
+        "required_contrasts": [
+            "refined_heir_minus_matched_ffpe_r1_hard_type_mean",
+            "refined_heir_minus_matched_ffpe_r1_soft_type_mean",
+        ],
+        "endpoint": "paired_median_gene_spearman_delta",
+        "success_formula": (
+            "macro_delta_vs_matched_ffpe_r1_hard > 0 and macro_delta_vs_matched_ffpe_r1_soft > 0"
+        ),
+        "requires_both_contrasts": True,
+    }
+    missing: List[Dict[str, Any]] = []
+    for case in cases:
+        methods = case.get("methods")
+        if not isinstance(methods, Mapping):
+            missing.append(
+                {"section_id": str(case.get("section_id", "")), "missing_methods": ["methods"]}
+            )
+            continue
+        absent = [
+            method
+            for method in (REFINED_R1_METHOD, *PRIMARY_MATCHED_R1_BASELINES)
+            if method not in methods
+        ]
+        if absent:
+            missing.append(
+                {"section_id": str(case.get("section_id", "")), "missing_methods": absent}
+            )
+    if not cases or missing:
+        return {
+            **contract,
+            "status": "not_testable_missing_report_methods",
+            "missing": missing,
+            "contrasts": None,
+            "refined_beats_both_matched_ffpe_r1_baselines": None,
+        }
+
+    contrasts: Dict[str, Any] = {}
+    for label, baseline_method in contrast_methods.items():
+        rows: List[Dict[str, Any]] = []
+        for case in cases:
+            methods = cast(Mapping[str, Any], case["methods"])
+            refined = cast(Mapping[str, Any], methods[REFINED_R1_METHOD])
+            baseline = cast(Mapping[str, Any], methods[baseline_method])
+            refined_per_gene = cast(Mapping[str, Any], refined["per_gene"])
+            baseline_per_gene = cast(Mapping[str, Any], baseline["per_gene"])
+            left = np.asarray(
+                [np.nan if value is None else value for value in refined_per_gene["spearman"]],
+                dtype=np.float64,
+            )
+            right = np.asarray(
+                [np.nan if value is None else value for value in baseline_per_gene["spearman"]],
+                dtype=np.float64,
+            )
+            if left.shape != right.shape:
+                raise ValueError("refined and matched-R1 per-gene metrics are misaligned")
+            difference = left - right
+            finite = difference[np.isfinite(difference)]
+            if not len(finite):
+                raise ValueError("refined matched-R1 contrast has no evaluable genes")
+            rows.append(
+                {
+                    "section_id": str(case["section_id"]),
+                    "median_paired_per_gene_spearman_delta": float(np.median(finite)),
+                }
+            )
+        macro_delta = float(np.mean([row["median_paired_per_gene_spearman_delta"] for row in rows]))
+        contrasts[label] = {
+            "baseline_method": baseline_method,
+            "baseline_estimand": _baseline_estimands()[baseline_method],
+            "specimens": rows,
+            "macro_delta": macro_delta,
+            "macro_delta_positive": macro_delta > 0,
+        }
+    joint = all(value["macro_delta_positive"] for value in contrasts.values())
+    return {
+        **contract,
+        "status": "passes_developmental_joint_contrast"
+        if joint
+        else "fails_developmental_joint_contrast",
+        "missing": [],
+        "contrasts": contrasts,
+        "refined_beats_both_matched_ffpe_r1_baselines": joint,
+    }
+
+
+def _validate_primary_gate_support_artifact(
+    plan: DeepBenchPlan,
+    artifact_name: str,
+    evidence_kind: str,
+    required_contract: Mapping[str, object],
+) -> bool:
+    """Validate one recursively hash-bound full-primary support manifest.
+
+    The optional-artifact registration hash alone only proves the identity of
+    a manifest.  Full-primary gating additionally requires the manifest to
+    declare the prespecified evidence semantics, cover every specimen, and
+    recursively hash-bind each specimen-level result.
+    """
+
+    path = plan.optional_artifacts.get(artifact_name)
+    expected_sha256 = plan.optional_artifact_sha256.get(artifact_name)
+    if path is None or expected_sha256 is None:
+        return False
+    try:
+        _validate_file_hash(path, expected_sha256, artifact_name)
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, Mapping):
+            return False
+        if (
+            payload.get("schema") != PRIMARY_GATE_SUPPORT_SCHEMA
+            or payload.get("evidence_kind") != evidence_kind
+            or payload.get("frozen_benchmark_plan_sha256") != plan.frozen_plan_sha256
+        ):
+            return False
+        sample_ids = payload.get("sample_ids")
+        if not isinstance(sample_ids, list) or tuple(sample_ids) != plan.sample_ids:
+            return False
+        requirements = payload.get("requirements")
+        if not isinstance(requirements, Mapping) or any(
+            requirements.get(name) != value for name, value in required_contract.items()
+        ):
+            return False
+        per_sample = payload.get("per_sample_artifacts")
+        if not isinstance(per_sample, Mapping) or set(per_sample) != set(plan.sample_ids):
+            return False
+        for sample_id in plan.sample_ids:
+            record = per_sample[sample_id]
+            if not isinstance(record, Mapping) or set(record) != {"path", "sha256"}:
+                return False
+            result_path = _resolve_artifact(
+                path.parent,
+                record["path"],
+                "%s_%s" % (artifact_name, sample_id),
+            )
+            _validate_file_hash(
+                result_path,
+                record["sha256"],
+                "%s_%s" % (artifact_name, sample_id),
+            )
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _primary_gate_support_status(plan: DeepBenchPlan) -> Dict[str, bool]:
+    """Return fail-closed support status for every non-matrix primary gate."""
+
+    return {
+        gate: _validate_primary_gate_support_artifact(
+            plan,
+            artifact_name,
+            evidence_kind,
+            requirements,
+        )
+        for gate, (
+            artifact_name,
+            evidence_kind,
+            requirements,
+        ) in PRIMARY_GATE_SUPPORT_CONTRACTS.items()
+    }
+
+
+def _full_primary_evidence_gates(
+    plan: DeepBenchPlan,
+    native_scanvi: Optional[NativeScanviManifest],
+    five_seed_predictions: Optional[FiveSeedPredictionManifest],
+    refinement_matrix_summary: Optional[RefinementMatrixSummary],
+) -> Dict[str, Any]:
+    """Fail closed unless the prespecified matrix was scored and passed."""
+
+    clean_annotation = bool(native_scanvi is not None and native_scanvi.clean_annotation_complete)
+    five_seed_complete = five_seed_predictions is not None
+    matrix_complete = bool(
+        refinement_matrix_summary is not None and refinement_matrix_summary.matrix_complete
+    )
+    strict_ordering_pass = bool(
+        refinement_matrix_summary is not None and refinement_matrix_summary.strict_ordering_pass
+    )
+    scored_controls = (
+        set() if refinement_matrix_summary is None else set(refinement_matrix_summary.control_names)
+    )
+    control_availability = {
+        name: bool(
+            name in scored_controls
+            and (
+                name != "wrong_donor"
+                or (
+                    refinement_matrix_summary is not None
+                    and refinement_matrix_summary.wrong_donor_coverage_complete
+                )
+            )
+        )
+        for name in REFINEMENT_MATRIX_CONTROLS
+    }
+    controls_complete = matrix_complete and all(control_availability.values())
+    execution_provenance_verified = bool(
+        five_seed_predictions is not None
+        and five_seed_predictions.execution_provenance_verified
+        and refinement_matrix_summary is not None
+        and refinement_matrix_summary.execution_provenance_verified
+    )
+    required_followup_evidence_complete = bool(
+        refinement_matrix_summary is not None
+        and refinement_matrix_summary.required_followup_evidence_complete
+    )
+    primary_support = _primary_gate_support_status(plan)
+    gates = {
+        "independent_clean_reannotation": clean_annotation,
+        "prespecified_five_seed_matrix": five_seed_complete,
+        "scored_refinement_matrix_complete": matrix_complete,
+        "refinement_matrix_strict_ordering_pass": strict_ordering_pass,
+        "required_negative_controls": controls_complete,
+        "execution_provenance_verified": execution_provenance_verified,
+        "required_followup_evidence_complete": required_followup_evidence_complete,
+        **primary_support,
+    }
+    return {
+        "eligible_for_full_primary_claim": all(gates.values()),
+        "gates": gates,
+        "control_availability": control_availability,
+        "refinement_matrix": {
+            "registered": refinement_matrix_summary is not None,
+            "matrix_status": (
+                None
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.matrix_status
+            ),
+            "strict_ordering_status": (
+                None
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.strict_ordering_status
+            ),
+            "summary_sha256": (
+                None if refinement_matrix_summary is None else refinement_matrix_summary.sha256
+            ),
+            "execution_provenance_verified": (
+                False
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.execution_provenance_verified
+            ),
+            "primary_evidence_status": (
+                None
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.primary_evidence_status
+            ),
+            "evidence_blocker_count": (
+                None
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.evidence_blocker_count
+            ),
+            "execution_provenance_blocker_count": (
+                None
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.execution_provenance_blocker_count
+            ),
+            "wrong_donor_coverage_complete": (
+                False
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.wrong_donor_coverage_complete
+            ),
+            "wrong_donor_pairing_count": (
+                0
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.wrong_donor_pairing_count
+            ),
+            "expected_wrong_donor_pairing_count": (
+                len(DEEPBENCH_SAMPLES) * (len(DEEPBENCH_SAMPLES) - 1)
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.expected_wrong_donor_pairing_count
+            ),
+            "missing_wrong_donor_case_count": (
+                None
+                if refinement_matrix_summary is None
+                else refinement_matrix_summary.missing_wrong_donor_case_count
+            ),
+        },
+        "blockers": [name for name, available in gates.items() if not available],
+    }
+
+
 def _primary_diagnostic(
     cases: Sequence[Dict[str, Any]],
     plan: DeepBenchPlan,
     repeated_shuffle_statistics: Optional[Mapping[str, np.ndarray]] = None,
+    native_scanvi: Optional[NativeScanviManifest] = None,
+    five_seed_predictions: Optional[FiveSeedPredictionManifest] = None,
+    refinement_matrix_summary: Optional[RefinementMatrixSummary] = None,
 ) -> Dict[str, Any]:
+    requested_joint = _requested_refined_primary_contrasts(cases)
+    full_primary_evidence = _full_primary_evidence_gates(
+        plan,
+        native_scanvi,
+        five_seed_predictions,
+        refinement_matrix_summary,
+    )
     deltas: List[np.ndarray] = []
     observed_means: List[np.ndarray] = []
     rows: List[Dict[str, Any]] = []
@@ -1323,23 +3554,71 @@ def _primary_diagnostic(
             if repeated_shuffle_statistics is not None
             else None
         ),
-        "composition_adjusted_residual_positive": None,
+        "composition_adjusted_residual_positive": full_primary_evidence["gates"][
+            "composition_adjusted_residuals_hash_validated"
+        ],
     }
     refined_available = plan.optional_artifacts["refined_predictions"] is not None
-    requested_blockers = [
-        "materialized FFPE-snPATHO-only counts lack independent clean reannotation, scANVI "
-        "encoding and prototype-only predictions; the SVD fallback adapter is development-only",
-        "refined predictions are absent or their schema is not consumed",
-        "composition-adjusted residual inputs are absent",
-        "required per-spot H&E tissue fraction is absent",
-    ]
-    return {
-        "requested_primary_contrast": ("refined_heir_minus_matched_ffpe_r1_soft_type_mean"),
-        "requested_primary_status": (
-            "not_testable_registered_refined_schema_not_implemented"
-            if refined_available
-            else "not_testable_missing_refined_predictions"
+    molecular_reference_blocker = None
+    if native_scanvi is None:
+        molecular_reference_blocker = (
+            "materialized FFPE-snPATHO-only counts lack independent clean reannotation and "
+            "native scANVI encoding; the SVD fallback adapter is development-only"
+        )
+    elif not native_scanvi.clean_annotation_complete:
+        molecular_reference_blocker = (
+            "native scANVI uses published integrated annotations rather than an independent clean "
+            "FFPE-snPATHO-only reannotation"
+        )
+    requested_blockers = []
+    if molecular_reference_blocker is not None:
+        requested_blockers.append(molecular_reference_blocker)
+    if not refined_available:
+        requested_blockers.append("refined predictions are absent")
+    primary_support_blockers = {
+        "composition_adjusted_residuals_hash_validated": (
+            "composition-adjusted residual evidence is absent or fails its recursive hash contract"
         ),
+        "required_he_tissue_fraction_qc_hash_validated": (
+            "required per-spot H&E tissue-fraction QC is absent or fails its recursive hash "
+            "contract"
+        ),
+        "calibrated_segmentation_confidence_hash_validated": (
+            "calibrated segmentation-confidence evidence is absent or fails its recursive hash "
+            "contract"
+        ),
+    }
+    requested_blockers.extend(
+        message
+        for gate, message in primary_support_blockers.items()
+        if not full_primary_evidence["gates"][gate]
+    )
+    requested_blockers.extend(
+        "full-primary evidence gate is unavailable: %s" % blocker
+        for blocker in full_primary_evidence["blockers"]
+        if blocker not in primary_support_blockers
+    )
+    joint_status = str(requested_joint["status"])
+    if not refined_available:
+        requested_primary_status = "not_testable_missing_refined_predictions"
+    elif joint_status == "not_testable_missing_report_methods":
+        requested_primary_status = joint_status
+    elif not full_primary_evidence["eligible_for_full_primary_claim"]:
+        requested_primary_status = "developmental_joint_contrast_only_not_primary"
+    elif joint_status == "passes_developmental_joint_contrast":
+        requested_primary_status = "passes_full_primary_requirement"
+    else:
+        requested_primary_status = "fails_full_primary_requirement"
+    return {
+        "requested_primary_contrast": REQUESTED_PRIMARY_CONTRAST,
+        "requested_primary_contrast_requirement": requested_joint,
+        "developmental_seed17_joint_contrast": {
+            **requested_joint,
+            "seed": plan.primary_seeds[0],
+            "analysis_role": "developmental_only_not_full_primary_gate",
+        },
+        "requested_primary_status": requested_primary_status,
+        "full_primary_evidence": full_primary_evidence,
         "requested_primary_blockers": requested_blockers,
         "diagnostic_contrast": ("historical_round0_minus_historical_integrated_hard_type_mean"),
         "diagnostic_statistic": {
@@ -1415,6 +3694,11 @@ def _method_macro_summaries(cases: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             "specimens": len(specimen_payloads),
             "metrics": metrics,
         }
+        estimands = [payload.get("estimand") for payload in specimen_payloads]
+        if any(value is not None for value in estimands):
+            if any(value != estimands[0] for value in estimands[1:]):
+                raise ValueError("DeepBench method estimands must agree across specimens")
+            result[str(method)]["estimand"] = estimands[0]
     return result
 
 
@@ -1438,6 +3722,33 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         plan,
         gene_panel_sha256=locked_plan.gene_panel_sha256,
     )
+    baseline_estimands = _baseline_estimands()
+    native_scanvi = _load_native_scanvi_manifest(
+        plan.optional_artifacts["native_scanvi_checkpoint"],
+        plan.sample_ids,
+        manifest_sha256=plan.optional_artifact_sha256["native_scanvi_checkpoint"],
+    )
+    refined_predictions = _load_refined_prediction_manifest(
+        plan.optional_artifacts["refined_predictions"],
+        plan.sample_ids,
+        native_scanvi,
+    )
+    five_seed_predictions = _load_five_seed_prediction_manifest(
+        plan.optional_artifacts["five_seed_predictions"],
+        plan.sample_ids,
+        plan.primary_seeds,
+        native_scanvi,
+    )
+    refinement_matrix_summary = _load_refinement_matrix_summary(
+        plan.optional_artifacts["refinement_matrix_summary"],
+        plan.sample_ids,
+        plan.primary_seeds,
+        tuple(int(value) for value in _nested(plan.specification, "randomness", "ablation_seeds")),
+        minimum_nuclei=plan.minimum_nuclei,
+        frozen_plan_sha256=plan.frozen_plan_sha256,
+        native_scanvi=native_scanvi,
+        summary_sha256=plan.optional_artifact_sha256["refinement_matrix_summary"],
+    )
     # This re-evaluation validates all frozen hashes and target-isolation
     # contracts; it does not write or mutate the historical report.
     locked: SnPathoBenchmarkResult = run_snpatho_benchmark(
@@ -1456,6 +3767,7 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         truth = SpatialTruthArtifact.from_npz(case.truth)
         type_support = _reference_type_support(reference, prediction)
         rna_mass = _cell_rna_mass(reference, prediction)
+        hard_assigned_rna_mass = _hard_assigned_cell_rna_mass(reference, prediction)
         type_cells = _type_mean_cells(reference, prediction)
         soft_type_cells = _soft_type_mean_cells(reference, prediction)
         spot_index = truth.nucleus_spot_index
@@ -1465,6 +3777,11 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         primary_spots = spot_counts >= plan.minimum_nuclei
         if primary_spots.sum() < 3:
             raise ValueError("DeepBench primary spot proxy contains fewer than three spots")
+        type_map_diagnostics = _type_map_diagnostics(
+            prediction,
+            spot_index,
+            primary_spots,
+        )
         gene_order = tuple(str(value) for value in prediction.gene_names.tolist())
         if gene_order != tuple(str(value) for value in truth.gene_names.tolist()):
             raise ValueError("DeepBench prediction and truth gene orders differ")
@@ -1473,24 +3790,115 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
         r1_provenance: Optional[Dict[str, Any]] = None
         r1_values: Dict[str, Tuple[np.ndarray, np.ndarray, str]] = {}
         if r1_payload is not None:
-            r1_reference, r1_provenance = r1_payload
+            r1_reference, r1_prototypes, r1_provenance = r1_payload
             if gene_order != tuple(str(value) for value in r1_reference.gene_ids.tolist()):
                 raise ValueError("R1 reference and DeepBench gene orders differ")
-            r1_type_support = _reference_type_support(r1_reference, prediction)
-            r1_cell_mass = _cell_rna_mass(r1_reference, prediction)
+            refined_artifact = refined_predictions.get(case.section_id)
+            r1_prediction = prediction
+            if refined_artifact is not None:
+                refined_prediction = refined_artifact.prediction
+                if not np.array_equal(refined_prediction.nucleus_ids, prediction.nucleus_ids):
+                    raise ValueError("refined and historical prediction nuclei differ")
+                if tuple(str(value) for value in refined_prediction.gene_names.tolist()) != (
+                    gene_order
+                ):
+                    raise ValueError("refined and historical prediction genes differ")
+                if tuple(str(value) for value in refined_prediction.type_names.tolist()) != tuple(
+                    str(value) for value in prediction.type_names.tolist()
+                ):
+                    raise ValueError("refined and historical prediction type ontologies differ")
+                r1_prediction = refined_prediction
+            legacy_prototype_support = _reference_prototype_type_support(
+                r1_reference,
+                r1_prediction,
+                r1_prototypes,
+            )
+            native_prototype_support: Optional[Dict[str, Any]] = None
+            if native_scanvi is not None:
+                native_types = native_scanvi.specimen_prototype_type_names.get(case.section_id)
+                if native_types is None:
+                    raise ValueError(
+                        "native scANVI prototype type support is absent for %s" % case.section_id
+                    )
+                native_prototype_support = _prototype_type_support(
+                    r1_reference,
+                    r1_prediction,
+                    native_types,
+                    source="native_scanvi_rare_complete_prototype_bank",
+                    policy=(
+                        "rare-complete native scANVI bank; every matched FFPE-R1 type is "
+                        "required for refined-run fairness"
+                    ),
+                )
+                if (
+                    refined_artifact is not None
+                    and native_prototype_support["prototype_omitted_types"]
+                ):
+                    raise ValueError(
+                        "native rare-complete prototype support is incomplete for refined-run "
+                        "fairness: %s" % case.section_id
+                    )
+            fairness_support = (
+                native_prototype_support
+                if refined_artifact is not None and native_prototype_support is not None
+                else legacy_prototype_support
+            )
+            r1_type_support = {
+                **_reference_type_support(r1_reference, r1_prediction),
+                **fairness_support,
+                "refined_run_fairness_prototype_source": fairness_support[
+                    "prototype_support_source"
+                ],
+                "native_scanvi_rare_complete_prototype_support": native_prototype_support,
+                "legacy_svd_sensitivity_prototype_support": legacy_prototype_support,
+            }
+            # The matched-R1 comparison must use exactly the same refined cell-state
+            # probabilities as the method under test.  Falling back to the historical
+            # round-0 map is allowed only when no refined run is registered, in which
+            # case these methods remain an annotation-sensitivity diagnostic.
+            (
+                r1_cell_mass,
+                r1_hard_assigned_mass,
+                r1_hard_cells,
+                r1_soft_cells,
+            ) = _matched_r1_baseline_cell_values(
+                r1_reference,
+                r1_prediction,
+            )
+            r1_hard_assigned_spots, r1_hard_assigned_spot_mass = aggregate_cells_to_spots(
+                r1_hard_cells,
+                spot_index,
+                len(truth.spot_ids),
+                r1_hard_assigned_mass,
+            )
             r1_hard_spots, r1_hard_mass = aggregate_cells_to_spots(
-                _type_mean_cells(r1_reference, prediction),
+                r1_hard_cells,
                 spot_index,
                 len(truth.spot_ids),
                 r1_cell_mass,
             )
             r1_soft_spots, r1_soft_mass = aggregate_cells_to_spots(
-                _soft_type_mean_cells(r1_reference, prediction),
+                r1_soft_cells,
                 spot_index,
                 len(truth.spot_ids),
                 r1_cell_mass,
             )
+            r1_equal_hard_spots, r1_equal_hard_mass = aggregate_cells_to_spots(
+                r1_hard_cells,
+                spot_index,
+                len(truth.spot_ids),
+            )
+            r1_equal_soft_spots, r1_equal_soft_mass = aggregate_cells_to_spots(
+                r1_soft_cells,
+                spot_index,
+                len(truth.spot_ids),
+            )
             r1_values = {
+                R1_HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD: (
+                    r1_hard_assigned_spots,
+                    r1_hard_assigned_spot_mass,
+                    R1_LIBRARY_SIZE_AGGREGATION + "_hard_assigned_type_mass",
+                ),
                 R1_HARD_TYPE_MEAN_METHOD: (
                     r1_hard_spots,
                     r1_hard_mass,
@@ -1501,7 +3909,31 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                     r1_soft_mass,
                     R1_LIBRARY_SIZE_AGGREGATION,
                 ),
+                R1_EQUAL_CELL_HARD_TYPE_MEAN_METHOD: (
+                    r1_equal_hard_spots,
+                    r1_equal_hard_mass,
+                    "equal_cell",
+                ),
+                R1_EQUAL_CELL_SOFT_TYPE_MEAN_METHOD: (
+                    r1_equal_soft_spots,
+                    r1_equal_soft_mass,
+                    "equal_cell",
+                ),
             }
+            if refined_artifact is not None:
+                refined_prediction = refined_artifact.prediction
+                refined_rna_mass = _cell_rna_mass(r1_reference, refined_prediction)
+                refined_spots, refined_mass = aggregate_cells_to_spots(
+                    refined_prediction.internal_aggregate_expression_mean,
+                    spot_index,
+                    len(truth.spot_ids),
+                    refined_rna_mass,
+                )
+                r1_values[REFINED_R1_METHOD] = (
+                    refined_spots,
+                    refined_mass,
+                    R1_LIBRARY_SIZE_AGGREGATION + "_refined_heir",
+                )
         heir_rna, heir_mass = aggregate_cells_to_spots(
             prediction.expression_mean,
             spot_index,
@@ -1525,11 +3957,27 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
             len(truth.spot_ids),
             rna_mass,
         )
+        hard_assigned_type_spots, hard_assigned_type_mass = aggregate_cells_to_spots(
+            type_cells,
+            spot_index,
+            len(truth.spot_ids),
+            hard_assigned_rna_mass,
+        )
         soft_type_spots, soft_type_mass = aggregate_cells_to_spots(
             soft_type_cells,
             spot_index,
             len(truth.spot_ids),
             rna_mass,
+        )
+        equal_hard_type_spots, equal_hard_type_mass = aggregate_cells_to_spots(
+            type_cells,
+            spot_index,
+            len(truth.spot_ids),
+        )
+        equal_soft_type_spots, equal_soft_type_mass = aggregate_cells_to_spots(
+            soft_type_cells,
+            spot_index,
+            len(truth.spot_ids),
         )
         pseudobulk = np.log1p(_reference_linear_pseudobulk(reference))
         pseudobulk_spots = np.repeat(pseudobulk[None, :], len(truth.spot_ids), axis=0)
@@ -1562,6 +4010,11 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 HISTORICAL_LIBRARY_SIZE_AGGREGATION + "_nonabstained_only",
             ),
             EQUAL_CELL_METHOD: (heir_equal, equal_mass, "equal_cell"),
+            HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD: (
+                hard_assigned_type_spots,
+                hard_assigned_type_mass,
+                HISTORICAL_LIBRARY_SIZE_AGGREGATION + "_hard_assigned_type_mass",
+            ),
             TYPE_MEAN_METHOD: (
                 type_spots,
                 type_mass,
@@ -1571,6 +4024,16 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 soft_type_spots,
                 soft_type_mass,
                 HISTORICAL_LIBRARY_SIZE_AGGREGATION,
+            ),
+            EQUAL_CELL_HARD_TYPE_MEAN_METHOD: (
+                equal_hard_type_spots,
+                equal_hard_type_mass,
+                "equal_cell",
+            ),
+            EQUAL_CELL_SOFT_TYPE_MEAN_METHOD: (
+                equal_soft_type_spots,
+                equal_soft_type_mass,
+                "equal_cell",
             ),
             PSEUDOBULK_METHOD: (
                 pseudobulk_spots,
@@ -1600,6 +4063,8 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 "spot_coverage": float(evaluable.sum() / primary_spots.sum()),
                 **metrics,
             }
+            if method in baseline_estimands:
+                methods[method]["estimand"] = dict(baseline_estimands[method])
             if method == SHUFFLE_METHOD:
                 methods[method]["shuffle_role"] = "single_draw_0_preserved_for_backward_comparison"
         cases.append(
@@ -1618,6 +4083,7 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                     "cell_coverage": float((~prediction.abstain.astype(bool)).mean()),
                 },
                 "reference_type_support": type_support,
+                "type_map_diagnostics": type_map_diagnostics,
                 "r1_reference_type_support": (
                     r1_type_support
                     if r1_type_support is not None
@@ -1633,6 +4099,39 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                     "reference_sha256": case.matched_reference_sha256,
                     "checkpoint_sha256": case.checkpoint_sha256,
                     "r1_reference": r1_provenance,
+                    "refined_prediction": (
+                        None
+                        if case.section_id not in refined_predictions
+                        else {
+                            "path": str(refined_predictions[case.section_id].path),
+                            "sha256": refined_predictions[case.section_id].sha256,
+                            "checkpoint_sha256": refined_predictions[
+                                case.section_id
+                            ].checkpoint_sha256,
+                            "refinement_audit_sha256": refined_predictions[
+                                case.section_id
+                            ].refinement_audit_sha256,
+                            "telemetry_sha256": refined_predictions[
+                                case.section_id
+                            ].telemetry_sha256,
+                            "refined_prototype_sha256": refined_predictions[
+                                case.section_id
+                            ].refined_prototype_sha256,
+                            "native_prototype_sha256": refined_predictions[
+                                case.section_id
+                            ].native_prototype_sha256,
+                            "native_scanvi_manifest_sha256": (
+                                None if native_scanvi is None else native_scanvi.sha256
+                            ),
+                            "native_residual_geometry_sha256": (
+                                None
+                                if native_scanvi is None
+                                else native_scanvi.specimen_residual_geometry[
+                                    case.section_id
+                                ].sha256
+                            ),
+                        }
+                    ),
                 },
             }
         )
@@ -1667,7 +4166,13 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
             "coordinate_or_graph_shuffle_followed_by_model_rerun",
         ],
     }
-    readiness = _readiness(plan)
+    readiness = _readiness(
+        plan,
+        native_scanvi=native_scanvi,
+        refined_predictions_validated=bool(refined_predictions),
+        five_seed_predictions=five_seed_predictions,
+        refinement_matrix_summary=refinement_matrix_summary,
+    )
     method_macro = _method_macro_summaries(cases)
     locked_macro_spearman = {
         summary.method: summary.estimate
@@ -1768,9 +4273,19 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 "predictions remain unavailable for the requested primary endpoint"
             ),
             "retrospective_r1_sensitivity_methods": [
+                R1_HARD_ASSIGNED_MASS_TYPE_MEAN_METHOD,
                 R1_HARD_TYPE_MEAN_METHOD,
                 R1_SOFT_TYPE_MEAN_METHOD,
+                R1_EQUAL_CELL_HARD_TYPE_MEAN_METHOD,
+                R1_EQUAL_CELL_SOFT_TYPE_MEAN_METHOD,
             ],
+            "primary_contrast_requirement": {
+                "required_baselines": list(PRIMARY_MATCHED_R1_BASELINES),
+                "success_rule": (
+                    "refined HEIR must have positive paired median-gene Spearman macro delta "
+                    "against both matched FFPE-R1 hard and soft type-mean baselines"
+                ),
+            },
             "historical_available": (
                 "v0.2 pooled integrated multi-workflow reference containing FFPE snPATHO-seq, "
                 "frozen Flex, and frozen 3-prime nuclei"
@@ -1830,6 +4345,7 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
                 "status": "historical DeepBench sensitivity graph, not Visium hex adjacency",
             },
         },
+        "baseline_estimands": baseline_estimands,
         "locked_v0_2_deepbench_v1_reconciliation": reconciliation,
         "readiness": list(readiness),
         "cases": cases,
@@ -1838,6 +4354,9 @@ def run_deepbench(plan: DeepBenchPlan) -> Dict[str, Any]:
             cases,
             plan,
             repeated_shuffle_statistics=shuffle_null_draw_statistics,
+            native_scanvi=native_scanvi,
+            five_seed_predictions=five_seed_predictions,
+            refinement_matrix_summary=refinement_matrix_summary,
         ),
         "reporting": {
             "specimen_is_biological_unit": True,
@@ -1903,6 +4422,92 @@ def write_deepbench_report(
                             ),
                         }
                     )
+            estimands = report.get("baseline_estimands")
+            if isinstance(estimands, Mapping):
+                for method, estimand in estimands.items():
+                    writer.writerow(
+                        {
+                            "record_type": "baseline_estimand",
+                            "section_id": "all",
+                            "method": method,
+                            "aggregation": cast(Mapping[str, Any], estimand)["cell_rna_mass"],
+                            "gene_name": "",
+                            "metric": "profile_mass_estimand",
+                            "value": "",
+                            "spots_evaluated": "",
+                            "status": "ok",
+                            "reason": json.dumps(estimand, sort_keys=True),
+                        }
+                    )
+            for case in report.get("cases", []):
+                support = case.get("r1_reference_type_support")
+                if isinstance(support, Mapping):
+                    for metric in (
+                        "count_reference_supported_types",
+                        "prototype_supported_types",
+                        "prototype_omitted_types",
+                    ):
+                        values = support.get(metric)
+                        if isinstance(values, list):
+                            for type_name in values:
+                                writer.writerow(
+                                    {
+                                        "record_type": "type_support",
+                                        "section_id": case["section_id"],
+                                        "method": "matched_ffpe_r1_support_ladder",
+                                        "aggregation": "",
+                                        "gene_name": str(type_name),
+                                        "metric": metric,
+                                        "value": "1",
+                                        "spots_evaluated": "",
+                                        "status": "ok",
+                                        "reason": "hash-validated count and prototype artifacts",
+                                    }
+                                )
+                    for support_name in (
+                        "native_scanvi_rare_complete_prototype_support",
+                        "legacy_svd_sensitivity_prototype_support",
+                    ):
+                        bank_support = support.get(support_name)
+                        if not isinstance(bank_support, Mapping):
+                            continue
+                        for metric in ("prototype_supported_types", "prototype_omitted_types"):
+                            values = bank_support.get(metric)
+                            if not isinstance(values, list):
+                                continue
+                            for type_name in values:
+                                writer.writerow(
+                                    {
+                                        "record_type": "prototype_bank_type_support",
+                                        "section_id": case["section_id"],
+                                        "method": support_name,
+                                        "aggregation": "",
+                                        "gene_name": str(type_name),
+                                        "metric": metric,
+                                        "value": "1",
+                                        "spots_evaluated": "",
+                                        "status": "ok",
+                                        "reason": bank_support["prototype_support_policy"],
+                                    }
+                                )
+                diagnostics = case.get("type_map_diagnostics")
+                if isinstance(diagnostics, Mapping):
+                    entropy = cast(Mapping[str, Any], diagnostics["normalized_probability_entropy"])
+                    for metric, value in entropy.items():
+                        writer.writerow(
+                            {
+                                "record_type": "type_map",
+                                "section_id": case["section_id"],
+                                "method": "historical_type_probability_map",
+                                "aggregation": "assigned_nuclei_in_primary_spots",
+                                "gene_name": "",
+                                "metric": "normalized_probability_entropy_%s" % metric,
+                                "value": "%.12g" % value,
+                                "spots_evaluated": diagnostics["spots_evaluated"],
+                                "status": "ok",
+                                "reason": "",
+                            }
+                        )
             shuffle_null = report.get("final_cell_record_shuffle_null")
             if isinstance(shuffle_null, Mapping):
                 null_payloads = {
@@ -2055,15 +4660,18 @@ def write_deepbench_report(
             "Flex, and frozen 3-prime nuclei; its results and type-mean baseline are therefore "
             "retrospective diagnostics, not the primary R1 comparison.",
             "",
-            "A hash-bound FFPE-only count reference is now consumed for hard/soft type-mean "
-            "sensitivities with FFPE-only type-median library-size weights. It retains the "
-            "published integrated-workflow annotation and has no native-scANVI prototype-only "
-            "prediction, so it is not the requested clean primary R1 comparison.",
+            "Hash-bound FFPE-only count references and prototype banks are now consumed. The "
+            "type-mean ladder separates hard-assigned mass, shared soft mass, expected soft "
+            "mass, and equal-cell hard/soft estimands. It retains the published "
+            "integrated-workflow annotation. A native-scANVI prototype-only control is scored "
+            "in the development matrix, but the annotation and execution-provenance gates "
+            "remain incomplete, so this is not the requested clean primary R1 comparison.",
             "",
             "Cell-to-spot weights in this diagnostic are **historical integrated-reference "
             "library-size weights**, not assay-corrected biological RNA-mass estimates. Both "
             "hard-argmax and probability-weighted soft historical type-mean baselines are "
-            "reported. Missing prediction types fail closed; no global profile is substituted.",
+            "reported under each explicit mass estimand. Missing prediction types fail closed; "
+            "no global profile is substituted.",
             "",
             "The available null is a complete shuffle of final cell records across assigned "
             "nuclei. It does not substitute for the separately required shuffled-image-feature "
@@ -2104,6 +4712,30 @@ def write_deepbench_report(
             "| %s | %s | %s |" % (row["feature"], row["locked_v0_2"], row["deepbench_v1"])
             for row in report["locked_v0_2_deepbench_v1_reconciliation"]["estimand_differences"]
         )
+        estimands = report.get("baseline_estimands")
+        if isinstance(estimands, Mapping):
+            lines.extend(
+                [
+                    "",
+                    "## Type-mean baseline estimands",
+                    "",
+                    "The legacy hard method IDs remain available, but their shared-soft-mass "
+                    "estimand is now explicit.",
+                    "",
+                    "| Method | Reference | Cell profile | Cell RNA mass |",
+                    "|---|---|---|---|",
+                ]
+            )
+            lines.extend(
+                "| %s | %s | %s | %s |"
+                % (
+                    method,
+                    payload["reference"],
+                    payload["cell_expression_profile"],
+                    payload["cell_rna_mass"],
+                )
+                for method, payload in estimands.items()
+            )
         lines.extend(
             [
                 "",
@@ -2159,6 +4791,108 @@ def write_deepbench_report(
                     ],
                 )
                 for case in r1_cases
+            )
+            lines.extend(
+                [
+                    "",
+                    "Count-reference support and prototype-bank support are distinct:",
+                    "",
+                    "| Specimen | Count-reference-supported types | Prototype-supported types | "
+                    "Prototype-omitted types |",
+                    "|---|---|---|---|",
+                ]
+            )
+            lines.extend(
+                "| %s | %s | %s | %s |"
+                % (
+                    case["section_id"],
+                    ", ".join(case["r1_reference_type_support"]["count_reference_supported_types"])
+                    or "none",
+                    ", ".join(case["r1_reference_type_support"]["prototype_supported_types"])
+                    or "none",
+                    ", ".join(case["r1_reference_type_support"]["prototype_omitted_types"])
+                    or "none",
+                )
+                for case in r1_cases
+            )
+            if any(
+                isinstance(
+                    case["r1_reference_type_support"].get(
+                        "native_scanvi_rare_complete_prototype_support"
+                    ),
+                    Mapping,
+                )
+                for case in r1_cases
+            ):
+                lines.extend(
+                    [
+                        "",
+                        "Native rare-complete support is reported separately from the legacy "
+                        "SVD sensitivity bank. Refined-run fairness uses the native bank:",
+                        "",
+                        "| Specimen | Fairness source | Native supported / omitted | Legacy "
+                        "supported / omitted |",
+                        "|---|---|---|---|",
+                    ]
+                )
+                for case in r1_cases:
+                    support = case["r1_reference_type_support"]
+                    native_support = support.get("native_scanvi_rare_complete_prototype_support")
+                    legacy_support = support["legacy_svd_sensitivity_prototype_support"]
+                    if not isinstance(native_support, Mapping):
+                        continue
+                    lines.append(
+                        "| %s | %s | %s / %s | %s / %s |"
+                        % (
+                            case["section_id"],
+                            support["refined_run_fairness_prototype_source"],
+                            ", ".join(native_support["prototype_supported_types"]) or "none",
+                            ", ".join(native_support["prototype_omitted_types"]) or "none",
+                            ", ".join(legacy_support["prototype_supported_types"]) or "none",
+                            ", ".join(legacy_support["prototype_omitted_types"]) or "none",
+                        )
+                    )
+        diagnostic_cases = [
+            case
+            for case in report["cases"]
+            if isinstance(case.get("type_map_diagnostics"), Mapping)
+        ]
+        if diagnostic_cases:
+            lines.extend(
+                [
+                    "",
+                    "## Type-probability map audit",
+                    "",
+                    "Hard occupancy and hard/soft spot-mixture variation are computed over "
+                    "assigned nuclei in the primary evaluated spots.",
+                    "",
+                    "| Specimen | Occupied hard types | Hard assignments | Mean normalized "
+                    "entropy | Hard-mixture constant types | Soft-mixture constant types |",
+                    "|---|---:|---|---:|---|---|",
+                ]
+            )
+            lines.extend(
+                "| %s | %d | %s | %.6f | %s | %s |"
+                % (
+                    case["section_id"],
+                    case["type_map_diagnostics"]["occupied_hard_type_count"],
+                    ", ".join(
+                        "%s=%d" % (name, count)
+                        for name, count in case["type_map_diagnostics"][
+                            "hard_assignment_counts"
+                        ].items()
+                    ),
+                    case["type_map_diagnostics"]["normalized_probability_entropy"]["mean"],
+                    ", ".join(
+                        case["type_map_diagnostics"]["hard_spot_mixture_spatially_constant_types"]
+                    )
+                    or "none",
+                    ", ".join(
+                        case["type_map_diagnostics"]["soft_spot_mixture_spatially_constant_types"]
+                    )
+                    or "none",
+                )
+                for case in diagnostic_cases
             )
         lines.extend(
             [
@@ -2274,6 +5008,8 @@ def write_deepbench_report(
                 ]
             )
             lines.extend("| %s | %s | %d | %d |" % row for row in constant_rows)
+        requested_joint = primary["developmental_seed17_joint_contrast"]
+        matrix_gate = primary["full_primary_evidence"]["refinement_matrix"]
         lines.extend(
             [
                 "",
@@ -2286,6 +5022,13 @@ def write_deepbench_report(
                 "",
                 "Requested refined-versus-type-mean endpoint: **%s**."
                 % primary["requested_primary_status"],
+                "",
+                "Developmental seed-17 joint matched-R1 contrast: **%s**. This one-seed "
+                "contrast is reported separately and cannot unlock a full-primary claim."
+                % requested_joint["status"],
+                "",
+                "Full-primary refinement matrix: completeness **%s**; strict ordering **%s**."
+                % (matrix_gate["matrix_status"], matrix_gate["strict_ordering_status"]),
                 "",
                 "Spot QC is a partial proxy. Inclusion in the processed RDS materializes the "
                 "author-QC whitelist, but explicit per-spot exclusion flags/reasons and the "

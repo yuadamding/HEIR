@@ -1,0 +1,453 @@
+{
+  "analysis_role": "native_scanvi_published_integrated_annotation_sensitivity",
+  "annotation_provenance": "major_annotation copied from the published integrated-workflow object; not an independent clean reannotation",
+  "artifacts": {
+    "requested": 93,
+    "scored": 93
+  },
+  "blockers": {
+    "by_code": {
+      "invalid_evidence_unknown_mass_sweep": 1,
+      "missing_evidence_clean_independent_reannotation": 1,
+      "missing_evidence_generic_atlas": 1,
+      "missing_evidence_label_permutation": 1,
+      "missing_evidence_reference_downsampling": 1,
+      "missing_evidence_state_omission": 1,
+      "missing_evidence_untouched_external_cohort": 1,
+      "posthoc_adoption_not_original_execution_proof": 1
+    },
+    "by_requirement": {
+      "clean_independent_reannotation": 1,
+      "generic_atlas": 1,
+      "label_permutation": 1,
+      "reference_downsampling": 1,
+      "state_omission": 1,
+      "unknown_mass_sweep": 1,
+      "untouched_external_cohort": 1
+    },
+    "evidence_count": 7,
+    "execution_provenance_count": 1,
+    "groups": [
+      {
+        "code": "invalid_evidence_unknown_mass_sweep",
+        "count": 1,
+        "message": "14 of 15 fixed-mass cases lack checkpoint-serialized unknown-mass metadata; post-hoc recipe adoption cannot prove the mass used to create those endpoints",
+        "requirement": "unknown_mass_sweep",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "missing_evidence_clean_independent_reannotation",
+        "count": 1,
+        "message": "Native scANVI still uses published integrated annotations rather than an independent clean reannotation.",
+        "requirement": "clean_independent_reannotation",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "missing_evidence_generic_atlas",
+        "count": 1,
+        "message": "The generic-atlas RNA control requested by the benchmark plan is unavailable.",
+        "requirement": "generic_atlas",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "missing_evidence_label_permutation",
+        "count": 1,
+        "message": "The label-permutation negative control requested by the benchmark plan is unavailable.",
+        "requirement": "label_permutation",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "missing_evidence_reference_downsampling",
+        "count": 1,
+        "message": "The 1,000/2,500/5,000/all-cell reference-downsampling sensitivity is unavailable.",
+        "requirement": "reference_downsampling",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "missing_evidence_state_omission",
+        "count": 1,
+        "message": "The state-omission sensitivity requested by the benchmark plan is unavailable.",
+        "requirement": "state_omission",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "missing_evidence_untouched_external_cohort",
+        "count": 1,
+        "message": "No untouched external cohort is available for confirmatory validation.",
+        "requirement": "untouched_external_cohort",
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      },
+      {
+        "code": "posthoc_adoption_not_original_execution_proof",
+        "count": 1,
+        "message": "The exact-plan manifest validates current artifacts but adopted one or more pre-existing stages, so it cannot prove their original execution source revision.",
+        "requirement": null,
+        "samples": [],
+        "seeds": [],
+        "variants": []
+      }
+    ],
+    "matrix_count": 0,
+    "total_count": 8
+  },
+  "effective_matrix_status": "complete",
+  "effective_strict_ordering_status": "fail",
+  "execution_provenance_verified": false,
+  "execution_transform_hash_verified": true,
+  "macro_contrasts": {
+    "refined_minus_graph_shuffle": {
+      "case_count": 9,
+      "evaluable_case_count": 9,
+      "mean_of_case_median_deltas": -0.0022454606119017275,
+      "median_of_case_median_deltas": -0.0034846561637074088,
+      "pooled_gene_case_median_delta": -0.0012049087640419731,
+      "pooled_gene_case_positive_fraction": 0.48244444444444445
+    },
+    "refined_minus_image_shuffle": {
+      "case_count": 9,
+      "evaluable_case_count": 9,
+      "mean_of_case_median_deltas": -0.00656379849399925,
+      "median_of_case_median_deltas": -0.0012862352808431631,
+      "pooled_gene_case_median_delta": -0.0030265870593913172,
+      "pooled_gene_case_positive_fraction": 0.48488888888888887
+    },
+    "refined_minus_no_graph": {
+      "case_count": 9,
+      "evaluable_case_count": 9,
+      "mean_of_case_median_deltas": 0.0005414753859893129,
+      "median_of_case_median_deltas": -0.00042812581595121427,
+      "pooled_gene_case_median_delta": 0.000695738013969072,
+      "pooled_gene_case_positive_fraction": 0.5142222222222222
+    },
+    "refined_minus_prototype_only": {
+      "case_count": 9,
+      "evaluable_case_count": 9,
+      "mean_of_case_median_deltas": -0.00015210364582686194,
+      "median_of_case_median_deltas": 3.004278948277872e-05,
+      "pooled_gene_case_median_delta": -1.499305753859155e-06,
+      "pooled_gene_case_positive_fraction": 0.498
+    },
+    "refined_minus_round0": {
+      "case_count": 15,
+      "evaluable_case_count": 15,
+      "mean_of_case_median_deltas": -0.00036695094159711045,
+      "median_of_case_median_deltas": -0.00017284128803085087,
+      "pooled_gene_case_median_delta": -0.00032707974781688576,
+      "pooled_gene_case_positive_fraction": 0.47226666666666667
+    },
+    "refined_minus_wrong_donor": {
+      "case_count": 18,
+      "evaluable_case_count": 18,
+      "mean_of_case_median_deltas": -0.004043710844860194,
+      "median_of_case_median_deltas": -0.0019451361730045422,
+      "pooled_gene_case_median_delta": -0.002603961801473327,
+      "pooled_gene_case_positive_fraction": 0.43955555555555553
+    },
+    "round0_minus_prototype_only": {
+      "case_count": 9,
+      "evaluable_case_count": 9,
+      "mean_of_case_median_deltas": 0.0004204605270831404,
+      "median_of_case_median_deltas": 0.0003015196372577795,
+      "pooled_gene_case_median_delta": 0.00041623216909029374,
+      "pooled_gene_case_positive_fraction": 0.5364444444444444
+    },
+    "trajectory_round1_minus_round0": {
+      "case_count": 3,
+      "evaluable_case_count": 3,
+      "mean_of_case_median_deltas": 0.00016568933988126387,
+      "median_of_case_median_deltas": 0.00017752247715080612,
+      "pooled_gene_case_median_delta": 0.00016483300021280511,
+      "pooled_gene_case_positive_fraction": 0.58
+    },
+    "trajectory_round2_minus_round1": {
+      "case_count": 3,
+      "evaluable_case_count": 3,
+      "mean_of_case_median_deltas": 1.6794979506944835e-05,
+      "median_of_case_median_deltas": 6.719085936798819e-05,
+      "pooled_gene_case_median_delta": 6.601870362558026e-05,
+      "pooled_gene_case_positive_fraction": 0.5366666666666666
+    },
+    "trajectory_round3_minus_round2": {
+      "case_count": 3,
+      "evaluable_case_count": 3,
+      "mean_of_case_median_deltas": 0.0002108844507362338,
+      "median_of_case_median_deltas": 0.00031409053493505583,
+      "pooled_gene_case_median_delta": 0.00032294932677131606,
+      "pooled_gene_case_positive_fraction": 0.5306666666666666
+    },
+    "trajectory_round4_minus_round3": {
+      "case_count": 3,
+      "evaluable_case_count": 3,
+      "mean_of_case_median_deltas": -0.00013119463426588138,
+      "median_of_case_median_deltas": -0.00012377912246512481,
+      "pooled_gene_case_median_delta": -0.00010047065017761234,
+      "pooled_gene_case_positive_fraction": 0.49
+    }
+  },
+  "matrix_status": "complete",
+  "primary_evidence_status": "blocked",
+  "provenance": {
+    "evidence_ready": {},
+    "full_local_json_sha256": "327f54a574449905272a37f98849923eed70d7184cd1c2cc3eec75d1170e6d96",
+    "full_local_markdown_sha256": "64e0906b05eea5753d255495adaa1ea128a41c09abff2b939e45cd26283a4ab6",
+    "full_local_tsv_sha256": "93d09e5f34336dc077de39bcb7d1d85f33c85bae9e1b2a3f3c0b2658883369c7",
+    "inputs": {
+      "4066": {
+        "native_r1_reference": {
+          "hash_validation": "matched_native_scanvi_manifest",
+          "sha256": "b59d7ff28b8027db619988f4c2367eebacc6b8611114ddfdf3ee4d87337fe717"
+        },
+        "truth": {
+          "hash_validation": "matched_frozen_truth_manifest",
+          "sha256": "36e93640f23c983e43925c441b98ce340394e458cad7a38cc1e914ab2ab62658"
+        }
+      },
+      "4399": {
+        "native_r1_reference": {
+          "hash_validation": "matched_native_scanvi_manifest",
+          "sha256": "37f84d1faeed30d3973c279f02e4d92d320525531e8f4f607a2590d473b11db7"
+        },
+        "truth": {
+          "hash_validation": "matched_frozen_truth_manifest",
+          "sha256": "0d6696fcadb0bb34bd85c0d67a05529f67d9cfa08a6a9d344ce776a153974eb8"
+        }
+      },
+      "4411": {
+        "native_r1_reference": {
+          "hash_validation": "matched_native_scanvi_manifest",
+          "sha256": "1e58d39702d55e51e1aa2331e1ced682571046bf69ea46fe2f92851c85011fa7"
+        },
+        "truth": {
+          "hash_validation": "matched_frozen_truth_manifest",
+          "sha256": "169dd6c1a3b9720d30bdbe8a2e4d4def177c8728b6be32ef7746a9b57fb4ad42"
+        }
+      }
+    },
+    "manifests": {
+      "additional_evidence": {
+        "sha256": "86e4c1b0c6e09580935f7cb756cddda89ddbbe390d9bd0157aff7f12c9b78701"
+      },
+      "frozen_truth": {
+        "sha256": "471dbf8f2b5632918772219d78722af36ccb4949b4d840e1c8ef227bf8f4c6b2"
+      },
+      "native_r1": {
+        "sha256": "a55640d76e4b8a4d6413d7ba9b2e1b396ce582dbc7f7a1733861e08747d376c3"
+      },
+      "refinement_run": {
+        "execution_mode": "all_existing_outputs_posthoc_adopted_after_current_validation",
+        "execution_provenance_verified": false,
+        "execution_transform_hash_verified": true,
+        "manifest_role": "posthoc_output_adoption_not_original_execution_proof",
+        "original_execution_source_verified": false,
+        "schema": "heir.snpatho_refinement_run_manifest.v2",
+        "sha256": "69b6fc797a69e14e549288ed5297298d124283dcc11107572c084fd2000c4b99",
+        "stage_count": 138
+      }
+    }
+  },
+  "report_schema": "heir.snpatho_refinement_matrix.v1",
+  "request": {
+    "control_seeds": [
+      17,
+      41,
+      89
+    ],
+    "controls": [
+      "prototype_only",
+      "image_shuffle",
+      "graph_shuffle",
+      "no_graph",
+      "wrong_donor"
+    ],
+    "expected_in_cohort_wrong_donor_pairings": [
+      {
+        "source": "4399",
+        "target": "4066"
+      },
+      {
+        "source": "4411",
+        "target": "4066"
+      },
+      {
+        "source": "4066",
+        "target": "4399"
+      },
+      {
+        "source": "4411",
+        "target": "4399"
+      },
+      {
+        "source": "4066",
+        "target": "4411"
+      },
+      {
+        "source": "4399",
+        "target": "4411"
+      }
+    ],
+    "minimum_nuclei": 3,
+    "requested_wrong_donor_pairings": [
+      {
+        "source": "4399",
+        "target": "4066"
+      },
+      {
+        "source": "4411",
+        "target": "4066"
+      },
+      {
+        "source": "4066",
+        "target": "4399"
+      },
+      {
+        "source": "4411",
+        "target": "4399"
+      },
+      {
+        "source": "4066",
+        "target": "4411"
+      },
+      {
+        "source": "4399",
+        "target": "4411"
+      }
+    ],
+    "sample_sites": {
+      "4066": "primary_breast",
+      "4399": "liver_metastasis",
+      "4411": "liver_metastasis"
+    },
+    "samples": [
+      "4066",
+      "4399",
+      "4411"
+    ],
+    "seeds": [
+      17,
+      41,
+      89,
+      131,
+      197
+    ],
+    "trajectory_seed": 17,
+    "wrong_donor_pairings": [
+      {
+        "source": "4399",
+        "target": "4066"
+      },
+      {
+        "source": "4411",
+        "target": "4066"
+      },
+      {
+        "source": "4066",
+        "target": "4399"
+      },
+      {
+        "source": "4411",
+        "target": "4399"
+      },
+      {
+        "source": "4066",
+        "target": "4411"
+      },
+      {
+        "source": "4399",
+        "target": "4411"
+      }
+    ]
+  },
+  "schema": "heir.snpatho_refinement_matrix_public_summary.v1",
+  "status": "blocked_evidence",
+  "strict_ordering": {
+    "by_check": {
+      "refined_gt_graph_shuffle": {
+        "blocked": 0,
+        "fail": 6,
+        "pass": 3,
+        "total": 9
+      },
+      "refined_gt_hard_baseline": {
+        "blocked": 0,
+        "fail": 8,
+        "pass": 7,
+        "total": 15
+      },
+      "refined_gt_image_shuffle": {
+        "blocked": 0,
+        "fail": 5,
+        "pass": 4,
+        "total": 9
+      },
+      "refined_gt_no_graph": {
+        "blocked": 0,
+        "fail": 5,
+        "pass": 4,
+        "total": 9
+      },
+      "refined_gt_prototype_only": {
+        "blocked": 0,
+        "fail": 2,
+        "pass": 7,
+        "total": 9
+      },
+      "refined_gt_round0": {
+        "blocked": 0,
+        "fail": 8,
+        "pass": 7,
+        "total": 15
+      },
+      "refined_gt_soft_baseline": {
+        "blocked": 0,
+        "fail": 9,
+        "pass": 6,
+        "total": 15
+      },
+      "refined_gt_wrong_donor": {
+        "blocked": 0,
+        "fail": 14,
+        "pass": 4,
+        "total": 18
+      },
+      "round0_gt_prototype_only": {
+        "blocked": 0,
+        "fail": 2,
+        "pass": 7,
+        "total": 9
+      }
+    },
+    "check_counts": {
+      "blocked": 0,
+      "fail": 59,
+      "pass": 49,
+      "total": 108
+    },
+    "required_policy": "refined > round0 > prototype_only and refined > both matched native R1 baselines and every requested control, using median gene Spearman",
+    "status": "fail"
+  },
+  "strict_ordering_status": "fail",
+  "wrong_donor_coverage": {
+    "complete": true,
+    "expected_case_count": 18,
+    "expected_pairing_count_per_control_seed": 6,
+    "missing_case_count": 0,
+    "missing_pairings": [],
+    "observed_check_count": 18,
+    "observed_pairing_count_per_control_seed": 6,
+    "status": "complete"
+  }
+}

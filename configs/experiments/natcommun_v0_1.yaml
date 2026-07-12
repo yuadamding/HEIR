@@ -89,7 +89,10 @@ refinement:
   maximum_prior_total_variation: 0.10
   max_anchors_per_class: 10000
   stable_rounds_required: 1
-  objective_stability_tolerance: 0.01
+  maximum_validation_loss_degradation: 0.01
+  objective_relative_stability_tolerance: 0.01
+  round_selection_mode: fixed
+  maximum_spatial_score_degradation: 0.0
   broad_refinement_rounds: 2
 
 uncertainty:

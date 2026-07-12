@@ -1,0 +1,12 @@
+# fine_type	parent_type
+CAF	stromal
+Cholangiocyte	epithelial
+Endothelial	vascular
+Epithelial_cancer	epithelial
+Hepatocyte	epithelial
+LSEC	vascular
+Lymphatic_endothelial	vascular
+Macrophage	immune
+Mixed_lymphocytes	immune
+PVL	stromal
+RBCs	immune

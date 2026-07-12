@@ -18,10 +18,11 @@ z_i=z_i^{\mathrm{proto}}+\Delta z_i,
 
 where (B_i=\sum_c p_i(c)B_c) mixes type-conditioned bases,
 (\operatorname{rank}(B_c)\le r), and
-(0<\alpha_i<\alpha_{\max}). The coefficient-mean head is initialized exactly at
-zero and every deterministic or sampled residual has
-(\lVert\Delta z_i\rVert_2<\alpha_{\max}); a fresh deterministic model therefore
-equals its routed prototype baseline. Checkpoint v1/v2 models retain their
+(0<\alpha_i<\sum_c p_i(c)\delta_c), with each (\delta_c) calibrated from the
+measured RNA latent geometry. The coefficient-mean head is initialized exactly
+at zero and every deterministic or sampled residual has
+(\lVert\Delta z_i\rVert_2<\sum_c p_i(c)\delta_c); a fresh deterministic model
+therefore equals its routed prototype baseline. Checkpoint v1/v2 models retain their
 historical unrestricted residual behavior when loaded and are never silently
 upgraded.
 
@@ -76,8 +77,13 @@ Every term is implemented independently under `src/heir/losses/` and can be abla
    rounds, confidence/entropy/OOD/segmentation/view gates, and two-round
    revocable anchors. Measured priors are fixed by default; updating them is an
    explicit sensitivity. A first or later candidate whose validation loss
-   exceeds the best loss plus `objective_stability_tolerance` restores the best
-   complete snapshot immediately.
+   exceeds the best loss plus `maximum_validation_loss_degradation` restores
+   the best complete snapshot immediately. Development cohorts can select a
+   round with a frozen spatial scorer; target cohorts use a development-locked
+   fixed round count and treat weak objectives only as rollback safety checks.
+   The frozen-spatial-scorer path is currently an injected programmatic API;
+   the production CLI does not yet construct that scorer, so a CLI fixed-round
+   run must not be described as spatially selected.
 5. Calibrate on development donors.
 6. Open locked spatial measurements once the checkpoint and thresholds are frozen.
 
@@ -96,3 +102,12 @@ The current broad phase is deliberately described as **parent-gated
 fine-prototype transport**: parent probabilities restrict compatible fine
 states, and only the parent head is trainable, but the UOT bank is still fine
 grained. A genuine parent-Gaussian transport contract remains future work.
+The gate is a binary argmax parent-support mask. The hierarchical fine posterior
+already contains the parent posterior, so transport does not multiply the same
+parent probability into prototype compatibility a second time.
+
+Restricted residual bases are fitted from within-type RNA latent residuals with
+`heir fit-residual-geometry`, then loaded and frozen with
+`heir train --residual-geometry`. The same artifact records per-type PCA rank,
+state/covariance/residual scale evidence, and calibrated maximum displacement;
+the scalar `residual_max_norm` is only a backward-compatible fallback.

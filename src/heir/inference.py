@@ -5,7 +5,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Dict, Optional, Sequence, Union
+from typing import ClassVar, Dict, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -15,6 +15,67 @@ from .data.arrays import PrototypeSet
 from .models.heir import HEIRModel
 from .uncertainty.policy import apply_abstention_policy
 from .utils import resolve_device
+
+
+def validate_wrong_donor_prototype_filter(
+    prototypes: PrototypeSet,
+    target_type_names: Sequence[object],
+    used_prototype_ids: Sequence[object],
+    audit: object,
+    *,
+    source_sha256: str,
+) -> None:
+    """Validate the control-only target-ontology intersection audit.
+
+    Legacy telemetry is accepted only when the full source bank was already a
+    subset of the target ontology, so no filtering was necessary.
+    """
+
+    target_types = tuple(str(value) for value in target_type_names)
+    target_set = set(target_types)
+    source_types = tuple(
+        dict.fromkeys(str(value) for value in prototypes.cell_type_labels.tolist())
+    )
+    source_set = set(source_types)
+    retained_types = tuple(value for value in target_types if value in source_set)
+    omitted_types = tuple(value for value in source_types if value not in target_set)
+    selected = np.asarray(
+        [str(value) in target_set for value in prototypes.cell_type_labels.tolist()],
+        dtype=bool,
+    )
+    expected_ids = tuple(str(value) for value in prototypes.prototype_ids[selected].tolist())
+    observed_ids = tuple(str(value) for value in used_prototype_ids)
+    if observed_ids != expected_ids:
+        raise ValueError(
+            "wrong-donor prediction prototype IDs differ from the ontology intersection"
+        )
+    if len(retained_types) < 2 or int(selected.sum()) < 2:
+        raise ValueError("wrong-donor ontology intersection retains insufficient support")
+    if audit is None:
+        if omitted_types:
+            raise ValueError("wrong-donor telemetry lacks the required prototype-filter audit")
+        return
+    if not isinstance(audit, Mapping):
+        raise ValueError("wrong-donor prototype-filter audit must be an object")
+    expected = {
+        "policy": "target_checkpoint_ontology_intersection_v1",
+        "minimum_retained_type_count": 2,
+        "minimum_retained_prototype_count": 2,
+        "original_prototype_count": int(len(prototypes.prototype_ids)),
+        "retained_prototype_count": int(selected.sum()),
+        "omitted_prototype_count": int(len(prototypes.prototype_ids) - selected.sum()),
+        "original_type_count": len(source_types),
+        "retained_type_count": len(retained_types),
+        "omitted_type_count": len(omitted_types),
+        "original_type_names": list(source_types),
+        "retained_type_names": list(retained_types),
+        "omitted_type_names": list(omitted_types),
+        "weights_renormalized": True,
+        "original_source_prototype_sha256": source_sha256,
+    }
+    for name, value in expected.items():
+        if audit.get(name) != value:
+            raise ValueError("wrong-donor prototype-filter audit field %s is stale" % name)
 
 
 @dataclass(frozen=True)
@@ -38,6 +99,7 @@ class PredictionBundle:
     ood_score: np.ndarray
     refinement_round: int
     expression_interval_semantics: str = ""
+    expression_mean_available: Optional[np.ndarray] = None
     expression_interval_available: Optional[np.ndarray] = None
     sample_id: str = ""
     donor_id: str = ""
@@ -62,7 +124,7 @@ class PredictionBundle:
     expression_space_id: str = ""
 
     CONTRACT: ClassVar[str] = "heir.prediction_bundle"
-    CONTRACT_VERSION: ClassVar[int] = 7
+    CONTRACT_VERSION: ClassVar[int] = 8
     CONDITIONAL_KNOWN_STATE: ClassVar[str] = "conditional_on_measured_known_state"
     LEGACY_CONDITIONAL_KNOWN_STATE: ClassVar[str] = (
         "legacy_conditional_on_measured_known_state_unsuppressed"
@@ -108,6 +170,52 @@ class PredictionBundle:
         if not np.issubdtype(array.dtype, np.number) or not np.isfinite(array).all():
             raise ValueError("%s must be finite and numeric" % name)
         return array
+
+    def _resolved_expression_mean_available(self) -> np.ndarray:
+        """Resolve the fail-closed cell-expression mask, including legacy objects."""
+
+        count = len(self.nucleus_ids)
+        abstain = np.asarray(self.abstain)
+        if abstain.shape != (count,) or abstain.dtype != bool:
+            raise ValueError("abstain must be a boolean nuclei vector")
+        if self.expression_mean_available is not None:
+            available = np.asarray(self.expression_mean_available)
+            if available.shape != (count,) or available.dtype != bool:
+                raise ValueError("expression_mean_available must be a boolean nuclei vector")
+        elif self.expression_interval_available is not None:
+            available = np.asarray(self.expression_interval_available)
+            if available.shape != (count,) or available.dtype != bool:
+                raise ValueError("expression_interval_available must be a boolean nuclei vector")
+        else:
+            available = ~abstain
+        if np.any(available & abstain):
+            raise ValueError("abstained cells cannot expose conditional expression means")
+        return available
+
+    @property
+    def public_cell_expression_mean(self) -> np.ndarray:
+        """Return cell-level means with unavailable rows suppressed to NaN.
+
+        Cell-level consumers must use this accessor rather than the finite
+        aggregate matrix stored in :attr:`expression_mean`.
+        """
+
+        values = np.asarray(self.expression_mean)
+        if not np.issubdtype(values.dtype, np.number):
+            raise ValueError("expression_mean must be numeric")
+        if values.ndim != 2 or values.shape[0] != len(self.nucleus_ids):
+            raise ValueError("expression_mean must be a nuclei-by-genes matrix")
+        public = np.array(values, copy=True)
+        if not np.issubdtype(public.dtype, np.floating):
+            public = public.astype(np.float64)
+        public[~self._resolved_expression_mean_available()] = np.nan
+        return public
+
+    @property
+    def internal_aggregate_expression_mean(self) -> np.ndarray:
+        """Return the finite mean matrix reserved for aggregate calculations."""
+
+        return self._finite(self.expression_mean, "expression_mean")
 
     def validate(
         self,
@@ -190,16 +298,21 @@ class PredictionBundle:
             expression_mean.shape
         ):
             raise ValueError("expression means and intervals must have identical shapes")
+        abstain = np.asarray(self.abstain)
+        if abstain.shape != (count,) or abstain.dtype != bool:
+            raise ValueError("abstain must be a boolean nuclei vector")
         if self.expression_interval_semantics not in {
             "",
             self.CONDITIONAL_KNOWN_STATE,
             self.LEGACY_CONDITIONAL_KNOWN_STATE,
         }:
             raise ValueError("expression interval semantics are unsupported")
+        mean_available = self._resolved_expression_mean_available()
+        if not np.isfinite(expression_mean).all():
+            raise ValueError("expression_mean must remain finite for internal aggregation")
         if self.expression_interval_available is None:
             available = np.ones(count, dtype=bool)
             for name, values in (
-                ("expression_mean", expression_mean),
                 ("expression_lower", expression_lower),
                 ("expression_upper", expression_upper),
             ):
@@ -212,8 +325,6 @@ class PredictionBundle:
             if self.expression_interval_semantics != self.CONDITIONAL_KNOWN_STATE:
                 raise ValueError("expression availability requires conditional interval semantics")
             unavailable = ~available
-            if not np.isfinite(expression_mean).all():
-                raise ValueError("expression_mean must remain finite for internal aggregation")
             for name, values in (
                 ("expression_lower", expression_lower),
                 ("expression_upper", expression_upper),
@@ -222,8 +333,10 @@ class PredictionBundle:
                     raise ValueError("available %s values must be finite" % name)
                 if unavailable.any() and not np.isnan(values[unavailable]).all():
                     raise ValueError("unavailable %s values must be suppressed" % name)
-            if np.any(available & np.asarray(self.abstain, dtype=bool)):
+            if np.any(available & abstain):
                 raise ValueError("abstained cells cannot expose conditional expression")
+            if np.any(available & ~mean_available):
+                raise ValueError("expression intervals require an available expression mean")
         if np.any(expression_lower[available] > expression_upper[available]):
             raise ValueError("expression interval bounds are inverted")
 
@@ -231,8 +344,6 @@ class PredictionBundle:
             values = self._finite(getattr(self, name), name)
             if values.shape != (count,) or np.any(values < 0) or np.any(values > 1):
                 raise ValueError("%s must be a nuclei vector in [0, 1]" % name)
-        if np.asarray(self.abstain).shape != (count,) or np.asarray(self.abstain).dtype != bool:
-            raise ValueError("abstain must be a boolean nuclei vector")
         ood = self._finite(self.ood_score, "ood_score")
         if ood.shape != (count,):
             raise ValueError("ood_score must be a nuclei vector")
@@ -370,7 +481,7 @@ class PredictionBundle:
                 raise ValueError("%s must be a lowercase SHA-256 digest" % name)
 
     def to_npz(self, path: Union[str, Path]) -> None:
-        """Atomically write the strict v7 prediction artifact."""
+        """Atomically write the strict v8 prediction artifact."""
 
         self.validate(require_provenance=True)
         assert self.inference_seed is not None
@@ -379,16 +490,20 @@ class PredictionBundle:
         assert self.artifact_threshold is not None
         destination = Path(path).expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        expression_available = (
-            ~np.asarray(self.abstain, dtype=bool)
+        expression_mean_available = np.asarray(
+            self._resolved_expression_mean_available(),
+            dtype=bool,
+        )
+        expression_interval_available = (
+            expression_mean_available
             if self.expression_interval_available is None
             else np.asarray(self.expression_interval_available, dtype=bool)
         )
         expression_mean = np.asarray(self.expression_mean, dtype=np.float32).copy()
         expression_lower = np.asarray(self.expression_lower, dtype=np.float32).copy()
         expression_upper = np.asarray(self.expression_upper, dtype=np.float32).copy()
-        expression_lower[~expression_available] = np.nan
-        expression_upper[~expression_available] = np.nan
+        expression_lower[~expression_interval_available] = np.nan
+        expression_upper[~expression_interval_available] = np.nan
         payload: Dict[str, np.ndarray] = dict(
             __contract__=np.asarray(self.CONTRACT, dtype=np.dtype("U")),
             __version__=np.asarray(self.CONTRACT_VERSION, dtype=np.int64),
@@ -408,7 +523,8 @@ class PredictionBundle:
                 self.CONDITIONAL_KNOWN_STATE,
                 dtype=np.dtype("U"),
             ),
-            expression_interval_available=expression_available,
+            expression_mean_available=expression_mean_available,
+            expression_interval_available=expression_interval_available,
             gene_names=self.gene_names.astype(np.str_),
             unknown_probability=self.unknown_probability.astype(np.float32),
             abstain_score=self.abstain_score.astype(np.float32),
@@ -473,11 +589,11 @@ class PredictionBundle:
 
     @classmethod
     def from_npz(cls, path: Union[str, Path]) -> "PredictionBundle":
-        """Load v2-v7 or migrate the original unversioned schema in memory.
+        """Load v2-v8 or migrate the original unversioned schema in memory.
 
         Legacy artifacts receive empty provenance and optional outputs. Saving
         that object again therefore requires callers to populate provenance
-        explicitly; legacy data are never silently presented as audited v7.
+        explicitly; legacy data are never silently presented as audited v8.
         """
 
         with np.load(path, allow_pickle=False) as values:
@@ -495,7 +611,7 @@ class PredictionBundle:
                 version = int(np.asarray(values["__version__"]).item())
                 if contract != cls.CONTRACT:
                     raise ValueError("artifact is not a HEIR PredictionBundle")
-                if version not in {2, 3, 4, 5, 6, cls.CONTRACT_VERSION}:
+                if version not in {2, 3, 4, 5, 6, 7, cls.CONTRACT_VERSION}:
                     raise ValueError("unsupported PredictionBundle version %d" % version)
                 required_versioned = {
                     "sample_id",
@@ -536,6 +652,8 @@ class PredictionBundle:
                             "expression_interval_available",
                         }
                     )
+                if version >= 8:
+                    required_versioned.add("expression_mean_available")
                 missing = sorted(required_versioned - set(values.files))
                 if missing:
                     raise ValueError(
@@ -569,7 +687,7 @@ class PredictionBundle:
                 expression_interval_semantics = str(
                     np.asarray(values["expression_interval_semantics"]).item()
                 )
-                expression_available = np.array(
+                expression_interval_available = np.array(
                     values["expression_interval_available"],
                     copy=True,
                 )
@@ -578,9 +696,27 @@ class PredictionBundle:
                 # availability mask. Preserve those immutable arrays exactly
                 # for historical revalidation while labeling their weaker,
                 # unsuppressed semantics explicitly in memory. Re-saving them
-                # as v7 applies the current fail-closed mask in ``to_npz``.
+                # as v8 applies the current fail-closed mask in ``to_npz``.
                 expression_interval_semantics = cls.LEGACY_CONDITIONAL_KNOWN_STATE
-                expression_available = None
+                expression_interval_available = None
+            if versioned and version >= 8:
+                expression_mean_available = np.array(
+                    values["expression_mean_available"],
+                    copy=True,
+                )
+            elif versioned and version == 7:
+                # v7 introduced a fail-closed interval mask. Its cell means
+                # have the same conditional-known-state availability.
+                expression_mean_available = np.array(
+                    expression_interval_available,
+                    copy=True,
+                )
+            else:
+                # v2-v6 and unversioned artifacts exposed no availability
+                # metadata. Migrate conservatively: abstention always closes
+                # the public cell-level mean while the stored aggregate mean
+                # remains unchanged and finite.
+                expression_mean_available = ~np.asarray(abstain, dtype=bool)
             result = cls(
                 nucleus_ids=np.array(values["nucleus_ids"], copy=True),
                 coordinates_um=np.array(values["coordinates_um"], copy=True),
@@ -601,7 +737,8 @@ class PredictionBundle:
                 ood_score=np.array(values["ood_score"], copy=True),
                 refinement_round=int(np.asarray(values["refinement_round"]).item()),
                 expression_interval_semantics=expression_interval_semantics,
-                expression_interval_available=expression_available,
+                expression_mean_available=expression_mean_available,
+                expression_interval_available=expression_interval_available,
                 sample_id=(str(np.asarray(values["sample_id"]).item()) if versioned else ""),
                 donor_id=(str(np.asarray(values["donor_id"]).item()) if versioned else ""),
                 slide_id=(str(np.asarray(values["slide_id"]).item()) if versioned else ""),
@@ -729,6 +866,7 @@ def predict_cells(
     mixed_precision: Optional[bool] = None,
     mc_chunk_size: Optional[int] = None,
     use_model_abstain: bool = False,
+    allow_prototype_sample_mismatch: bool = False,
 ) -> PredictionBundle:
     """Predict one graph bag and derive latent/gene credible intervals.
 
@@ -758,6 +896,8 @@ def predict_cells(
         raise ValueError("mc_chunk_size must be positive when supplied")
     if not isinstance(use_model_abstain, bool):
         raise TypeError("use_model_abstain must be boolean")
+    if not isinstance(allow_prototype_sample_mismatch, bool):
+        raise TypeError("allow_prototype_sample_mismatch must be boolean")
     if inference_seed is not None:
         if isinstance(inference_seed, (bool, np.bool_)) or not isinstance(
             inference_seed, (int, np.integer)
@@ -788,7 +928,7 @@ def predict_cells(
         raise ValueError("predict_cells requires one sample-specific prototype bank")
     prototype_sample = str(unique_samples[0])
     resolved_sample_id = prototype_sample if sample_id is None else str(sample_id)
-    if resolved_sample_id != prototype_sample:
+    if resolved_sample_id != prototype_sample and not allow_prototype_sample_mismatch:
         raise ValueError("prediction sample_id differs from the prototype bank")
     resolved_latent_space_id = (
         prototypes.latent_space_id if latent_space_id is None else str(latent_space_id)
@@ -1010,6 +1150,7 @@ def predict_cells(
         ood_score=ood_values,
         refinement_round=refinement_round,
         expression_interval_semantics=PredictionBundle.CONDITIONAL_KNOWN_STATE,
+        expression_mean_available=expression_available,
         expression_interval_available=expression_available,
         sample_id=resolved_sample_id,
         donor_id=str(donor_id),
