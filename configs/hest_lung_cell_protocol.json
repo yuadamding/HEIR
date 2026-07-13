@@ -1,0 +1,702 @@
+{
+  "schema": "heir.hest_xenium_cell_protocol.v1",
+  "scientific_scope": "nucleus_centered_morphology_confirmation",
+  "dataset_repo": "MahmoodLab/hest",
+  "dataset_revision": "7e8d5a0b0aace41d8c8ec0f6ecea80e4ad2a61ec",
+  "model_repo": "bioptimus/H-optimus-1",
+  "model_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+  "model_checkpoint_sha256": "c4f1e5b457ddf00679626053b0bf2899be6a19c3a04ad191c87ad1cdfd1abfe1",
+  "model_input_pixels": 224,
+  "model_feature_width": 1536,
+  "model_mpp": 0.5,
+  "model_mean": [
+    0.707223,
+    0.578729,
+    0.703617
+  ],
+  "model_std": [
+    0.211883,
+    0.230117,
+    0.177517
+  ],
+  "normalization": "log1p_cpm_10000",
+  "assay": "Xenium",
+  "observation_level": "cell",
+  "target_construction": "registered_cell_expression",
+  "registration_method": "native_xenium_cell_id_join",
+  "development_donors": [
+    "VUILD91",
+    "TILD175",
+    "VUHD069",
+    "VUHD116",
+    "VUILD102",
+    "VUILD105",
+    "VUILD106",
+    "VUILD107",
+    "VUILD110",
+    "VUILD115"
+  ],
+  "locked_test_donors": [
+    "THD0008",
+    "THD0011",
+    "VUILD78",
+    "VUILD96",
+    "TILD117"
+  ],
+  "type_names": [
+    "Endothelial",
+    "Epithelial",
+    "Immune",
+    "Mesenchymal"
+  ],
+  "type_markers": {
+    "Endothelial": [
+      "PECAM1",
+      "KDR",
+      "CLDN5",
+      "RAMP2",
+      "RNASE1",
+      "CA4",
+      "PLVAP",
+      "GNG11"
+    ],
+    "Epithelial": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "SFTPC",
+      "SFTPD",
+      "SCGB1A1",
+      "SCGB3A2",
+      "FOXJ1"
+    ],
+    "Immune": [
+      "PTPRC",
+      "CD3D",
+      "CD3E",
+      "CD79A",
+      "MS4A1",
+      "NKG7",
+      "LYZ",
+      "FCER1G"
+    ],
+    "Mesenchymal": [
+      "COL1A1",
+      "COL1A2",
+      "COL3A1",
+      "DCN",
+      "LUM",
+      "PDGFRA",
+      "PDGFRB",
+      "ACTA2"
+    ]
+  },
+  "gene_ids": [
+    "CTHRC1",
+    "FAP",
+    "POSTN",
+    "SFRP2",
+    "SFRP4",
+    "MFAP5",
+    "PI16",
+    "FN1",
+    "ELN",
+    "CCN2",
+    "TGFB1",
+    "TGFB2",
+    "TGFB3",
+    "NOX4",
+    "HAS1",
+    "HAS2",
+    "FGF2",
+    "FGF7",
+    "WNT2",
+    "WNT5A",
+    "SPP1",
+    "FABP4",
+    "PPARG",
+    "MRC1",
+    "TREM2",
+    "CCL18",
+    "PLIN2",
+    "GDF15",
+    "LAMP3",
+    "MARCO",
+    "FCN1",
+    "FCGR3A",
+    "C1QC",
+    "AIF1",
+    "IL1B",
+    "S100A8",
+    "S100A9",
+    "KRT17",
+    "KRT5",
+    "KRT14",
+    "KRT6A",
+    "ITGB6",
+    "MMP7",
+    "MMP10",
+    "MMP12",
+    "CEACAM6",
+    "MUC5B",
+    "AKR1B10",
+    "SOX9",
+    "TP63",
+    "S100A2",
+    "S100A7",
+    "DEFB1",
+    "HIF1A",
+    "HMOX1",
+    "VEGFA",
+    "ATF3",
+    "ATF4",
+    "DDIT3",
+    "HSPA5",
+    "XBP1",
+    "IFIT1",
+    "IFIT2",
+    "IFIT3",
+    "STAT1",
+    "CXCL9",
+    "CXCL13",
+    "CCL2",
+    "CCL21",
+    "MKI67",
+    "TOP2A",
+    "CDK1",
+    "CENPF",
+    "ACKR1",
+    "APLNR",
+    "APLN",
+    "SPARCL1",
+    "COL15A1",
+    "EPAS1",
+    "RSPO3"
+  ],
+  "minimum_transcripts_per_cell": 12,
+  "minimum_transcript_qv": 20.0,
+  "excluded_feature_prefixes": [
+    "NegControlProbe_",
+    "NegControlCodeword_",
+    "UnassignedCodeword_",
+    "BLANK_"
+  ],
+  "spatial_block_um": 512.0,
+  "spatial_roi_um": 128.0,
+  "opposite_pool_guard_um": 64.0,
+  "cellvit_sensitivity_radius_um": 32.0,
+  "cellvit_class_names": [
+    "Connective",
+    "Dead",
+    "Epithelial",
+    "Inflammatory",
+    "Neoplastic"
+  ],
+  "pool_assignment_salt": "heir-hest-gse250346-true-donor-v1",
+  "annotation_export": {
+    "path": "GSE250346/HEST_lung_20_cell_annotations.tsv.gz",
+    "sha256": "4c4b0d159569a3ff86753b700f28a14807d00639788cb7aba2d675738e243423"
+  },
+  "samples": [
+    {
+      "sample_id": "NCBI856",
+      "donor_id": "VUILD96",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI856.tif",
+        "sha256": "7d48d12307ffce0464410688a2ddffff609bbff4102a1e720a419a0dd632f5ce"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI856_transcripts.parquet",
+        "sha256": "226af3bf7d5104d882f68bad831f4abd46b7b3d3422606cadce6c888075bb016"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI856_xenium_cell_seg.parquet",
+        "sha256": "5919784b27898013936588a3308fdaae43bec307f413f4f763909753215a3e3c"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI856_xenium_nucleus_seg.parquet",
+        "sha256": "4694be446afcd03193e2395c5f53ac743580329abd918ba9cc5d63e3e3730523"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI856_cellvit_seg.parquet",
+        "sha256": "3fe26debcdcf9e3436a8f6b58b48dcbadee1d569ef813094bf45cf0fb1908d51"
+      }
+    },
+    {
+      "sample_id": "NCBI857",
+      "donor_id": "VUILD96",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI857.tif",
+        "sha256": "3cab3b345994a97a642a53a720b69c8ac55f38a9df9b8fade87d297645948d79"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI857_transcripts.parquet",
+        "sha256": "3206fc5beae5268a54a6bb79fa342ca2443f04ba5c2dcefc0bbe84cb94d4b7d8"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI857_xenium_cell_seg.parquet",
+        "sha256": "ed540ec4a458e4c6d6b54a6099086a387c39d24b467bc8e7379ef6cd6480ab06"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI857_xenium_nucleus_seg.parquet",
+        "sha256": "ba90e8eca4e4c8d1ca427d90239ca0ade42214dcd205c8662f1ef627da8937a5"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI857_cellvit_seg.parquet",
+        "sha256": "ab7846f0e58f4b846327d7643a37422e6da924f8dff5e42cb0d231643c9b0013"
+      }
+    },
+    {
+      "sample_id": "NCBI858",
+      "donor_id": "VUILD91",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI858.tif",
+        "sha256": "4eddd239e2168bb09d8a49fc716cd14855fb22bad2905edb6efbc7ca122d3b17"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI858_transcripts.parquet",
+        "sha256": "505c2a1121bc6f45c9bd4ae73e4be64d3c5d062547d21e1eb66931c102ad3724"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI858_xenium_cell_seg.parquet",
+        "sha256": "6af64f19fa21ba35412d11a9959d7f282a2c2c57dd6635d87e82fd3bc396afc1"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI858_xenium_nucleus_seg.parquet",
+        "sha256": "c1bef379b79adf8e1b85e916ee9888f6cf8227bd65a140c183855d5fd216cab7"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI858_cellvit_seg.parquet",
+        "sha256": "bde92b2dc9d7f3683dba227e85c35855432dfa98e8e829c0924f4ef6b8d6ce1e"
+      }
+    },
+    {
+      "sample_id": "NCBI859",
+      "donor_id": "VUILD91",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI859.tif",
+        "sha256": "c4cafb1a3b2dc43feb63193e8a4778da6825656f58fd14d28dbdd4799088825c"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI859_transcripts.parquet",
+        "sha256": "8a8f19c027ba4c15389fbc956179495aa111509966412d71f4bf9fa956e6ee35"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI859_xenium_cell_seg.parquet",
+        "sha256": "b0af05db60b415a641e8362fb38d67431e93a95c50343434d1d97c06bc75f91c"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI859_xenium_nucleus_seg.parquet",
+        "sha256": "32d9158310798bf2a691c82268265c2476600da9d0e21d2ed38a075a0b83fde6"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI859_cellvit_seg.parquet",
+        "sha256": "4b9982bc48d0b117b5e0d4dc59af7ee877037634ba9f9ba46242036bb32433fe"
+      }
+    },
+    {
+      "sample_id": "NCBI860",
+      "donor_id": "VUILD78",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI860.tif",
+        "sha256": "e7ba892a8524b19477e876fc195451fdf9ab3d6b4285c897f6ec338f6605d9dc"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI860_transcripts.parquet",
+        "sha256": "bb59b25c0dbd65ff5dedfae82c3f9e07e0875abfe353403adaebd5013b83b732"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI860_xenium_cell_seg.parquet",
+        "sha256": "17a8b1d8cb43e3fb23bad9e94b2bd7e3b0e948cca4ee2b598ab3763e0e5f2d1e"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI860_xenium_nucleus_seg.parquet",
+        "sha256": "8db0d08a2fbb41974db1d311f9a9727842a287c27f719e09bfbf39b7278f26f3"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI860_cellvit_seg.parquet",
+        "sha256": "8ba52ecf9767aa39dc97f1cdcfa7e764f62143ede614f839995d034e6d4d7be9"
+      }
+    },
+    {
+      "sample_id": "NCBI861",
+      "donor_id": "VUILD78",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI861.tif",
+        "sha256": "c7c627b846a23e1f911aa446139489a0934428a5fd79883a083a99be3076ec35"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI861_transcripts.parquet",
+        "sha256": "0d46d7378f22f30efb672f0934b6e71713e76c96617ea87da6421508cc355624"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI861_xenium_cell_seg.parquet",
+        "sha256": "2fceca8f6421867718d000284e7d6f06d9e47e79e207d19d0702ef713b84e778"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI861_xenium_nucleus_seg.parquet",
+        "sha256": "91c409f5a38b734ce689099776c429f87bce6dcd6913dd68a44bdb7b4f164516"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI861_cellvit_seg.parquet",
+        "sha256": "d512fd7c4824febedc6c1ad52d0ceabe2a2fd68e29f13da0110245a75c68f2ab"
+      }
+    },
+    {
+      "sample_id": "NCBI864",
+      "donor_id": "VUILD115",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI864.tif",
+        "sha256": "75e0dd72b56ecf4b776b7c1b141cd4e2e6ed875a2db2d82f39c561621ba1fd3b"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI864_transcripts.parquet",
+        "sha256": "7cb31a728ea2abe190c2061ef29cd27aeaedb317402f8d8898ebf6b04921db3f"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI864_xenium_cell_seg.parquet",
+        "sha256": "19e021fa188f3d380c251707e43dad39516c817350b0310dedbb735f7fdca391"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI864_xenium_nucleus_seg.parquet",
+        "sha256": "bb3907f79cfe6f74101d4ccafccd840742431f139fb8577dbcf2de586e783fd3"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI864_cellvit_seg.parquet",
+        "sha256": "4657cfeb300d351e4b9ea804d432bc67adcbec06246e9d709c2924c5fc6e19c9"
+      }
+    },
+    {
+      "sample_id": "NCBI865",
+      "donor_id": "VUILD110",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI865.tif",
+        "sha256": "ef4e2961b4f982424a4b1eb6deee087b32fb4fc12de4d56bcabfac8c0d6004a0"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI865_transcripts.parquet",
+        "sha256": "1f88f44e75990d1bc0fa64e7a500cb9a642aeabd53b7389e8340853eee3bf1fc"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI865_xenium_cell_seg.parquet",
+        "sha256": "95bc1a91d513317d7e770e6b0be7ea2a004d3f8b07c838af2cf025cdfab576bc"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI865_xenium_nucleus_seg.parquet",
+        "sha256": "8849eda0ba86e48ff6507f2ad0c53eeef8bd38afb557095bb3dae7e742b5002f"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI865_cellvit_seg.parquet",
+        "sha256": "2e83f0fb72b02c4340b967eb50118b26fec5f393ed0751f19ae080d5a2bd774f"
+      }
+    },
+    {
+      "sample_id": "NCBI866",
+      "donor_id": "VUILD107",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI866.tif",
+        "sha256": "298af6f392f182eab37cd731c0b30dbfa66ec898d84efb31b7e9024a9c01f9ed"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI866_transcripts.parquet",
+        "sha256": "c16353f150dccbbad23f2a26fdbe29fbb1c4f321e74ad4d8b840dd7298f52471"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI866_xenium_cell_seg.parquet",
+        "sha256": "2d4d37c8e059b9b71c8c3f7c88a3345601b9da7bdb322d0cd1793287e6016b67"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI866_xenium_nucleus_seg.parquet",
+        "sha256": "54d7bdbe7a77e469b44545ff300f04eb7fde7fd5b66044dbf336388c8640ec3d"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI866_cellvit_seg.parquet",
+        "sha256": "e9db09352eb0e682f9bb1d68b01aa64e048ec780cc4ed0e19049bbda3746ec34"
+      }
+    },
+    {
+      "sample_id": "NCBI867",
+      "donor_id": "VUILD106",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI867.tif",
+        "sha256": "b80a9860a736460e7928f4462c15c1dc6882b18c2d42fd83337828907a7a9ba1"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI867_transcripts.parquet",
+        "sha256": "2c7c9a03d567a2f91608fc12f8ae23ae094ad78693306dee6f1654af53799067"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI867_xenium_cell_seg.parquet",
+        "sha256": "52d67e99375fc14a78f929349bb4bbcb03207e3c7685a9f714daef8d316ac787"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI867_xenium_nucleus_seg.parquet",
+        "sha256": "2bd05f8dd1822e8238c08f019da363e25118242653076b62f5f7ad20e04871d9"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI867_cellvit_seg.parquet",
+        "sha256": "1b50b3e59c8e183f3bbad31ba6021e0722a19c7ca1e590f03f74a8fd46db23af"
+      }
+    },
+    {
+      "sample_id": "NCBI870",
+      "donor_id": "VUILD105",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI870.tif",
+        "sha256": "2b25e132e82a994432cee690661de5b8b682a675e13e0be7814cd6a9a0add962"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI870_transcripts.parquet",
+        "sha256": "fea65736598ffb25f0523a8c3cc218bb408a76d06491086d407b09755f5d5c67"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI870_xenium_cell_seg.parquet",
+        "sha256": "55cdcac72841e7390f657b1d21dc65bfd6c6b09cd549510932f8a445b4d185cd"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI870_xenium_nucleus_seg.parquet",
+        "sha256": "b6e14405c560f333e21418268b428c780084e5f3130365312aa8c140c99eca0a"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI870_cellvit_seg.parquet",
+        "sha256": "40b1204ac7157a6cb658bec22ed371c268202029063e622219a99387cbb99193"
+      }
+    },
+    {
+      "sample_id": "NCBI873",
+      "donor_id": "VUILD102",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI873.tif",
+        "sha256": "67b9973596da2e522870ca4415a3bd75df14f602da2a48da4e484be1b086b07a"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI873_transcripts.parquet",
+        "sha256": "33cb2c9ef8f4c9a34bec63b131516fad97fb7bd8b6f6c42b3fc8359e87b7e094"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI873_xenium_cell_seg.parquet",
+        "sha256": "0c5233dbe56a8a51a942489039ef282182a871a04e1a721b026cafcd7e5cca57"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI873_xenium_nucleus_seg.parquet",
+        "sha256": "c60d3d2907987095770b008907595a5154385b612dd7a2c32d38e81c6e194b5f"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI873_cellvit_seg.parquet",
+        "sha256": "b556ba3c2b92cbe4833d5e876e603129402cab91afc71fdb87a00d76e8eb1400"
+      }
+    },
+    {
+      "sample_id": "NCBI875",
+      "donor_id": "VUHD116",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI875.tif",
+        "sha256": "e55c914fe9c371b2bf3f4d95f45be21f1982d3a3fe21e53f77ae6350fe2c565e"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI875_transcripts.parquet",
+        "sha256": "e6bf310854abaf9e10a83b5a2a2a9e58aa2d9640c6cd304637bb446aee2f2bfa"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI875_xenium_cell_seg.parquet",
+        "sha256": "f441fc42ee82141306c1b038cb4e22ae093e5c35eda1150edaaac0dffdeaa415"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI875_xenium_nucleus_seg.parquet",
+        "sha256": "3ce670bc9daf3b89ec90185ddd09e0d66a70b1b4b4f21613fb583c2d894fde0f"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI875_cellvit_seg.parquet",
+        "sha256": "642a757ca215ef4b667d52cd25045c3f83779ff708d51be5093efbf675f9d506"
+      }
+    },
+    {
+      "sample_id": "NCBI876",
+      "donor_id": "VUHD116",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI876.tif",
+        "sha256": "c0c1a9b3f77aaa61ab107f8ebe8eb066ef726f541acfdfb0aead70e94af89c2e"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI876_transcripts.parquet",
+        "sha256": "2bebd1370b7b039d988cf910d02fc889f78d887a45c26dbaae0e6d28c4f7466c"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI876_xenium_cell_seg.parquet",
+        "sha256": "596e3a5edbff5a4c04ccbb3b5077e9128c4ac01974d8e0ec323b619d5b519260"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI876_xenium_nucleus_seg.parquet",
+        "sha256": "b75ca2f6df6de4b737ed99a873e3a30626c0ce24fdc1a3bdee92a8d1cc747604"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI876_cellvit_seg.parquet",
+        "sha256": "470f264aafc367f6da0badddf1ae24b83a5e4b8ee71bcb7d7b67a1c94e2bc945"
+      }
+    },
+    {
+      "sample_id": "NCBI879",
+      "donor_id": "VUHD069",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI879.tif",
+        "sha256": "69eff2ed23cd3411423fb158ce021741e58b2e5bbe185ac9f1bbffcbcb648509"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI879_transcripts.parquet",
+        "sha256": "a4106c963f389271eb82e2528dfa371d1e6239c06cf79f1bbc859157b3a56ee3"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI879_xenium_cell_seg.parquet",
+        "sha256": "30eb152289a2ebb6ea3dd7d269edeb528278eefae6f0b4a9f6f0a485cf314dd4"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI879_xenium_nucleus_seg.parquet",
+        "sha256": "b9c92cebcbc1c56df579a24204d1116a46dafb5eb910b5f4ce20f1c46770ade0"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI879_cellvit_seg.parquet",
+        "sha256": "5d063bb5e97085856d3b35f760715d8e4862de63eab90d67b5f084554757f268"
+      }
+    },
+    {
+      "sample_id": "NCBI880",
+      "donor_id": "TILD175",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI880.tif",
+        "sha256": "e76eec4be2acf6ca30f7e47eb39091ffc0c2fa176e01ff728721c002b0800e7e"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI880_transcripts.parquet",
+        "sha256": "5d130eab8ada6009bf1936c6f4807ed4e981cf5c3e1d7a1c8377a976852579c9"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI880_xenium_cell_seg.parquet",
+        "sha256": "c4a9e81e79a98215278f2be7bc8e9dd3c00274db31d97b21a7f567085d99b79a"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI880_xenium_nucleus_seg.parquet",
+        "sha256": "7c15d25db72a17b0ab4b0d89c694d5c0f091eb020cb5fdc6196dcd7ef1ffa755"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI880_cellvit_seg.parquet",
+        "sha256": "fa57f8593c40be6d0842e682f86ac0929d661907856b1d32641a4aa394c9f9e6"
+      }
+    },
+    {
+      "sample_id": "NCBI881",
+      "donor_id": "TILD117",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI881.tif",
+        "sha256": "c40eaf4c1f853b688d03a5a37c094d29577d9dc9cbdaf05cd66859f5cf967623"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI881_transcripts.parquet",
+        "sha256": "8348e8f6ab0085e784fe2eadc8e550e9e977ad708b7b5675ac8b5748cc63dc47"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI881_xenium_cell_seg.parquet",
+        "sha256": "d137c934ef5765ddb73050dc759771c7470554895bc8dd594cca89b4f84bfe87"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI881_xenium_nucleus_seg.parquet",
+        "sha256": "0f84eb8b8771ce7378460f830f51feefec91158939fc7778fc75b1d6b0afcadc"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI881_cellvit_seg.parquet",
+        "sha256": "e921ce4e7931970b8e81f714fbaf3d09b494ee819f032f507cab87a71d6b837e"
+      }
+    },
+    {
+      "sample_id": "NCBI882",
+      "donor_id": "TILD117",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI882.tif",
+        "sha256": "35332b62a077d5d33a22ca318a480244481f5e214714805d1f0c76972f3c3c96"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI882_transcripts.parquet",
+        "sha256": "4fca9036b00ad7ee3522912856be8692fc357f6ce5e8a38e70487d9004ecce8a"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI882_xenium_cell_seg.parquet",
+        "sha256": "c6e83d8744259e23bc301b194d79161a0acaf57b101c5153d8b4e79aaccd2705"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI882_xenium_nucleus_seg.parquet",
+        "sha256": "ea3ac833abd0cb0df1e5cacb04ea512895926f6050c552f4767c849c62120c36"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI882_cellvit_seg.parquet",
+        "sha256": "72d5408a61271b0b12f5ada93fa91a71e9af1a042380750ce87ebc6b65101ca8"
+      }
+    },
+    {
+      "sample_id": "NCBI883",
+      "donor_id": "THD0011",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI883.tif",
+        "sha256": "e9b3b6c3498fcd4e6ef788097916ecf1949d65c572fcd7a773343b58f1b29d75"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI883_transcripts.parquet",
+        "sha256": "4ee59fb6a193f0f70d793738243c28a552670f12ffc215535775c45ad5f802bc"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI883_xenium_cell_seg.parquet",
+        "sha256": "d28ef6235f712df5eeec9eafb1129a77eae2c8758f7d4cc032f997043c32be6e"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI883_xenium_nucleus_seg.parquet",
+        "sha256": "4dc0866069875feec8c2d07160d02c689df6d19c91a0400ed3f93acf905ea60e"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI883_cellvit_seg.parquet",
+        "sha256": "52f09aa2399f5422d5bc2df8d13d6eb5b02f6bd31d1e9829f084dcdd95e45315"
+      }
+    },
+    {
+      "sample_id": "NCBI884",
+      "donor_id": "THD0008",
+      "pixel_size_um": 0.2125,
+      "wsi": {
+        "path": "hest-lung-xenium/wsis/NCBI884.tif",
+        "sha256": "9bb49d18b980dc7b4c1b80999f408caf3e9a1213b356be171f1b5e5418d57ec2"
+      },
+      "transcripts": {
+        "path": "hest-lung-xenium/transcripts/NCBI884_transcripts.parquet",
+        "sha256": "79f3e0f9ca957f594703bd5be3b8ac971e9dbb3766dbe34f3c344ccef8915232"
+      },
+      "cell_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI884_xenium_cell_seg.parquet",
+        "sha256": "0f8d7a86629579b00d052d0a9a058405760a31e44dc88dea0c782d8a7c447594"
+      },
+      "nucleus_seg": {
+        "path": "hest-lung-xenium/xenium_seg/NCBI884_xenium_nucleus_seg.parquet",
+        "sha256": "d324d4e8286b2d93848f0725eae5ddabc0e4d3d06bab234b3354da8dfb17b4a6"
+      },
+      "cellvit_seg": {
+        "path": "hest-lung-xenium/cellvit_seg/NCBI884_cellvit_seg.parquet",
+        "sha256": "ff6c0dc8ba4391b579b5414f61a47641fa3b3e1152e4e545a0c97dfb4828aa12"
+      }
+    }
+  ]
+}

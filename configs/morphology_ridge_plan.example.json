@@ -1,0 +1,31 @@
+{
+  "schema": "heir.morphology_ridge_preparation_plan.v1",
+  "source_schema": "heir.hescape_regional_source.v1",
+  "source_observations_sha256": "REPLACE_WITH_SOURCE_NPZ_SHA256",
+  "development_donors": [
+    "TILD175", "VUHD069", "VUHD116", "VUILD102", "VUILD105", "VUILD106",
+    "VUILD107", "VUILD110", "VUILD115", "VUILD91"
+  ],
+  "locked_test_donors": [
+    "THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"
+  ],
+  "type_names": ["epithelial", "immune", "stromal", "endothelial"],
+  "gene_ids": ["REPLACE_WITH_FROZEN_NON_MARKER_PANEL"],
+  "type_marker_gene_ids": ["REPLACE_WITH_RNA_LABEL_MARKERS_EXCLUDED_FROM_GENE_IDS"],
+  "technical_covariate_names": ["log1p_library_size"],
+  "feature_space_id": "uni2h_direct_1536_hescape_center512_resize224_fp16_v1",
+  "feature_checkpoint_sha256": "6e077eda234bebc595868d918d3458d9dd32a050199b0ff04443b2f46a0a3b1e",
+  "molecular_space_id": "log_normalized_xenium_non_marker_panel_v1",
+  "label_source_sha256": "REPLACE_WITH_FROZEN_RNA_ONLY_LABEL_ARTIFACT_SHA256",
+  "registration_source_sha256": "REPLACE_WITH_REGISTRATION_ARTIFACT_SHA256",
+  "exclusion_policy_sha256": "REPLACE_WITH_FROZEN_EXCLUSION_POLICY_SHA256",
+  "registration_method": "released_one_to_one_histology_pseudospot_pair",
+  "encoder_name": "MahmoodLab/UNI2-h",
+  "crop_scale": "full_context",
+  "cohort_id": "HESCAPE",
+  "cohort_release": "human-lung-healthy-panel",
+  "assay": "Xenium",
+  "observation_level": "pseudo_spot_55um",
+  "target_construction": "sum_pooled_xenium_transcripts",
+  "reference_mode": "simulated_spatially_disjoint_unpaired_rna"
+}

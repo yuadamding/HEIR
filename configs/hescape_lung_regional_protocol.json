@@ -1,0 +1,68 @@
+{
+  "schema": "heir.hescape_regional_protocol.v2",
+  "scientific_scope": "regional_pseudospot_exploratory",
+  "authorizes_nucleus_claim": false,
+  "dataset_repo": "Peng-AI/hescape-pyarrow",
+  "dataset_revision": "a9abd572aa2c740e6f9abee4e197d66b652c6532",
+  "dataset_config": "human-lung-healthy-panel",
+  "official_code_revision": "bd5470480594f1b11d21633e11aaaffe2cfbd4d4",
+  "parquet_manifest_sha256": "4a87296cb7041cf577d3dd8b9210e3d65c3f43016cc267d609d93a5bd7ece389",
+  "parquet_total_bytes": 97181626515,
+  "model_repo": "MahmoodLab/UNI2-h",
+  "model_revision": "d517a8dd47902dd7c308b3c36f63bce47e7b9a43",
+  "model_config_sha256": "8b207fbff3e34884fd225b2d52e8ff51b728a1d0ac2fe8bb2b8db8011308ac98",
+  "model_checkpoint_sha256": "6e077eda234bebc595868d918d3458d9dd32a050199b0ff04443b2f46a0a3b1e",
+  "source_study": "GSE250346",
+  "source_annotation_sha256": "4c4b0d159569a3ff86753b700f28a14807d00639788cb7aba2d675738e243423",
+  "official_hescape_split_is_donor_safe": false,
+  "section_to_true_donor": {
+    "NCBI856": "VUILD96", "NCBI857": "VUILD96",
+    "NCBI858": "VUILD91", "NCBI859": "VUILD91",
+    "NCBI860": "VUILD78", "NCBI861": "VUILD78",
+    "NCBI864": "VUILD115", "NCBI865": "VUILD110",
+    "NCBI866": "VUILD107", "NCBI867": "VUILD106",
+    "NCBI870": "VUILD105", "NCBI873": "VUILD102",
+    "NCBI875": "VUHD116", "NCBI876": "VUHD116",
+    "NCBI879": "VUHD069", "NCBI880": "TILD175",
+    "NCBI881": "TILD117", "NCBI882": "TILD117",
+    "NCBI883": "THD0011", "NCBI884": "THD0008"
+  },
+  "development_donors": [
+    "TILD175", "VUHD069", "VUHD116", "VUILD102", "VUILD105", "VUILD106",
+    "VUILD107", "VUILD110", "VUILD115", "VUILD91"
+  ],
+  "locked_test_donors": ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"],
+  "dominant_niche_markers": {
+    "epithelial": [
+      "EPCAM", "KRT8", "KRT18", "KRT5", "KRT14", "SFTPC", "SFTPD", "SCGB1A1",
+      "SCGB3A2", "FOXJ1", "CFTR"
+    ],
+    "immune": [
+      "PTPRC", "CD3D", "CD3E", "CD3G", "CD79A", "CD79B", "MS4A1", "NKG7",
+      "FCER1G", "LYZ", "C1QC"
+    ],
+    "stromal": [
+      "COL1A1", "COL1A2", "COL3A1", "DCN", "LUM", "PDGFRA", "PDGFRB", "FAP",
+      "POSTN", "MFAP5", "PI16", "SFRP2"
+    ],
+    "endothelial": [
+      "PECAM1", "KDR", "CLDN5", "RAMP2", "PLVAP", "RNASE1", "GNG11", "CA4",
+      "SPARCL1"
+    ]
+  },
+  "minimum_niche_score": 0.5,
+  "minimum_niche_margin": 0.25,
+  "minimum_reference_per_donor_niche": 10,
+  "minimum_evaluation_per_donor_niche": 10,
+  "normalization": "log1p_cpm_10000",
+  "block_size_source_pixels": 2048,
+  "roi_size_source_pixels": 1024,
+  "opposite_pool_guard_source_pixels": 512,
+  "primary_crop_source_pixels": 512,
+  "primary_resize_pixels": 224,
+  "source_pixel_size_um": 0.2125,
+  "effective_model_mpp": 0.4857142857142857,
+  "technical_covariates": ["log1p_library_size"],
+  "permutation_seeds": [17, 29, 41],
+  "permutations_per_seed": 100
+}

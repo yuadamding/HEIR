@@ -1,0 +1,95 @@
+{
+  "schema": "heir.morphology_ridge_readiness.v3",
+  "assessment_date": "2026-07-12",
+  "status": "data_ready_encoder_primary_pending",
+  "benchmark_executed": false,
+  "full_heir_development_authorized": false,
+  "historical_execution_audit": {
+    "cohort": "snPATHO_4066_4399_4411",
+    "feature_encoder": "omiclip-loki-coca-vit-l-14",
+    "feature_checkpoint_sha256": "fc38e84f8b6f916cce87650cc096ebe6ad5cfa648a53a9a82e99fd231ca2f042",
+    "aligned_with_current_primary_recommendation": false,
+    "reason": "opened_three_donor_spot_cohort_and_cross_modal_encoder_are_excluded_from_the_primary_ridge_test"
+  },
+  "source_identity_correction": {
+    "source_study": "GSE250346",
+    "corrected_seurat_sha256": "f97b6e20365715fed5e96e831304f86e32e5dbefaeada6d58668a805fd4ebbdd",
+    "selected_annotations_sha256": "4c4b0d159569a3ff86753b700f28a14807d00639788cb7aba2d675738e243423",
+    "selected_high_qc_cells": 938345,
+    "sections": 20,
+    "true_biological_donors": 15,
+    "hescape_pseudo_patients": 19,
+    "official_hescape_split_is_donor_safe": false,
+    "cross_split_true_donors": ["TILD117", "VUILD78", "VUILD96"],
+    "train_validation_repeated_donor": "VUILD91",
+    "frozen_true_donor_split": {
+      "development": [
+        "TILD175", "VUHD069", "VUHD116", "VUILD102", "VUILD105",
+        "VUILD106", "VUILD107", "VUILD110", "VUILD115", "VUILD91"
+      ],
+      "locked_test": ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"]
+    }
+  },
+  "regional_candidate": {
+    "cohort": "HESCAPE",
+    "config": "human-lung-healthy-panel",
+    "dataset_revision": "a9abd572aa2c740e6f9abee4e197d66b652c6532",
+    "local_path": "/mnt/seagate/HnE/HESCAPE/hescape-pyarrow",
+    "parquet_shards": 195,
+    "rows": 56689,
+    "genes": 343,
+    "observation_level": "55um_pseudo_visium_spot",
+    "target_construction": "sum_pooled_xenium_transcripts",
+    "eligible_role": "regional_exploratory_only_not_nucleus_gate",
+    "blockers": [
+      "rows_are_pseudo_spots_not_cells_or_nuclei",
+      "official_pseudo_patient_split_leaks_true_source_donors",
+      "hoptimus1_manual_approval_pending"
+    ]
+  },
+  "cell_level_candidate": {
+    "cohort": "HEST",
+    "release": "v1.3",
+    "dataset_revision": "7e8d5a0b0aace41d8c8ec0f6ecea80e4ad2a61ec",
+    "local_path": "/mnt/seagate/HnE/HEST/hest-lung-xenium",
+    "source_overlap_with_hescape": "same_20_GSE250346_sections",
+    "has_aligned_h_and_e": true,
+    "has_native_xenium_nucleus_boundaries": true,
+    "has_native_xenium_cell_boundaries": true,
+    "has_cellvit_boundaries": true,
+    "has_nucleus_assigned_transcripts": true,
+    "has_rna_derived_oracle_broad_lineage": true,
+    "oracle_lineages": ["Endothelial", "Epithelial", "Immune", "Mesenchymal"],
+    "eligible_role": "primary_general_morphology_state_gate",
+    "not_eligible_for": [
+      "independent_external_confirmation",
+      "personalized_matched_snrna_reference_gate"
+    ],
+    "segmentation_policy": {
+      "primary": "native_xenium_nucleus_segmentation",
+      "cellvit": "image_segmentation_sensitivity_only",
+      "spaceranger": "not_applicable_to_xenium"
+    }
+  },
+  "encoders": {
+    "primary": {
+      "repo": "bioptimus/H-optimus-1",
+      "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+      "status": "manual_approval_http_403",
+      "feature_width": 1536
+    },
+    "strong_replication": {
+      "repo": "MahmoodLab/UNI2-h",
+      "revision": "d517a8dd47902dd7c308b3c36f63bce47e7b9a43",
+      "checkpoint_sha256": "6e077eda234bebc595868d918d3458d9dd32a050199b0ff04443b2f46a0a3b1e",
+      "checkpoint_bytes": 2725669217,
+      "feature_width": 1536,
+      "fine_tuning_allowed": false
+    },
+    "lightweight_replication": {
+      "repo": "bioptimus/H0-mini",
+      "status": "not_requested"
+    }
+  },
+  "claim": "UNI2-h plus HESCAPE cannot fully validate HEIR because encoder strength cannot repair pseudo-spot ground truth. UNI2-h plus raw HEST can run the direct cell-level morphology gate on the same cohort, but not independent confirmation or the matched-snRNA specificity gate."
+}
