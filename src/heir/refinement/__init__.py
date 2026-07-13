@@ -1,4 +1,4 @@
-"""Constrained generalized-EM refinement with an EMA image teacher."""
+"""Constrained generalized-EM refinement with an accepted-round teacher."""
 
 from .anchors import AnchorSelection, select_anchors
 from .ema import EMATeacher

@@ -15,6 +15,7 @@ import csv
 import importlib.util
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -25,7 +26,7 @@ import numpy as np
 
 from heir.data import PrototypeSet
 from heir.inference import PredictionBundle
-from heir.utils import sha256_file
+from heir.utils import reject_output_input_collisions, sha256_file
 
 
 def _load_matrix_helpers() -> Any:
@@ -203,6 +204,8 @@ def _validate_run_manifest(
         raise ValueError("unknown-mass run manifest stage grid is incomplete or duplicated")
     if payload.get("stage_count") != len(rows):
         raise ValueError("unknown-mass run manifest stage_count is stale")
+    if payload.get("stage_time_artifact_identities_complete") is not True:
+        raise ValueError("unknown-mass run manifest lacks stage-time artifact identities")
     validated_hashes: Dict[Path, str] = {}
     stage_lookup: Dict[Tuple[str, float, str], Mapping[str, Any]] = {}
     identity_fields = (
@@ -223,6 +226,8 @@ def _validate_run_manifest(
                 )
         if row.get("status") not in {"completed", "skipped_valid"}:
             raise ValueError("unknown-mass run manifest contains an unvalidated stage")
+        if row.get("artifact_identity_capture") != _RUNNER.STAGE_ARTIFACT_IDENTITY_CAPTURE:
+            raise ValueError("unknown-mass run manifest stage identity capture is incomplete")
         inputs = row.get("inputs")
         if not isinstance(inputs, list) or len(inputs) != len(expected["inputs"]):
             raise ValueError("unknown-mass run manifest stage inputs are incomplete")
@@ -301,9 +306,20 @@ def _validate_round_audit(
         range(1, len(rounds) + 1)
     ):
         raise ValueError("refinement audit rounds must be consecutive and limited to four")
-    committed = [int(row["round_id"]) for row in rounds if row.get("committed") is True]
-    if selected != max(committed, default=0):
-        raise ValueError("selected round is not the last safety-committed round")
+    try:
+        candidates = [(float(audit["round_zero_validation_loss"]), 0)]
+        candidates.extend(
+            (float(row["validation_loss"]), int(row["round_id"]))
+            for row in rounds
+            if row.get("committed") is True
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("refinement audit has invalid validation losses") from error
+    if any(not math.isfinite(loss) for loss, _ in candidates):
+        raise ValueError("refinement audit validation losses must be finite")
+    expected_selected = min(candidates)[1]
+    if selected != expected_selected:
+        raise ValueError("selected round is not the lowest-loss safe round with round-0 fallback")
     round_checkpoints = audit.get("round_checkpoints")
     if not isinstance(round_checkpoints, Mapping):
         raise ValueError("refinement audit round_checkpoints must be an object")
@@ -395,9 +411,14 @@ def _validate_lineage(
     parent_path = round0 / "heir.pt"
     view_path = round0 / "refinement_views.npz"
     prototype_path = refined / "prototypes" / ("%s__%s.npz" % (sample, sample))
-    native_prototype_path = repository / "artifacts" / "snpatho" / (
-        molecular_generation + "_scanvi"
-    ) / sample / "prototypes_rare_complete.npz"
+    native_prototype_path = (
+        repository
+        / "artifacts"
+        / "snpatho"
+        / (molecular_generation + "_scanvi")
+        / sample
+        / "prototypes_rare_complete.npz"
+    )
     histology_path = repository / "artifacts" / "snpatho" / sample / "histology_full.npz"
     ood_path = repository / "artifacts" / "snpatho" / sample / "ood_target_calibrated.npz"
     validated_hashes = run_binding["validated_output_hashes"]
@@ -1196,12 +1217,16 @@ def write_report(
     json_output: Path,
     tsv_output: Path,
     markdown_output: Path,
+    input_paths: Sequence[Path],
 ) -> None:
     destinations = tuple(
         path.expanduser().resolve() for path in (json_output, tsv_output, markdown_output)
     )
-    if len(set(destinations)) != 3:
-        raise ValueError("JSON, TSV, and Markdown outputs must be distinct")
+    reject_output_input_collisions(
+        destinations,
+        input_paths,
+        label="snPATHO unknown-mass report",
+    )
     _atomic_write_texts(
         {
             destinations[0]: json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -1306,6 +1331,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json_output=args.json_output,
         tsv_output=args.tsv_output,
         markdown_output=args.markdown_output,
+        input_paths=_MATRIX._bound_input_paths(
+            report,
+            repository=repository,
+            manifest_paths=(run_manifest, args.truth_manifest, native_manifest),
+        ),
     )
     return 0 if report["status"] == "complete" else 2
 

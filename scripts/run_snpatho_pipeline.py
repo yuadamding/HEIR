@@ -182,6 +182,8 @@ def _metadata_batch(batch: HEIRTrainingBatch) -> Dict[str, object]:
         "donor_id": batch.donor_id,
         "block_id": batch.block_id,
         "analysis_role": batch.analysis_role,
+        "weak_target_scope_id": batch.weak_target_scope_id,
+        "weak_target_granularity": batch.weak_target_granularity,
         "source_artifacts": list(batch.source_artifacts),
         "source_sha256": list(batch.source_sha256),
         "source_roles": list(batch.source_roles),
@@ -365,6 +367,7 @@ class Settings:
     model_graph_hidden_dim: int
     model_graph_output_dim: int
     model_graph_layers: int
+    model_graph_mode: str
     model_trunk_hidden_dims: Tuple[int, ...]
     model_decoder_hidden_dims: Tuple[int, ...]
     model_dropout: float
@@ -540,6 +543,7 @@ class Settings:
             model_graph_hidden_dim=int(_nested(raw, "model", "graph_hidden_dim", default=256)),
             model_graph_output_dim=int(_nested(raw, "model", "graph_output_dim", default=256)),
             model_graph_layers=int(_nested(raw, "model", "graph_layers", default=3)),
+            model_graph_mode=str(_nested(raw, "model", "graph_mode", default="off")),
             model_trunk_hidden_dims=tuple(
                 int(value)
                 for value in _nested(raw, "model", "trunk_hidden_dims", default=(512, 256))
@@ -622,6 +626,8 @@ class Settings:
         )
         if any(value <= 0 for value in model_widths):
             problems.append("model architecture widths/layers must be positive")
+        if self.model_graph_mode not in {"off", "distance_only"}:
+            problems.append("model.graph_mode must be off or distance_only")
         if not 0.0 <= self.model_dropout < 1.0:
             problems.append("model.dropout must lie in [0, 1)")
         if not self.nonnegative_expression:
@@ -1283,8 +1289,8 @@ def _validate_calibrated_ood(settings: Settings, paths: SamplePaths) -> Mapping[
         or calibrated.feature_space_id != base.feature_space_id
     ):
         raise ValueError("target OOD calibration changed B1 training provenance")
-    if abs(calibrated.quantile - settings.ood_calibration_quantile) > 1.0e-12:
-        raise ValueError("target OOD quantile differs from the frozen config")
+    if calibrated.threshold != base.threshold or calibrated.quantile != base.quantile:
+        raise ValueError("target OOD telemetry changed the development detector threshold")
     if bag.sample_id != paths.sample or bag.feature_space_id != calibrated.feature_space_id:
         raise ValueError("target OOD calibration and HistologyBag identity differ")
     if bag.features.shape[1] != calibrated.mean.shape[0]:
@@ -1296,6 +1302,9 @@ def _validate_calibrated_ood(settings: Settings, paths: SamplePaths) -> Mapping[
         "base_ood_sha256",
         "histology_sha256",
         "sample_id",
+        "threshold_source",
+        "target_score_quantile",
+        "target_score_quantile_value",
         "target_expression_accessed",
         "score_count",
         "score_minimum",
@@ -1311,7 +1320,7 @@ def _validate_calibrated_ood(settings: Settings, paths: SamplePaths) -> Mapping[
         if (
             str(np.asarray(archive["calibration_contract"]).item())
             != ("heir.target_histology_ood_calibration")
-            or int(np.asarray(archive["calibration_version"]).item()) != 1
+            or int(np.asarray(archive["calibration_version"]).item()) != 2
         ):
             raise ValueError("target OOD calibration contract is invalid")
         if bool(np.asarray(archive["target_expression_accessed"]).item()):
@@ -1322,22 +1331,36 @@ def _validate_calibrated_ood(settings: Settings, paths: SamplePaths) -> Mapping[
             raise ValueError("target OOD calibration is bound to another B1 detector")
         if str(np.asarray(archive["histology_sha256"]).item()) != _sha256(paths.histology):
             raise ValueError("target OOD calibration is bound to another HistologyBag")
+        if str(np.asarray(archive["threshold_source"]).item()) != "development_detector":
+            raise ValueError("target OOD artifact does not preserve the development threshold")
+        if (
+            abs(
+                float(np.asarray(archive["target_score_quantile"]).item())
+                - settings.ood_calibration_quantile
+            )
+            > 1.0e-12
+        ):
+            raise ValueError("target OOD descriptive quantile differs from the frozen config")
         if int(np.asarray(archive["score_count"]).item()) != bag.n_nuclei:
             raise ValueError("target OOD score count differs from HistologyBag")
 
     with paths.calibrated_ood_provenance.open("r", encoding="utf-8") as handle:
         provenance = json.load(handle)
-    if provenance.get("schema") != "heir.target_histology_ood_calibration.v1":
+    if provenance.get("schema") != "heir.target_histology_ood_calibration.v2":
         raise ValueError("target OOD provenance schema is invalid")
     if (
         provenance.get("sample_id") != paths.sample
         or provenance.get("target_expression_accessed") is not False
     ):
         raise ValueError("target OOD provenance violates sample/expression isolation")
-    if provenance.get("calibration_input_modality") != "target_histology_features_only":
+    if (
+        provenance.get("calibration_input_modality")
+        != "development_threshold_plus_target_histology_telemetry"
+        or provenance.get("threshold_source") != "development_detector"
+    ):
         raise ValueError("target OOD provenance names an invalid calibration modality")
     if (
-        provenance.get("quantile") != settings.ood_calibration_quantile
+        provenance.get("descriptive_target_quantile") != settings.ood_calibration_quantile
         or provenance.get("threshold") != calibrated.threshold
     ):
         raise ValueError("target OOD provenance threshold differs from the detector")
@@ -1369,10 +1392,9 @@ def _validate_calibrated_ood(settings: Settings, paths: SamplePaths) -> Mapping[
     ):
         raise ValueError("target OOD provenance does not preserve B1 training provenance")
     assert isinstance(score_stats, Mapping)
-    if (
-        score_stats.get("count") != bag.n_nuclei
-        or score_stats.get("calibration_quantile_value") != calibrated.threshold
-    ):
+    if score_stats.get("count") != bag.n_nuclei or score_stats.get(
+        "descriptive_target_quantile_value"
+    ) != provenance.get("descriptive_target_quantile_value"):
         raise ValueError("target OOD provenance score statistics differ")
     numeric_stats = (
         score_stats.get("minimum"),
@@ -1385,7 +1407,8 @@ def _validate_calibrated_ood(settings: Settings, paths: SamplePaths) -> Mapping[
         raise ValueError("target OOD score statistics must be finite")
     return {
         "nuclei": bag.n_nuclei,
-        "quantile": calibrated.quantile,
+        "development_quantile": calibrated.quantile,
+        "descriptive_target_quantile": settings.ood_calibration_quantile,
         "threshold": calibrated.threshold,
         "base_ood_sha256": _sha256(settings.ood_artifact),
         "calibrated_ood_sha256": _sha256(paths.calibrated_ood),
@@ -1535,15 +1558,50 @@ def _validate_batches(settings: Settings, paths: SamplePaths) -> Mapping[str, ob
         expected_ood = detector.score(bag.features) > detector.threshold
         if not np.array_equal(batch.ood_mask.detach().cpu().numpy(), expected_ood):
             raise ValueError("training batch OOD mask differs from the calibrated detector")
-        if batch.unknown_targets is None or not np.array_equal(
-            batch.unknown_targets.detach().cpu().numpy(), expected_ood.astype(np.float32)
-        ):
-            raise ValueError("training batch unknown targets differ from its OOD mask")
+        if batch.unknown_targets is not None:
+            raise ValueError(
+                "training batch must not reinterpret pathology OOD as biological "
+                "unknown-state supervision"
+            )
     return {
         "train_nuclei": int(train.morphology.shape[0]),
         "validation_nuclei": int(validation.morphology.shape[0]),
         "genes": len(train.gene_names),
     }
+
+
+def _validate_checkpoint_donor_lineage(
+    metadata: Mapping[str, object],
+    train: HEIRTrainingBatch,
+    validation: HEIRTrainingBatch,
+    *,
+    sample: str,
+) -> None:
+    """Validate direct donors separately from the complete exposure lineage."""
+
+    direct_training_donors = tuple(
+        str(value) for value in metadata.get("direct_training_donors", ())
+    )
+    validation_donors = tuple(str(value) for value in metadata.get("validation_donors", ()))
+    if direct_training_donors != (sample,):
+        raise ValueError("HEIR checkpoint direct training donor is invalid")
+    if validation_donors != (sample,):
+        raise ValueError("HEIR checkpoint validation donor is invalid")
+    molecular_donors = {
+        str(value) for batch in (train, validation) for value in batch.molecular_training_donors
+    }
+    expected_exposure_donors = sorted(
+        {
+            *direct_training_donors,
+            *validation_donors,
+            *(str(value) for value in metadata.get("initial_heir_training_donors", ())),
+            *(str(value) for value in metadata.get("rna_vae_training_donors", ())),
+            *(str(value) for value in metadata.get("residual_geometry_training_donors", ())),
+            *molecular_donors,
+        }
+    )
+    if list(metadata.get("training_donors", ())) != expected_exposure_donors:
+        raise ValueError("HEIR checkpoint all-exposure training donors are invalid")
 
 
 def _validate_model(settings: Settings, paths: SamplePaths) -> Mapping[str, object]:
@@ -1586,10 +1644,15 @@ def _validate_model(settings: Settings, paths: SamplePaths) -> Mapping[str, obje
         raise ValueError("snPATHO checkpoint unexpectedly descends from another HEIR model")
     if tuple(metadata.get("initial_heir_training_donors", ())) != ():
         raise ValueError("snPATHO checkpoint has unexpected initial-model donors")
-    if tuple(str(value) for value in metadata.get("training_donors", ())) != (paths.sample,):
-        raise ValueError("HEIR checkpoint training donor is invalid")
+    _validate_checkpoint_donor_lineage(metadata, train, validation, sample=paths.sample)
     if int(metadata.get("seed", -1)) != settings.seed:
         raise ValueError("HEIR checkpoint seed differs from the frozen experiment")
+    if metadata.get("initialization_validation_status") != "uninitialized_negative_control":
+        raise ValueError("snPATHO engineering checkpoint lacks negative-control initialization tag")
+    if metadata.get("molecular_e_step_mode") != "live_student_negative_control":
+        raise ValueError("snPATHO engineering checkpoint lacks live-E-step negative-control tag")
+    if metadata.get("excluded_from_primary_claims") is not True:
+        raise ValueError("snPATHO engineering checkpoint is not excluded from primary claims")
     if metadata.get("training_batches") != [_metadata_batch(train)]:
         raise ValueError("HEIR checkpoint training-batch provenance differs from current batch")
     if metadata.get("validation_batches") != [_metadata_batch(validation)]:
@@ -1603,6 +1666,7 @@ def _validate_model(settings: Settings, paths: SamplePaths) -> Mapping[str, obje
         or config.graph_hidden_dim != settings.model_graph_hidden_dim
         or config.graph_output_dim != settings.model_graph_output_dim
         or config.graph_layers != settings.model_graph_layers
+        or config.graph_mode != settings.model_graph_mode
         or tuple(config.trunk_hidden_dims) != settings.model_trunk_hidden_dims
         or tuple(config.decoder_hidden_dims) != settings.model_decoder_hidden_dims
         or abs(config.dropout - settings.model_dropout) > 1.0e-12
@@ -2248,6 +2312,8 @@ def _stage(settings: Settings, paths: SamplePaths, name: str) -> Stage:
                     str(settings.model_graph_output_dim),
                     "--graph-layers",
                     str(settings.model_graph_layers),
+                    "--graph-mode",
+                    settings.model_graph_mode,
                     "--trunk-hidden-dims",
                     ",".join(str(value) for value in settings.model_trunk_hidden_dims),
                     "--decoder-hidden-dims",
@@ -2264,6 +2330,8 @@ def _stage(settings: Settings, paths: SamplePaths, name: str) -> Stage:
                     ),
                     "--rna-vae-checkpoint",
                     str(settings.rna_decoder),
+                    "--uninitialized-morphology-negative-control",
+                    "--live-student-e-step-negative-control",
                     "--allow-split-overlap",
                     "--mixed-precision",
                     "--seed",

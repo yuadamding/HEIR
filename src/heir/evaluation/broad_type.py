@@ -1026,9 +1026,7 @@ def _summarize_task(
         )
         delta = real_f1 - null_f1
         minimum_f1 = float(thresholds.get("minimum_macro_f1", 0.65))
-        minimum_delta = float(
-            thresholds.get("minimum_image_shuffle_macro_f1_delta", 0.05)
-        )
+        minimum_delta = float(thresholds.get("minimum_image_shuffle_macro_f1_delta", 0.05))
         maximum_ece = float(thresholds.get("maximum_ece", 0.10))
         minimum_occupancy = float(
             thresholds.get("minimum_predicted_class_occupancy_fraction", 0.75)
@@ -1057,9 +1055,7 @@ def _summarize_task(
                     "minimum_macro_f1": float(real_f1[selected].min()),
                     "minimum_image_shuffle_macro_f1_delta": float(delta[selected].min()),
                     "maximum_ece": float(real_ece[selected].max()),
-                    "minimum_predicted_class_occupancy_fraction": float(
-                        occupancy[selected].min()
-                    ),
+                    "minimum_predicted_class_occupancy_fraction": float(occupancy[selected].min()),
                     "all_seed_donor_runs_pass": bool(np.all(run_pass[selected])),
                     "real_beats_shuffle_in_every_donor_fold": seed_beats_shuffle,
                 }
@@ -1083,18 +1079,10 @@ def _summarize_task(
             "minimum_required_seed_donor_run_pass_fraction": minimum_run_pass_fraction,
             "per_seed_stability": seed_rows,
         }
-        checks["%s_macro_f1" % model_name] = bool(
-            real_f1.mean() >= minimum_f1
-        )
-        checks["%s_image_shuffle_delta" % model_name] = bool(
-            delta.mean() >= minimum_delta
-        )
-        checks["%s_ece" % model_name] = bool(
-            real_ece.mean() < maximum_ece
-        )
-        checks["%s_occupancy" % model_name] = bool(
-            occupancy.min() >= minimum_occupancy
-        )
+        checks["%s_macro_f1" % model_name] = bool(real_f1.mean() >= minimum_f1)
+        checks["%s_image_shuffle_delta" % model_name] = bool(delta.mean() >= minimum_delta)
+        checks["%s_ece" % model_name] = bool(real_ece.mean() < maximum_ece)
+        checks["%s_occupancy" % model_name] = bool(occupancy.min() >= minimum_occupancy)
         checks["%s_seed_donor_stability" % model_name] = bool(
             len(unique_seeds) >= 3 and run_pass.mean() >= minimum_run_pass_fraction
         )

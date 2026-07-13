@@ -58,6 +58,8 @@ class HEIRTrainingBatch:
     feature_space_id: str = "unspecified"
     expression_space_id: str = "unspecified"
     scgpt_space_id: str = ""
+    weak_target_scope_id: str = "unspecified"
+    weak_target_granularity: str = "legacy_unspecified"
     nucleus_ids: Tuple[str, ...] = ()
     type_names: Tuple[str, ...] = ()
     gene_names: Tuple[str, ...] = ()
@@ -69,7 +71,7 @@ class HEIRTrainingBatch:
     molecular_training_donors: Tuple[str, ...] = ()
 
     CONTRACT: ClassVar[str] = "heir.training_batch"
-    CONTRACT_VERSION: ClassVar[int] = 5
+    CONTRACT_VERSION: ClassVar[int] = 6
 
     _OPTIONAL_TENSORS: ClassVar[Tuple[str, ...]] = (
         "edge_weight",
@@ -324,7 +326,12 @@ class HEIRTrainingBatch:
                 raise ValueError("%s must contain unique non-empty strings" % name)
         if not (len(self.source_artifacts) == len(self.source_sha256) == len(self.source_roles)):
             raise ValueError("source artifacts, SHA-256 values, and roles must align")
-        allowed_source_roles = {"sample_assay", "shared_manifest", "shared_teacher"}
+        allowed_source_roles = {
+            "sample_assay",
+            "shared_manifest",
+            "shared_teacher",
+            "frozen_e_step",
+        }
         if any(value not in allowed_source_roles for value in self.source_roles):
             raise ValueError("source_roles contains an unsupported provenance role")
         if any(not value.strip() for value in self.molecular_training_donors) or len(
@@ -342,10 +349,23 @@ class HEIRTrainingBatch:
             not self.latent_space_id.strip()
             or not self.feature_space_id.strip()
             or not self.expression_space_id.strip()
+            or not self.weak_target_scope_id.strip()
+            or not self.weak_target_granularity.strip()
         ):
             raise ValueError(
-                "latent_space_id, feature_space_id, and expression_space_id cannot be empty"
+                "latent, feature, expression, and weak-target identities cannot be empty"
             )
+        if self.weak_target_scope_id != "unspecified":
+            prefix = "sha256:"
+            digest = self.weak_target_scope_id[len(prefix) :]
+            if (
+                not self.weak_target_scope_id.startswith(prefix)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(
+                    "weak_target_scope_id must be unspecified or sha256:<lowercase digest>"
+                )
         StageInputs(
             histology_features=self.morphology,
             matched_rna=self.prototype_means,
@@ -432,6 +452,8 @@ class HEIRTrainingBatch:
             "feature_space_id",
             "expression_space_id",
             "scgpt_space_id",
+            "weak_target_scope_id",
+            "weak_target_granularity",
             "type_names",
             "gene_names",
             "prototype_ids",
@@ -454,9 +476,9 @@ class HEIRTrainingBatch:
                         "HEIR training-batch version 1 lacks required provenance; "
                         "regenerate it with assemble-batch"
                     )
-                if version not in {2, 3, 4}:
+                if version not in {2, 3, 4, 5}:
                     raise ValueError("unsupported HEIR training-batch version %d" % version)
-            required_metadata = metadata - (
+            optional_legacy_metadata = (
                 {
                     "feature_space_id",
                     "expression_space_id",
@@ -466,6 +488,9 @@ class HEIRTrainingBatch:
                 if version in {2, 3}
                 else set()
             )
+            if version < 6:
+                optional_legacy_metadata.update({"weak_target_scope_id", "weak_target_granularity"})
+            required_metadata = metadata - optional_legacy_metadata
             missing = sorted((required_tensors | required_metadata) - set(archive.files))
             if missing:
                 raise ValueError("training-batch artifact is missing: %s" % ", ".join(missing))
@@ -509,12 +534,18 @@ class HEIRTrainingBatch:
                 "feature_space_id",
                 "expression_space_id",
                 "scgpt_space_id",
+                "weak_target_scope_id",
+                "weak_target_granularity",
             ):
                 values[name] = (
                     "unspecified"
                     if name in {"feature_space_id", "expression_space_id"} and name not in archive
                     else ""
                     if name == "scgpt_space_id" and name not in archive
+                    else "unspecified"
+                    if name == "weak_target_scope_id" and name not in archive
+                    else "legacy_unspecified"
+                    if name == "weak_target_granularity" and name not in archive
                     else str(np.asarray(archive[name]).item())
                 )
             for name in (

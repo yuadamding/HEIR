@@ -1,4 +1,4 @@
-"""Exponential-moving-average image teacher used during refinement."""
+"""Round-snapshot image teacher used during refinement."""
 
 from copy import deepcopy
 from typing import Any, Dict
@@ -8,7 +8,15 @@ from torch import nn
 
 
 class EMATeacher:
-    def __init__(self, student: nn.Module, decay: float = 0.99) -> None:
+    """Track an accepted student, copying it exactly by default.
+
+    Refinement updates this object once after each accepted round, after the
+    trainer has restored that round's best epoch.  Consequently, ``decay=0``
+    is the faithful default round-teacher operation.  A nonzero decay remains
+    available for explicitly named sensitivity analyses.
+    """
+
+    def __init__(self, student: nn.Module, decay: float = 0.0) -> None:
         if not 0.0 <= decay < 1.0:
             raise ValueError("decay must be in [0, 1)")
         self.decay = decay

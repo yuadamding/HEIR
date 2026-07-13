@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,6 +26,69 @@ assert SPEC is not None and SPEC.loader is not None
 SENSITIVITY = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = SENSITIVITY
 SPEC.loader.exec_module(SENSITIVITY)
+
+
+def test_historical_summary_is_immutable_and_correction_is_a_sidecar() -> None:
+    summary = ROOT / "reports" / "snpatho_unknown_mass_sensitivity_v2_summary.json"
+    attestation_path = (
+        ROOT / "reports" / "snpatho_unknown_mass_sensitivity_v2_source_tree_attestation.json"
+    )
+    expected_summary_sha256 = "8979a7c6882b0a34483420310113c762c18bf0e58580a5fca16e169fc7cd697a"
+
+    assert sha256_file(summary) == expected_summary_sha256
+    assert sha256_file(ROOT / "configs/experiments/snpatho_deepbench_v1.yaml") == (
+        "893e169dcb0ebc59577ec45c8f1dbf2ffee756dee20082f73058dfea0b8eac00"
+    )
+    assert sha256_file(ROOT / "configs/experiments/snpatho_v0_2.yaml") == (
+        "1f572ed7d80255484fcf1f43abd8468e1f57a8a78394379d3bc2daeb7a6a029f"
+    )
+    summary_payload = json.loads(summary.read_text(encoding="utf-8"))
+    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    assert attestation["schema"] == "heir.source_tree_equivalence_attestation.v1"
+    assert attestation["historical_summary_sha256"] == expected_summary_sha256
+    assert attestation["execution_parent_commit"] == ("153157fd3577e97078ad3164f68c74afbf1445c8")
+    assert attestation["source_tree_equivalent_commit"] == (
+        "28938cdfbc6c248ad95db3cb1c57121b48547671"
+    )
+    source_files = attestation["source_files"]
+    assert len(source_files) == attestation["source_file_count"] == 73
+    assert attestation["source_file_count"] == summary_payload["execution"]["source_file_count"]
+    assert attestation["run_manifest_sha256"] == summary_payload["execution"]["run_manifest_sha256"]
+    assert (
+        attestation["source_identity_sha256"]
+        == summary_payload["execution"]["source_identity_sha256"]
+    )
+    assert len({row["relative_path"] for row in source_files}) == len(source_files)
+    for row in source_files:
+        blob = subprocess.run(
+            [
+                "git",
+                "show",
+                "%s:%s"
+                % (
+                    attestation["source_tree_equivalent_commit"],
+                    row["relative_path"],
+                ),
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert hashlib.sha256(blob).hexdigest() == row["sha256"]
+    source_identity_payload = {
+        "files": source_files,
+        "runtime_environment_sha256": summary_payload["execution"]["runtime_environment_sha256"],
+    }
+    source_identity_sha256 = hashlib.sha256(
+        json.dumps(
+            source_identity_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert source_identity_sha256 == attestation["source_identity_sha256"]
 
 
 def _prediction(
@@ -159,6 +224,11 @@ def _sensitivity_artifact(
         {
             "round_id": round_id,
             "committed": selected_round > 0 and round_id <= selected_round,
+            "validation_loss": (
+                1.25 - 0.01 * round_id
+                if selected_round > 0 and round_id <= selected_round
+                else 1.30
+            ),
         }
         for round_id in range(1, round_count + 1)
     ]
@@ -351,6 +421,10 @@ def _fixture(tmp_path: Path, *, custom_output_root: bool = False) -> dict:
             "stage": stage.name,
             "unknown_mass": stage.unknown_mass,
             "status": "skipped_valid",
+            "validated_inputs": SENSITIVITY._RUNNER._absolute_artifact_rows(stage.inputs),
+            "validated_outputs": SENSITIVITY._RUNNER._absolute_artifact_rows(
+                SENSITIVITY._RUNNER._stage_output_artifacts(stage)
+            ),
         }
         for stage in plan
     ]
@@ -381,6 +455,23 @@ def _fixture(tmp_path: Path, *, custom_output_root: bool = False) -> dict:
         "samples": (sample,),
         "minimum_nuclei": 2,
     }
+
+
+def test_run_manifest_requires_stage_time_artifact_identity_proof(tmp_path: Path) -> None:
+    arguments = _fixture(tmp_path)
+    manifest_path = arguments["run_manifest_path"]
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload.pop("stage_time_artifact_identities_complete")
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lacks stage-time artifact identities"):
+        SENSITIVITY._validate_run_manifest(
+            manifest_path,
+            repository=arguments["repository"],
+            artifact_root=arguments["artifact_root"],
+            samples=arguments["samples"],
+            molecular_generation="r1",
+        )
 
 
 def test_complete_grid_accepts_safety_selected_rounds_and_reports_stability(
@@ -468,11 +559,71 @@ def test_unknown_mass_scorer_accepts_hash_bound_clean_custom_artifact_root(tmp_p
         json_output=output / "sensitivity.json",
         tsv_output=output / "sensitivity.tsv",
         markdown_output=output / "sensitivity.md",
+        input_paths=tuple(value for value in arguments.values() if isinstance(value, Path)),
     )
     assert json.loads((output / "sensitivity.json").read_text())["scored_prediction_count"] == 10
     assert (output / "sensitivity.tsv").read_text().startswith("sample\tseed\tunknown_mass")
     assert "Refined-round0" in (output / "sensitivity.md").read_text()
     assert not list(output.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("alias_kind", ("hardlink", "symlink"))
+def test_unknown_mass_writer_rejects_input_aliases(
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    source = tmp_path / "bound-input.json"
+    source.write_text("frozen", encoding="utf-8")
+    alias = tmp_path / "report.json"
+    if alias_kind == "hardlink":
+        alias.hardlink_to(source)
+    else:
+        alias.symlink_to(source)
+
+    with pytest.raises(ValueError, match="would overwrite a bound input"):
+        SENSITIVITY.write_report(
+            {},
+            json_output=alias,
+            tsv_output=tmp_path / "report.tsv",
+            markdown_output=tmp_path / "report.md",
+            input_paths=(source,),
+        )
+    assert source.read_text(encoding="utf-8") == "frozen"
+
+
+@pytest.mark.parametrize(
+    "manifest_payload",
+    (
+        {"cases": [{"truth": "bound-input.bin"}]},
+        {"specimens": {"sample": {"latent_reference": "bound-input.bin"}}},
+        {"validation_cli_source_binding": {"python_executable": "bound-input.bin"}},
+    ),
+)
+def test_unknown_mass_inventory_protects_semantic_manifest_paths(
+    tmp_path: Path,
+    manifest_payload: object,
+) -> None:
+    source = tmp_path / "bound-input.bin"
+    source.write_bytes(b"frozen")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    alias = tmp_path / "report.json"
+    alias.hardlink_to(source)
+    inputs = SENSITIVITY._MATRIX._bound_input_paths(
+        {},
+        repository=tmp_path,
+        manifest_paths=(manifest,),
+    )
+
+    with pytest.raises(ValueError, match="would overwrite a bound input"):
+        SENSITIVITY.write_report(
+            {},
+            json_output=alias,
+            tsv_output=tmp_path / "report.tsv",
+            markdown_output=tmp_path / "report.md",
+            input_paths=inputs,
+        )
+    assert source.read_bytes() == b"frozen"
 
 
 def test_missing_manifested_output_fails_before_scoring(

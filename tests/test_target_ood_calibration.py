@@ -48,7 +48,9 @@ def _inputs(tmp_path):
     return base_path, histology_path, target
 
 
-def test_target_histology_calibration_copies_b1_parameters_and_is_byte_stable(tmp_path):
+def test_target_histology_telemetry_preserves_development_threshold_and_is_byte_stable(
+    tmp_path,
+):
     base_path, histology_path, target = _inputs(tmp_path)
     outputs = []
     for suffix in ("first", "second"):
@@ -71,13 +73,16 @@ def test_target_histology_calibration_copies_b1_parameters_and_is_byte_stable(tm
         np.testing.assert_array_equal(calibrated.precision, base.precision)
         assert calibrated.training_donors == base.training_donors == ("B1",)
         assert calibrated.source_sha256 == base.source_sha256 == ("a" * 64,)
-        expected = float(np.quantile(base.score(target).astype(np.float64), 0.95))
-        assert calibrated.threshold == expected
-        assert calibrated.quantile == 0.95
+        target_quantile = float(np.quantile(base.score(target).astype(np.float64), 0.95))
+        assert calibrated.threshold == base.threshold
+        assert calibrated.quantile == base.quantile == 0.9
 
         payload = json.loads(provenance.read_text())
         assert payload["sample_id"] == "4066"
         assert payload["target_expression_accessed"] is False
+        assert payload["threshold_source"] == "development_detector"
+        assert payload["descriptive_target_quantile"] == 0.95
+        assert payload["descriptive_target_quantile_value"] == target_quantile
         assert payload["score_stats"]["count"] == len(target)
         assert (
             payload["inputs"]["base_ood"]["sha256"]
@@ -90,6 +95,10 @@ def test_target_histology_calibration_copies_b1_parameters_and_is_byte_stable(tm
         with np.load(output, allow_pickle=False) as archive:
             assert not bool(np.asarray(archive["target_expression_accessed"]).item())
             assert str(np.asarray(archive["sample_id"]).item()) == "4066"
+            assert str(np.asarray(archive["threshold_source"]).item()) == ("development_detector")
+            assert float(np.asarray(archive["target_score_quantile_value"]).item()) == (
+                target_quantile
+            )
 
     assert outputs[0].read_bytes() == outputs[1].read_bytes()
 
@@ -120,3 +129,39 @@ def test_target_histology_calibration_rejects_identity_drift_and_existing_output
             score_batch_size=8,
         )
     assert output.read_bytes() == b"keep"
+
+
+def test_target_score_distribution_cannot_change_development_threshold(tmp_path):
+    base_path, histology_path, _ = _inputs(tmp_path)
+    original = HistologyBag.load_npz(histology_path)
+    shifted_path = tmp_path / "shifted_histology.npz"
+    shifted = HistologyBag(
+        slide_id=original.slide_id,
+        nucleus_ids=original.nucleus_ids,
+        features=original.features + 100.0,
+        coordinates_um=original.coordinates_um,
+        sample_id=original.sample_id,
+        donor_id=original.donor_id,
+        block_id=original.block_id,
+        feature_space_id=original.feature_space_id,
+    )
+    shifted.save_npz(shifted_path)
+    thresholds = []
+    descriptive_values = []
+    for label, source in (("original", histology_path), ("shifted", shifted_path)):
+        output = tmp_path / (label + ".npz")
+        provenance = tmp_path / (label + ".json")
+        payload = CALIBRATION.calibrate(
+            base_ood_path=base_path,
+            histology_path=source,
+            sample_id="4066",
+            quantile=0.95,
+            output_path=output,
+            provenance_path=provenance,
+            score_batch_size=8,
+        )
+        thresholds.append(MahalanobisOOD.from_npz(output).threshold)
+        descriptive_values.append(payload["descriptive_target_quantile_value"])
+
+    assert thresholds[0] == thresholds[1] == MahalanobisOOD.from_npz(base_path).threshold
+    assert descriptive_values[0] != descriptive_values[1]

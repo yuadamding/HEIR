@@ -23,22 +23,27 @@ The repository contains a runnable HEIR core and a development-only refinement r
 - calibrated PIL/OpenSlide access, coordinate transforms, nucleus tables, image QC, sparse cellular graphs, Visium assignment, and conservative registration;
 - a transferable RNA VAE fallback, scVI-decoder export, and frozen scGPT teacher objective;
 - shrunken sample/type RNA prototypes;
-- a graph-aware, hierarchical prototype model with a zero-initialized,
+- a hierarchical prototype model with graph disabled by default and a zero-initialized,
   RNA-PCA-informed type-conditioned low-rank residual whose latent L2 norm is
   bounded relative to measured type-specific molecular geometry;
-- differentiable unbalanced optimal transport with prespecified fixed unknown
-  mass, or explicit unknown targets, in the primary path;
+- a hash-bound frozen molecular E-step with prespecified fixed unknown mass,
+  plus a separate M-step that cannot regenerate targets from the live student;
 - composition, pseudobulk, marker/program, residual, cycle, hierarchy, graph, anchor, and uncertainty objectives;
-- covariance-aware UOT on the decoded molecular latent, detached transport responsibilities, and direct molecular/type M-step supervision;
-- two parent-gated rounds followed by fine refinement, with an EMA teacher,
-  revocable anchors, scale-held-out-view gates, a validated round-0 rollback target,
-  and fixed measured priors by default;
+- covariance-aware E-step transport, detached fixed responsibilities, and direct molecular/type M-step supervision with live UOT disabled;
+- mandatory validated morphology initialization for personalized primary runs;
+  uninitialized and live-student E-step paths are explicitly tagged negative controls;
+- a strict fixed-target curriculum with parent-head rounds followed by fine-head
+  rounds, an accepted-round teacher, diagnostic scale-held-out views, an immutable
+  round-0 safety ceiling/fallback, and fixed measured priors by default; live
+  parent-gated transport and pseudo-anchors remain excluded sensitivity paths;
 - H&E-only distillation, calibration, OOD detection, abstention, v8
   known-state-conditional expression availability and intervals (public cell
   means are fail-closed on abstention while finite internal aggregate values
   and legacy migrations remain explicit), biological baselines, and
   donor-aware metrics;
-- pull-request and main-branch CI for formatting, lint, and the unit/synthetic suite;
+- pull-request and main-branch CI for formatting, lint, the unit/synthetic suite,
+  and a source-hash-bound deterministic matched-image/prototype/graph/residual
+  forward-control fixture (explicitly not biological performance evidence);
 - synthetic, unit, and local-data smoke paths.
 
 Large pretrained components are deliberately external assets. HEIR contains the
@@ -137,14 +142,29 @@ build-prototypes + fit-ood
               ↓
  independent broad-type gate [no graph, no residual]
               ↓ pass
- train [optional generic H&E–ST pretraining checkpoint]
+ validate_initialization_checkpoint → create_initialization_receipt
+              ↓
+ create_molecular_e_step [once per frozen train/validation bag]
+              ↓
+ train [validated generic H&E–ST/cross-modal checkpoint + receipt]
               ↓
  refine → predict → evaluate-spatial
 ```
 
-Use `heir prepare-histology` to join a canonical nucleus table with a pickle-free cached feature NPZ, calibrate pixels to micrometers, and construct a weighted graph. The command requires donor/sample/block and source-H&E provenance (directly or from a manifest) plus a stable `--feature-space-id` identifying the pathology encoder checkpoint and preprocessing recipe. `assemble-batch` accepts optional scGPT, program, OOD, domain, calibration, and non-target spatial-pretraining artifacts. `train --initial-heir-checkpoint` starts personalization from a generic H&E–ST model. `refine` requires independently identified view predictions by default and emits both a refined checkpoint and updated per-sample prototype banks. `predict` records source/model hashes, OOD provenance, RNG seed, Monte Carlo count, and decision thresholds; `evaluate-spatial` requires exact nucleus, gene, and type identities.
+Use `heir prepare-histology` to join a canonical nucleus table with a pickle-free cached feature NPZ, calibrate pixels to micrometers, and construct a weighted graph. The command requires donor/sample/block and source-H&E provenance (directly or from a manifest) plus a stable `--feature-space-id` identifying the pathology encoder checkpoint and preprocessing recipe. `assemble-batch --molecular-e-step` binds fixed responsibilities to exact nuclei, prototypes, and upstream hashes while keeping pathology OOD separate from biological unknown targets. Personalized `train` requires both `--initial-heir-checkpoint` and a passing `--initialization-receipt`; the graph is off unless `--graph-mode distance_only` is explicitly selected. `refine` consumes the frozen E-step by default, treats same-checkpoint scale views as diagnostics, and emits both a refined checkpoint and updated per-sample prototype banks. `predict` records source/model hashes, OOD provenance, residual activity, RNG seed, Monte Carlo count, and decision thresholds; `evaluate-spatial` requires exact nucleus, gene, and type identities.
 
-Run `heir COMMAND --help` for each versioned contract. Training intentionally caps the total cells retained in one sample-level autograd graph (16,384 by default); use a prespecified donor-balanced tissue-region sample for fitting, then patchwise inference over the complete WSI.
+The strict artifacts are produced inside this repository. First run
+`scripts/validate_initialization_checkpoint.py` with a hash-locked plan and an
+independently labeled donor-held-out NPZ containing both type labels and
+registered image-to-RNA latent targets. A passing report is converted by
+`scripts/create_initialization_receipt.py`. Then run
+`scripts/create_molecular_e_step.py` for each bag. That producer uses only the
+validated frozen teacher's prototype-free image bridge and type posterior; the
+live student and its unknown head are never evaluated. It records solver dual
+residuals, realized marginal error, exact tensor hashes, and the fixed dustbin
+mass before `assemble-batch` can consume the result.
+
+Run `heir COMMAND --help` for each versioned contract. Training intentionally caps the total cells retained in one sample-level autograd graph (16,384 by default); use a prespecified spatially stratified tissue-region sample for fitting, then patchwise inference over the complete WSI. The bundled splitter allocates a cap proportionally across a quantile grid instead of selecting a central ROI.
 
 For snPATHO RDS files, convert the RNA object in the existing R environment and selectively extract the Visium/H&E archive:
 
@@ -222,6 +242,14 @@ and cannot unlock a full-primary claim even if its numerical ordering passed.
 Full per-gene JSON, TSV, and Markdown reports remain under the ignored
 `artifacts/` tree; only compact summaries and manifests under `reports/` are
 tracked.
+
+The strict initialization/E-step, graph-off, OOD-separation, continuous-residual,
+and refinement-safety changes now in source have unit and deterministic synthetic
+regression coverage only. No end-to-end cohort result has yet been generated
+from this revised source tree. Because the required validated initialization
+receipt and independent frozen E-step artifacts do not yet exist for snPATHO,
+the scientifically correct primary status remains `blocked_prerequisite`;
+historical runnable commands are explicitly tagged negative controls.
 
 For refinement development, use only a development cohort with spatial truth.
 The independent broad-type gate must pass first; the internal residual
@@ -340,7 +368,7 @@ src/heir/image_features cached multiscale extraction
 src/heir/prior/         RNA models, programs, state prototypes
 src/heir/models/        personalized and distilled models
 src/heir/losses/        UOT and biological constraints
-src/heir/refinement/    constrained generalized EM and EMA teacher
+src/heir/refinement/    fixed-target refinement and excluded live-E-step controls
 src/heir/uncertainty/   calibration, OOD, abstention
 src/heir/evaluation/    donor-aware and spatial metrics
 manifests/              reviewed public-cohort ledgers

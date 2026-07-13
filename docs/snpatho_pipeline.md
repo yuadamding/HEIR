@@ -64,14 +64,17 @@ The script runs each stage across every selected sample before advancing:
    nucleus centroids, spot positions, and scalefactors—not expression.
 3. Multi-scale OmiCLIP feature extraction on CUDA with mixed precision.
 4. Histology graph preparation from the audited local full-resolution H&E.
-5. Target-H&E-only calibration of the B1 detector's scalar OOD threshold. The
-   B1 mean and precision remain unchanged, and the artifact records that target
-   expression was not accessed.
+5. Target-H&E OOD-score telemetry while preserving the B1/development detector's
+   mean, precision, and scalar threshold unchanged. The target quantile is
+   descriptive only, and the artifact records that target expression was not accessed.
 6. A disjoint spatial-block train/validation split and matched snRNA
    reference/prototype preparation using the B1 latent transform.
-7. Train/validation batch assembly with the calibrated OOD mask as explicit
-   unknown-head supervision.
-8. Personalized HEIR training and Monte Carlo prediction on CUDA. Training and
+7. Train/validation batch assembly with the calibrated pathology OOD mask kept
+   separate from biological unknown-state supervision. The OOD mask is used by
+   abstention and refinement gates; it is not copied into `unknown_targets`.
+8. Personalized HEIR engineering-negative-control training and Monte Carlo
+   prediction on CUDA. Until validated initialization and frozen E-step artifacts
+   exist, these outputs are tagged `excluded_from_primary_claims`; training and
    inference telemetry are persisted.
 9. Validation of every frozen prediction and checkpoint hash.
 10. Only then, construction of locked spatial-truth artifacts from Visium

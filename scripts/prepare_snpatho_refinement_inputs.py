@@ -33,6 +33,11 @@ from heir.uncertainty import MahalanobisOOD
 SAMPLES = ("4066", "4399", "4411")
 SCHEMA = "heir.snpatho_refinement_input_preparation.v1"
 RECEIPT_SCHEMA = "heir.snpatho_refinement_input_stage.v1"
+TARGET_OOD_SCHEMA = "heir.target_histology_ood_calibration.v2"
+TARGET_OOD_CONTRACT = "heir.target_histology_ood_calibration"
+TARGET_OOD_CONTRACT_VERSION = 2
+TARGET_OOD_INPUT_MODALITY = "development_threshold_plus_target_histology_telemetry"
+TARGET_OOD_THRESHOLD_SOURCE = "development_detector"
 RECIPE = {
     "prototype": {
         "include_rare_types": True,
@@ -62,6 +67,17 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _ordered_string_sha256(values: Sequence[object]) -> str:
+    normalized = [str(value) for value in np.asarray(values).reshape(-1).tolist()]
+    encoded = json.dumps(
+        {"dtype": "string", "shape": [len(normalized)], "values": normalized},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _directory_sha256(path: Path) -> str:
@@ -178,6 +194,166 @@ def _validate_decoder_metadata(
             raise ValueError("%s lacks %s" % (label, key))
 
 
+@dataclass(frozen=True)
+class R2TrainingScope:
+    """Validated molecular fit scope for one downstream preparation family."""
+
+    training_donors: Tuple[str, ...]
+    held_out_sample: Optional[str]
+    active_samples: Tuple[str, ...]
+    true_leave_one_donor_out: bool
+
+
+def _r2_training_scope(provenance: Mapping[str, object]) -> R2TrainingScope:
+    def donors(value: object) -> Tuple[str, ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        return tuple(str(item) for item in value)
+
+    status = provenance.get("status")
+    partition = provenance.get("training_partition")
+    if status == "native_scanvi_true_leave_one_donor_out":
+        if provenance.get("analysis_role") != "leave_one_donor_out_molecular_audit":
+            raise ValueError("true-LOO scANVI provenance has the wrong analysis role")
+        if not isinstance(partition, Mapping) or partition.get("mode") != "leave_one_donor_out":
+            raise ValueError("true-LOO scANVI provenance lacks its training partition")
+        held_out = str(partition.get("held_out_sample", ""))
+        if held_out not in SAMPLES:
+            raise ValueError("true-LOO scANVI provenance names an invalid held-out donor")
+        expected = tuple(sample for sample in SAMPLES if sample != held_out)
+        label_ontology_value = partition.get("label_ontology")
+        label_ontology = (
+            tuple(str(value) for value in label_ontology_value)
+            if isinstance(label_ontology_value, (list, tuple))
+            else ()
+        )
+        if (
+            not label_ontology
+            or tuple(sorted(set(label_ontology))) != label_ontology
+            or partition.get("label_ontology_sha256") != _ordered_string_sha256(label_ontology)
+        ):
+            raise ValueError("true-LOO training-donor label ontology is invalid")
+        if (
+            donors(partition.get("backbone_training_donors")) != expected
+            or donors(partition.get("decoder_training_donors")) != expected
+            or partition.get("all_donor_behavior_role") != "not_applicable"
+        ):
+            raise ValueError("true-LOO backbone/decoder training donors are invalid")
+        mapping = partition.get("held_out_mapping")
+        if (
+            not isinstance(mapping, Mapping)
+            or mapping.get("method") != "SCANVI.load_query_data_without_query_training"
+            or any(
+                mapping.get(key) is not expected_value
+                for key, expected_value in {
+                    "labels_available_to_query_model": False,
+                    "query_train_called": False,
+                    "query_parameters_frozen_before_inference": True,
+                    "inference_guard_enabled_without_optimization": True,
+                    "held_out_expression_used_for_fitting": False,
+                    "held_out_annotation_used_for_label_mapping": False,
+                }.items()
+            )
+            or mapping.get("label_mapping_method") != "frozen_training_donor_SCANVI_classifier"
+            or donors(mapping.get("label_training_donors")) != expected
+        ):
+            raise ValueError("true-LOO held-out query mapping is not frozen and label-free")
+        runtime = mapping.get("runtime_audit")
+        if (
+            not isinstance(runtime, Mapping)
+            or any(
+                runtime.get(key) is not expected_value
+                for key, expected_value in {
+                    "labels_removed_before_registry_transfer": True,
+                    "query_train_called": False,
+                    "parameters_frozen_before_inference": True,
+                    "inference_guard_enabled_without_optimization": True,
+                    "label_predictions_generated_without_target_annotation": True,
+                }.items()
+            )
+            or runtime.get("label_prediction_rule") != "SCANVI.predict(soft=False)"
+        ):
+            raise ValueError("true-LOO provenance lacks its runtime frozen-query audit")
+        if (
+            int(runtime.get("frozen_parameter_count", 0)) <= 0
+            or int(runtime.get("cells_mapped", 0)) <= 0
+        ):
+            raise ValueError("true-LOO runtime frozen-query audit has invalid counts")
+        fit_counts = partition.get("fit_cell_counts")
+        if (
+            not isinstance(fit_counts, Mapping)
+            or set(fit_counts) != set(expected)
+            or any(
+                isinstance(fit_counts.get(sample), bool)
+                or not isinstance(fit_counts.get(sample), int)
+                or int(fit_counts[sample]) <= 0
+                for sample in expected
+            )
+        ):
+            raise ValueError("true-LOO provenance has invalid molecular fit-cell counts")
+        return R2TrainingScope(
+            training_donors=expected,
+            held_out_sample=held_out,
+            active_samples=(held_out,),
+            true_leave_one_donor_out=True,
+        )
+
+    if status not in {
+        "native_scanvi_with_specimen_biology_preserved",
+        "native_scanvi_specimen_batch_sensitivity",
+    }:
+        raise ValueError("native scANVI v2 status is unsupported")
+    if provenance.get("analysis_role") not in {None, "historical_all_donor_negative_control"}:
+        raise ValueError("historical all-donor scANVI provenance has the wrong analysis role")
+    if partition is not None:
+        if not isinstance(partition, Mapping) or (
+            partition.get("mode") != "historical_all_donor_negative_control"
+            or partition.get("held_out_sample") is not None
+            or donors(partition.get("backbone_training_donors")) != SAMPLES
+        ):
+            raise ValueError("historical all-donor scANVI training partition is invalid")
+    return R2TrainingScope(
+        training_donors=SAMPLES,
+        held_out_sample=None,
+        active_samples=SAMPLES,
+        true_leave_one_donor_out=False,
+    )
+
+
+def _validate_r2_count_binding(
+    *,
+    provenance: Mapping[str, object],
+    scope: R2TrainingScope,
+    sample: str,
+    observed_cells: int,
+    declared_latent: Mapping[str, object],
+) -> None:
+    """Cross-check declared fit/query counts against the loaded RNA artifact."""
+
+    if isinstance(observed_cells, bool) or int(observed_cells) <= 0:
+        raise ValueError("observed RNA cell count must be positive")
+    observed = int(observed_cells)
+    declared = declared_latent.get("cells")
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared != observed:
+        raise ValueError("%s latent cell count differs from its RNA reference" % sample)
+    if not scope.true_leave_one_donor_out:
+        return
+    partition = provenance.get("training_partition")
+    if not isinstance(partition, Mapping):
+        raise ValueError("true-LOO provenance lacks its training partition")
+    if sample in scope.training_donors:
+        fit_counts = partition.get("fit_cell_counts")
+        if not isinstance(fit_counts, Mapping) or fit_counts.get(sample) != observed:
+            raise ValueError("%s fit-cell count differs from its RNA reference" % sample)
+    elif sample == scope.held_out_sample:
+        mapping = partition.get("held_out_mapping")
+        runtime = mapping.get("runtime_audit") if isinstance(mapping, Mapping) else None
+        if not isinstance(runtime, Mapping) or runtime.get("cells_mapped") != observed:
+            raise ValueError("held-out mapped-cell count differs from its RNA reference")
+    else:
+        raise ValueError("RNA sample is outside the true-LOO fold")
+
+
 def _validate_r2_decoder_family(
     provenance: Mapping[str, object],
     *,
@@ -188,15 +364,19 @@ def _validate_r2_decoder_family(
     validation = provenance["decoder_validation"]
     assert isinstance(design, Mapping) and isinstance(validation, Mapping)
     policy = str(validation["policy"])
+    scope = _r2_training_scope(provenance)
     correction_mode = design.get("batch_correction_mode")
     transform_batch = design.get("transform_batch")
-    canonical_donors = (
-        SAMPLES
-        if policy == "donor_rotated_audit_plus_stratified_deployment_split"
-        else tuple(
+    if policy == "true_leave_one_donor_out_training_donor_stratified":
+        if not scope.true_leave_one_donor_out:
+            raise ValueError("true-LOO decoder policy requires a held-out molecular fit")
+        canonical_donors = scope.training_donors
+    elif policy == "donor_rotated_audit_plus_stratified_deployment_split":
+        canonical_donors = SAMPLES
+    else:
+        canonical_donors = tuple(
             sample for sample in SAMPLES if sample != str(validation.get("single_donor_sample"))
         )
-    )
     deployed = _decoder_metadata(decoder, "deployed R2 decoder")
     _validate_decoder_metadata(
         deployed,
@@ -210,14 +390,17 @@ def _validate_r2_decoder_family(
     declared_contract = provenance.get("decoder_contract")
     if not isinstance(declared_contract, Mapping):
         raise ValueError("native scANVI R2 provenance lacks its embedded decoder contract")
-    for key in (
+    contract_keys = [
         "schema",
         "batch_correction_mode",
         "posterior_samples",
         "distillation_latent_sha256",
         "distillation_target_sha256",
         "validation_mask_sha256",
-    ):
+    ]
+    if scope.true_leave_one_donor_out or "training_donors" in declared_contract:
+        contract_keys.append("training_donors")
+    for key in contract_keys:
         if declared_contract.get(key) != deployed.get(key):
             raise ValueError("native scANVI R2 decoder contract is stale for %s" % key)
 
@@ -313,6 +496,169 @@ class SamplePaths:
         return self.scanvi / ("batch_%s_rare_complete.npz" % role)
 
 
+def _validate_target_ood_calibration(
+    *,
+    paths: SamplePaths,
+    sample: str,
+    full: HistologyBag,
+) -> Path:
+    """Validate that target scores are telemetry around a frozen development detector."""
+
+    detector = MahalanobisOOD.from_npz(paths.ood)
+    provenance = _json(paths.ood_provenance)
+    if (
+        provenance.get("schema") != TARGET_OOD_SCHEMA
+        or provenance.get("sample_id") != sample
+        or provenance.get("target_expression_accessed") is not False
+        or provenance.get("calibration_input_modality") != TARGET_OOD_INPUT_MODALITY
+        or provenance.get("threshold_source") != TARGET_OOD_THRESHOLD_SOURCE
+    ):
+        raise ValueError("%s OOD calibration provenance is invalid" % sample)
+
+    output_record = _declared_file(
+        provenance.get("output"),
+        paths.ood,
+        "%s calibrated OOD" % sample,
+    )
+    if (
+        output_record.get("contract") != MahalanobisOOD.CONTRACT
+        or output_record.get("contract_version") != MahalanobisOOD.CONTRACT_VERSION
+    ):
+        raise ValueError("%s calibrated OOD output contract is invalid" % sample)
+
+    inputs = provenance.get("inputs")
+    if not isinstance(inputs, Mapping):
+        raise ValueError("%s OOD calibration input provenance is missing" % sample)
+    histology_record = _declared_file(
+        inputs.get("histology"),
+        paths.histology("full"),
+        "%s OOD histology" % sample,
+    )
+    if (
+        histology_record.get("sample_id") != sample
+        or histology_record.get("nuclei") != full.n_nuclei
+        or histology_record.get("feature_width") != int(full.features.shape[1])
+        or histology_record.get("feature_space_id") != full.feature_space_id
+    ):
+        raise ValueError("%s OOD histology provenance is stale" % sample)
+
+    base_record = inputs.get("base_ood")
+    if not isinstance(base_record, Mapping) or not isinstance(base_record.get("path"), str):
+        raise ValueError("%s base OOD provenance is missing" % sample)
+    base_path = Path(str(base_record["path"])).expanduser().resolve()
+    _declared_file(base_record, base_path, "%s base OOD" % sample)
+    base = MahalanobisOOD.from_npz(base_path)
+    if base.threshold is None:
+        raise ValueError("%s base OOD detector lacks a development threshold" % sample)
+
+    copied = provenance.get("copied_training_provenance")
+    if not isinstance(copied, Mapping):
+        raise ValueError("%s OOD training provenance is missing" % sample)
+    if (
+        detector.feature_space_id != full.feature_space_id
+        or base.feature_space_id != full.feature_space_id
+        or detector.training_donors != ("B1",)
+        or detector.training_donors != base.training_donors
+        or detector.source_sha256 != base.source_sha256
+        or not np.array_equal(detector.mean, base.mean)
+        or not np.array_equal(detector.precision, base.precision)
+        or detector.threshold != base.threshold
+        or detector.quantile != base.quantile
+        or tuple(copied.get("training_donors", ())) != detector.training_donors
+        or tuple(copied.get("source_sha256", ())) != detector.source_sha256
+        or copied.get("feature_space_id") != detector.feature_space_id
+        or provenance.get("threshold") != base.threshold
+        or base_record.get("threshold") != base.threshold
+        or base_record.get("quantile") != base.quantile
+    ):
+        raise ValueError("%s calibrated OOD detector differs from its development source" % sample)
+
+    try:
+        descriptive_quantile = float(provenance["descriptive_target_quantile"])
+        descriptive_value = float(provenance["descriptive_target_quantile_value"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("%s OOD target-score telemetry is malformed" % sample) from error
+    if not 0.0 < descriptive_quantile < 1.0 or not np.isfinite(descriptive_value):
+        raise ValueError("%s OOD target-score telemetry is malformed" % sample)
+    target_scores = np.empty(full.n_nuclei, dtype=np.float32)
+    for start in range(0, full.n_nuclei, 2048):
+        stop = min(start + 2048, full.n_nuclei)
+        target_scores[start:stop] = base.score(full.features[start:stop])
+    scores = target_scores.astype(np.float64)
+    expected_stats = {
+        "count": int(scores.size),
+        "minimum": float(scores.min()),
+        "maximum": float(scores.max()),
+        "mean": float(scores.mean()),
+        "standard_deviation": float(scores.std()),
+        "median": float(np.quantile(scores, 0.5)),
+        "descriptive_target_quantile": descriptive_quantile,
+        "descriptive_target_quantile_value": float(np.quantile(scores, descriptive_quantile)),
+    }
+    score_stats = provenance.get("score_stats")
+    if not isinstance(score_stats, Mapping):
+        raise ValueError("%s OOD target-score telemetry is missing" % sample)
+    for name, expected in expected_stats.items():
+        observed = score_stats.get(name)
+        if name == "count":
+            matches = observed == expected
+        else:
+            try:
+                matches = bool(np.isclose(float(observed), expected, rtol=0.0, atol=1.0e-12))
+            except (TypeError, ValueError):
+                matches = False
+        if not matches:
+            raise ValueError("%s OOD target-score telemetry is stale" % sample)
+    if not np.isclose(
+        descriptive_value,
+        expected_stats["descriptive_target_quantile_value"],
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+        raise ValueError("%s OOD target-score telemetry is stale" % sample)
+
+    with np.load(paths.ood, allow_pickle=False) as archive:
+        required = {
+            "calibration_contract",
+            "calibration_version",
+            "base_ood_sha256",
+            "histology_sha256",
+            "sample_id",
+            "threshold_source",
+            "target_score_quantile",
+            "target_score_quantile_value",
+            "target_expression_accessed",
+        }
+        if not required.issubset(archive.files):
+            raise ValueError("%s calibrated OOD artifact lacks v2 telemetry" % sample)
+        embedded = {
+            "contract": str(np.asarray(archive["calibration_contract"]).item()),
+            "version": int(np.asarray(archive["calibration_version"]).item()),
+            "base_sha256": str(np.asarray(archive["base_ood_sha256"]).item()),
+            "histology_sha256": str(np.asarray(archive["histology_sha256"]).item()),
+            "sample_id": str(np.asarray(archive["sample_id"]).item()),
+            "threshold_source": str(np.asarray(archive["threshold_source"]).item()),
+            "quantile": float(np.asarray(archive["target_score_quantile"]).item()),
+            "quantile_value": float(np.asarray(archive["target_score_quantile_value"]).item()),
+            "target_expression_accessed": bool(
+                np.asarray(archive["target_expression_accessed"]).item()
+            ),
+        }
+    if embedded != {
+        "contract": TARGET_OOD_CONTRACT,
+        "version": TARGET_OOD_CONTRACT_VERSION,
+        "base_sha256": _sha256(base_path),
+        "histology_sha256": _sha256(paths.histology("full")),
+        "sample_id": sample,
+        "threshold_source": TARGET_OOD_THRESHOLD_SOURCE,
+        "quantile": descriptive_quantile,
+        "quantile_value": descriptive_value,
+        "target_expression_accessed": False,
+    }:
+        raise ValueError("%s calibrated OOD artifact telemetry differs from provenance" % sample)
+    return base_path
+
+
 def _native_r2_manifest(
     *,
     repository: Path,
@@ -334,6 +680,8 @@ def _native_r2_manifest(
     decoder = Path(str(provenance.get("decoder", ""))).expanduser().resolve()
     specimen_rows: Dict[str, object] = {}
     for sample in SAMPLES:
+        if sample not in samples:
+            continue
         paths = samples[sample]
         latent = _record(paths.reference, repository)
         prototypes = _record(paths.prototypes, repository)
@@ -381,6 +729,8 @@ def _native_r2_manifest(
         },
         "molecular_design": provenance.get("molecular_design"),
         "decoder_validation": provenance.get("decoder_validation"),
+        "training_partition": provenance.get("training_partition"),
+        "molecular_producer": provenance.get("producer"),
         "specimens": specimen_rows,
     }
 
@@ -428,7 +778,17 @@ def _validate_upstream(
         raise ValueError("native scANVI provenance differs from the frozen CUDA/seed recipe")
     if provenance.get("latent_dim") != 32:
         raise ValueError("native scANVI provenance latent width is not 32")
+    r2_scope = (
+        _r2_training_scope(provenance) if provenance_schema == "heir.snpatho_scanvi_r2.v1" else None
+    )
+    if r2_scope is not None and r2_scope.true_leave_one_donor_out:
+        _declared_file(
+            provenance.get("producer"),
+            (repository / "scripts" / "train_snpatho_scanvi.py").resolve(),
+            "true-LOO molecular producer",
+        )
     if provenance_schema == "heir.snpatho_scanvi_r2.v1":
+        assert r2_scope is not None
         molecular_design = provenance.get("molecular_design")
         decoder_validation = provenance.get("decoder_validation")
         if not isinstance(molecular_design, Mapping):
@@ -460,13 +820,56 @@ def _validate_upstream(
             try:
                 crossed = all(
                     all(int(contingency[sample][level]) > 0 for level in transform_batch)
-                    for sample in SAMPLES
+                    for sample in r2_scope.training_donors
                 )
             except (KeyError, TypeError, ValueError):
                 crossed = False
             if not crossed:
-                raise ValueError("technical-batch contingency is not crossed across specimens")
+                raise ValueError(
+                    "technical-batch contingency is not crossed across molecular training donors"
+                )
+            query_contract = molecular_design.get("technical_batch_query_contract")
+            if r2_scope.true_leave_one_donor_out:
+                if not isinstance(query_contract, Mapping):
+                    raise ValueError("true-LOO technical design lacks its frozen-query contract")
+                held_out_levels = query_contract.get("held_out_levels")
+                if (
+                    query_contract.get("held_out_sample") != r2_scope.held_out_sample
+                    or query_contract.get("reference_levels") != transform_batch
+                    or not isinstance(held_out_levels, list)
+                    or not held_out_levels
+                    or not set(held_out_levels).issubset(set(transform_batch))
+                    or query_contract.get("novel_levels") != []
+                    or query_contract.get("category_extension_allowed") is not False
+                ):
+                    raise ValueError(
+                        "true-LOO technical query categories are not locked to reference levels"
+                    )
+                partition = provenance.get("training_partition")
+                assert isinstance(partition, Mapping)
+                mapping = partition.get("held_out_mapping")
+                assert isinstance(mapping, Mapping)
+                runtime = mapping.get("runtime_audit")
+                assert isinstance(runtime, Mapping)
+                runtime_categories = runtime.get("technical_batch_categories")
+                if not isinstance(runtime_categories, Mapping) or any(
+                    runtime_categories.get(key) != expected
+                    for key, expected in {
+                        "key": technical_key,
+                        "reference_levels": transform_batch,
+                        "held_out_levels": held_out_levels,
+                        "novel_levels": [],
+                        "category_extension_allowed": False,
+                    }.items()
+                ):
+                    raise ValueError(
+                        "true-LOO technical design differs from its runtime query registry"
+                    )
+            elif query_contract is not None:
+                raise ValueError("all-donor technical design cannot declare a held-out query")
         elif design_name == "specimen_batch_sensitivity":
+            if r2_scope.true_leave_one_donor_out:
+                raise ValueError("specimen-batch sensitivity is invalid for true LOO")
             if (
                 molecular_design.get("model_batch_key") != "section_id"
                 or correction_mode != "reference_batch_marginalization"
@@ -475,6 +878,11 @@ def _validate_upstream(
                 raise ValueError("specimen-batch sensitivity provenance is internally inconsistent")
         else:
             raise ValueError("native scANVI v2 provenance names an unsupported molecular design")
+        specimen_sensitivity_status = (
+            provenance.get("status") == "native_scanvi_specimen_batch_sensitivity"
+        )
+        if specimen_sensitivity_status != (design_name == "specimen_batch_sensitivity"):
+            raise ValueError("native scANVI status and molecular design disagree")
         if molecular_design.get("specimen_identity_is_biological") is not True:
             raise ValueError("native scANVI v2 provenance must identify specimen as biological")
         if not isinstance(decoder_validation, Mapping):
@@ -483,14 +891,28 @@ def _validate_upstream(
         if validation_policy not in {
             "donor_rotated_audit_plus_stratified_deployment_split",
             "single_donor_sensitivity",
+            "true_leave_one_donor_out_training_donor_stratified",
         }:
             raise ValueError("native scANVI v2 decoder validation policy is unsupported")
+        if r2_scope.true_leave_one_donor_out != (
+            validation_policy == "true_leave_one_donor_out_training_donor_stratified"
+        ):
+            raise ValueError("native scANVI status and decoder validation policy disagree")
         rotations = decoder_validation.get("rotations")
         if validation_policy.startswith("donor_rotated"):
             if not isinstance(rotations, list) or {
                 row.get("held_out_sample") for row in rotations if isinstance(row, Mapping)
             } != set(SAMPLES):
                 raise ValueError("native scANVI donor-rotation audit is incomplete")
+        if r2_scope.true_leave_one_donor_out:
+            evaluation = decoder_validation.get("held_out_evaluation")
+            if not isinstance(evaluation, Mapping) or int(evaluation.get("cells", 0)) <= 0:
+                raise ValueError("true-LOO decoder lacks held-out evaluation metrics")
+            if any(
+                not np.isfinite(float(evaluation.get(key, np.nan)))
+                for key in ("smooth_l1", "median_absolute_error")
+            ):
+                raise ValueError("true-LOO held-out decoder metrics are non-finite")
 
     panel = (repository / "manifests" / "gene_panel_snpatho_500.tsv").resolve()
     if provenance.get("gene_panel_sha256") != _sha256(panel):
@@ -553,11 +975,23 @@ def _validate_upstream(
             ),
         )
         samples[sample] = paths
-        _declared_file(latent_outputs.get(sample), paths.reference, "%s latent reference" % sample)
+        declared_latent = _declared_file(
+            latent_outputs.get(sample),
+            paths.reference,
+            "%s latent reference" % sample,
+        )
         if h5ad_hashes.get(sample) != _sha256(paths.source_h5ad):
             raise ValueError("%s source H5AD hash differs from scANVI provenance" % sample)
 
         reference = RNAReference.load_npz(paths.reference)
+        if paths.molecular_generation == "r2" and r2_scope is not None:
+            _validate_r2_count_binding(
+                provenance=provenance,
+                scope=r2_scope,
+                sample=sample,
+                observed_cells=reference.shape[0],
+                declared_latent=declared_latent,
+            )
         if (
             reference.sample_id != sample
             or set(reference.donor_ids.tolist()) != {sample}
@@ -568,13 +1002,91 @@ def _validate_upstream(
             raise ValueError("%s native RNA reference has the wrong latent shape" % sample)
         if reference.latent_space_id != provenance["latent_space_id"]:
             raise ValueError("%s native RNA reference has a foreign latent identity" % sample)
-        expected_latent_donors = SAMPLES if paths.molecular_generation == "r2" else ()
+        expected_latent_donors = (
+            r2_scope.training_donors
+            if paths.molecular_generation == "r2" and r2_scope is not None
+            else ()
+        )
         expected_latent_transform = model_hash if paths.molecular_generation == "r2" else ""
         if (
             reference.latent_training_donors != expected_latent_donors
             or reference.latent_transform_sha256 != expected_latent_transform
         ):
             raise ValueError("%s native RNA latent-training provenance is invalid" % sample)
+        fit_scope_fields = {
+            "inference_role",
+            "latent_training_donors",
+            "sample_expression_used_for_model_fitting",
+            "sample_labels_used_for_model_fitting",
+            "cell_type_label_source",
+            "cell_type_label_training_donors",
+            "sample_annotation_used_for_cell_type_labels",
+            "cell_type_labels_sha256",
+        }
+        if (
+            paths.molecular_generation == "r2"
+            and r2_scope is not None
+            and (r2_scope.true_leave_one_donor_out or fit_scope_fields & set(declared_latent))
+        ):
+            expected_role = (
+                "frozen_query_encoder"
+                if sample == r2_scope.held_out_sample
+                else "reference_encoder"
+            )
+            sample_was_fit = sample in r2_scope.training_donors
+            expected_label_source = (
+                "frozen_training_donor_SCANVI_classifier"
+                if sample == r2_scope.held_out_sample
+                else "published_training_donor_annotation"
+            )
+            if (
+                declared_latent.get("inference_role") != expected_role
+                or tuple(declared_latent.get("latent_training_donors", ()))
+                != r2_scope.training_donors
+                or declared_latent.get("sample_expression_used_for_model_fitting")
+                is not sample_was_fit
+                or declared_latent.get("sample_labels_used_for_model_fitting") is not sample_was_fit
+                or declared_latent.get("cell_type_label_source") != expected_label_source
+                or tuple(declared_latent.get("cell_type_label_training_donors", ()))
+                != r2_scope.training_donors
+                or declared_latent.get("sample_annotation_used_for_cell_type_labels")
+                is not sample_was_fit
+                or declared_latent.get("cell_type_labels_sha256")
+                != _ordered_string_sha256(reference.cell_type_labels)
+            ):
+                raise ValueError("%s emitted latent fit-scope provenance is invalid" % sample)
+            if sample == r2_scope.held_out_sample and sample in set(
+                reference.latent_training_donors
+            ):
+                raise ValueError("held-out target donor leaked into latent_training_donors")
+            if sample == r2_scope.held_out_sample:
+                partition = provenance.get("training_partition")
+                mapping = (
+                    partition.get("held_out_mapping") if isinstance(partition, Mapping) else None
+                )
+                runtime = mapping.get("runtime_audit") if isinstance(mapping, Mapping) else None
+                label_counts = {
+                    str(label): int(count)
+                    for label, count in zip(
+                        *np.unique(reference.cell_type_labels.astype(str), return_counts=True)
+                    )
+                }
+                label_ontology = (
+                    set(str(value) for value in partition.get("label_ontology", ()))
+                    if isinstance(partition, Mapping)
+                    else set()
+                )
+                if (
+                    not isinstance(runtime, Mapping)
+                    or runtime.get("predicted_label_order") != "RNAReference.cell_ids"
+                    or runtime.get("predicted_label_sha256")
+                    != declared_latent.get("cell_type_labels_sha256")
+                    or runtime.get("predicted_label_counts") != label_counts
+                    or not set(label_counts).issubset(label_ontology)
+                ):
+                    raise ValueError(
+                        "held-out frozen classifier label provenance differs from its RNA reference"
+                    )
         if reference.source_count_sha256 != h5ad_hashes[sample]:
             raise ValueError("%s native RNA reference is bound to a different H5AD" % sample)
         if tuple(reference.gene_ids.tolist()) != genes:
@@ -618,40 +1130,7 @@ def _validate_upstream(
         ):
             raise ValueError("%s spatial split summary is stale" % sample)
 
-        detector = MahalanobisOOD.from_npz(paths.ood)
-        ood_provenance = _json(paths.ood_provenance)
-        if (
-            ood_provenance.get("schema") != "heir.target_histology_ood_calibration.v1"
-            or ood_provenance.get("sample_id") != sample
-            or ood_provenance.get("target_expression_accessed") is not False
-            or ood_provenance.get("calibration_input_modality") != "target_histology_features_only"
-        ):
-            raise ValueError("%s OOD calibration provenance is invalid" % sample)
-        _declared_file(ood_provenance.get("output"), paths.ood, "%s calibrated OOD" % sample)
-        ood_inputs = ood_provenance.get("inputs")
-        if not isinstance(ood_inputs, Mapping):
-            raise ValueError("%s OOD calibration input provenance is missing" % sample)
-        _declared_file(
-            ood_inputs.get("histology"), paths.histology("full"), "%s OOD histology" % sample
-        )
-        base_record = ood_inputs.get("base_ood")
-        if not isinstance(base_record, Mapping) or not isinstance(base_record.get("path"), str):
-            raise ValueError("%s base OOD provenance is missing" % sample)
-        base_path = Path(str(base_record["path"])).expanduser().resolve()
-        _declared_file(base_record, base_path, "%s base OOD" % sample)
-        copied = ood_provenance.get("copied_training_provenance")
-        if not isinstance(copied, Mapping):
-            raise ValueError("%s OOD training provenance is missing" % sample)
-        if (
-            detector.feature_space_id != full.feature_space_id
-            or detector.training_donors != ("B1",)
-            or tuple(copied.get("training_donors", ())) != detector.training_donors
-            or tuple(copied.get("source_sha256", ())) != detector.source_sha256
-            or copied.get("feature_space_id") != detector.feature_space_id
-            or ood_provenance.get("threshold") != detector.threshold
-            or ood_provenance.get("quantile") != detector.quantile
-        ):
-            raise ValueError("%s calibrated OOD detector provenance is stale" % sample)
+        base_path = _validate_target_ood_calibration(paths=paths, sample=sample, full=full)
 
         input_records[sample] = {
             "source_h5ad": _record(paths.source_h5ad, repository),
@@ -664,6 +1143,8 @@ def _validate_upstream(
             "calibrated_ood_provenance": _record(paths.ood_provenance, repository),
             "base_ood": _record(base_path, repository),
         }
+    if r2_scope is not None:
+        samples = {sample: samples[sample] for sample in r2_scope.active_samples}
     return provenance, samples, input_records
 
 
@@ -748,7 +1229,12 @@ def build_stages(
     unsafe_allow_legacy_latent: bool = False,
 ) -> Tuple[Stage, ...]:
     stages = []
+    unknown_samples = sorted(set(samples) - set(SAMPLES))
+    if unknown_samples:
+        raise ValueError("stage plan contains unknown snPATHO samples: %s" % unknown_samples)
     for sample in SAMPLES:
+        if sample not in samples:
+            continue
         paths = samples[sample]
 
         def prototype_command(output: Path, p: SamplePaths = paths) -> Tuple[str, ...]:
@@ -1045,9 +1531,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         provenance_path=provenance_path,
         expected_molecular_generation=args.molecular_generation,
     )
-    validated_generation = (
-        "r2" if provenance["schema"] == "heir.snpatho_scanvi_r2.v1" else "r1"
-    )
+    validated_generation = "r2" if provenance["schema"] == "heir.snpatho_scanvi_r2.v1" else "r1"
     stages = build_stages(
         samples=samples,
         heir_command=args.heir_command,
@@ -1095,6 +1579,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         manifest = {
             "schema": SCHEMA,
             "status": "complete",
+            "producer": _record(Path(__file__).resolve(), repository),
             "molecular_generation": validated_generation,
             "latent_space_id": provenance["latent_space_id"],
             "recipe": RECIPE,

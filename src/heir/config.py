@@ -69,12 +69,18 @@ class RefinementConfig:
     maximum_rounds: int = 4
     min_probability: float = 0.90
     max_normalized_entropy: float = 0.20
-    teacher_ema: float = 0.99
+    # The accepted best-epoch student becomes the next round's teacher.  A
+    # nonzero EMA is retained only as an explicit sensitivity because one EMA
+    # update per round otherwise leaves the teacher dominated by round 0.
+    teacher_ema: float = 0.0
     # Keep the measured molecular prior fixed in the primary refinement path.
     # Lower values remain an explicit prior-update sensitivity analysis.
     prior_old_weight: float = 1.0
     minimum_segmentation_confidence: float = 0.50
-    require_view_agreement: bool = True
+    # Same-checkpoint scale/block views are useful consistency diagnostics, but
+    # are not independent evidence for accepting a pseudo-label.  Hard view
+    # gating therefore requires an explicit opt-in.
+    require_view_agreement: bool = False
     maximum_prior_total_variation: float = 0.10
     max_anchors_per_class: int = 10000
     stable_rounds_required: int = 1
@@ -124,7 +130,7 @@ class RefinementConfig:
         if self.broad_refinement_rounds == 1:
             raise ValueError(
                 "broad_refinement_rounds must be 0 for fine-only refinement or at least 2 "
-                "for two-round parent-anchor trust"
+                "for the prespecified parent-head phase"
             )
         if (
             self.broad_refinement_rounds > 0
@@ -132,7 +138,7 @@ class RefinementConfig:
         ):
             raise ValueError(
                 "broad refinement must leave at least two subsequent fine rounds for "
-                "two-round fine-anchor trust"
+                "the prespecified fine-head phase"
             )
 
     @property

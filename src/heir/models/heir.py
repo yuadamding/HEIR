@@ -11,7 +11,8 @@ from torch.autograd import Function
 from .graph import GraphContextConfig, GraphContextEncoder
 from .rna import RNAVAE, RNADecoder, RNAVAEConfig
 
-_HEIR_CHECKPOINT_SCHEMA = "heir.model.v3"
+_HEIR_CHECKPOINT_SCHEMA = "heir.model.v4"
+_LEGACY_RESTRICTED_CHECKPOINT_SCHEMA = "heir.model.v3"
 _LEGACY_TIED_CHECKPOINT_SCHEMA = "heir.model.v2"
 
 
@@ -60,6 +61,8 @@ class HEIRConfig:
     graph_hidden_dim: int = 128
     graph_output_dim: int = 128
     graph_layers: int = 2
+    graph_mode: str = "off"
+    graph_context_gate_init: float = 0.0
     trunk_hidden_dims: Tuple[int, ...] = (256, 128)
     decoder_hidden_dims: Tuple[int, ...] = (128, 256)
     dropout: float = 0.1
@@ -87,6 +90,7 @@ class HEIRConfig:
     residual_max_norm: float = 0.5
     residual_type_strategy: str = "detached_max"
     residual_type_concentration_threshold: float = 0.6
+    residual_type_concentration_temperature: float = 0.05
     scgpt_embedding_dim: int = 0
 
     def __post_init__(self) -> None:
@@ -104,6 +108,10 @@ class HEIRConfig:
             raise ValueError("num_cell_types must be at least two")
         if self.num_domains < 0 or self.num_domains == 1:
             raise ValueError("num_domains must be zero or at least two")
+        if self.graph_mode not in {"off", "distance_only"}:
+            raise ValueError("graph_mode must be off or distance_only")
+        if not math.isfinite(self.graph_context_gate_init):
+            raise ValueError("graph_context_gate_init must be finite")
         if self.domain_gradient_scale < 0:
             raise ValueError("domain_gradient_scale must be non-negative")
         if self.prototype_type_cost_weight < 0:
@@ -120,10 +128,22 @@ class HEIRConfig:
         if not math.isfinite(self.residual_max_norm) or self.residual_max_norm <= 0:
             raise ValueError("residual_max_norm must be finite and positive")
         object.__setattr__(self, "residual_rank", resolved_residual_rank)
-        if self.residual_type_strategy not in {"detached_max", "legacy_weighted_basis"}:
-            raise ValueError("residual_type_strategy must be detached_max or legacy_weighted_basis")
+        if self.residual_type_strategy not in {
+            "detached_max",
+            "detached_max_hard",
+            "legacy_weighted_basis",
+        }:
+            raise ValueError(
+                "residual_type_strategy must be detached_max, detached_max_hard, "
+                "or legacy_weighted_basis"
+            )
         if not 0.0 <= self.residual_type_concentration_threshold < 1.0:
             raise ValueError("residual_type_concentration_threshold must be in [0, 1)")
+        if (
+            not math.isfinite(self.residual_type_concentration_temperature)
+            or self.residual_type_concentration_temperature <= 0.0
+        ):
+            raise ValueError("residual_type_concentration_temperature must be finite and positive")
         if self.legacy_independent_prototype_query:
             # This flag only exists to reproduce the original, unrestricted
             # v1 model. Keep it from creating a hybrid architecture.
@@ -181,6 +201,10 @@ class HEIRConfig:
         """Reconstruct a config from metadata."""
 
         data = dict(values)
+        # Checkpoints predating the explicit graph contract always executed
+        # the scalar distance-weighted graph encoder at full strength.
+        data.setdefault("graph_mode", "distance_only")
+        data.setdefault("graph_context_gate_init", 1.0)
         for name in ("trunk_hidden_dims", "decoder_hidden_dims", "fine_to_parent"):
             if data.get(name) is not None:
                 data[name] = tuple(data[name])
@@ -262,6 +286,9 @@ class HEIRModel(nn.Module):
             residual=config.graph_residual,
         )
         self.graph_encoder = GraphContextEncoder(graph_config)
+        self.graph_context_gate = nn.Parameter(
+            torch.tensor(float(config.graph_context_gate_init), dtype=torch.float32)
+        )
         self.trunk = _hidden_stack(
             config.morphology_dim + config.graph_output_dim,
             config.trunk_hidden_dims,
@@ -646,6 +673,146 @@ class HEIRModel(nn.Module):
             output.residual_gate,
         )
 
+    @torch.no_grad()
+    def residual_gate_diagnostics(self, output: HEIROutput) -> Dict[str, Any]:
+        """Summarize the residual gate using JSON-serializable values.
+
+        The concentration statistics expose both the configured decision point
+        and its effective continuous-v4 or hard-v3 gate. They intentionally use
+        detached type probabilities, matching the residual-routing contract in
+        :meth:`forward`.
+        """
+
+        diagnostics: Dict[str, Any] = {
+            "schema": "heir.residual_gate_diagnostics.v1",
+            "strategy": self.config.residual_type_strategy,
+            "concentration_threshold": self.config.residual_type_concentration_threshold,
+            "concentration_temperature": self.config.residual_type_concentration_temperature,
+            "cell_count": int(output.type_probabilities.shape[0]),
+            "available": output.residual_gate is not None,
+        }
+        if output.residual_gate is None:
+            return diagnostics
+
+        concentration = output.type_probabilities.detach().max(dim=1).values.float()
+        if self.config.residual_type_strategy == "legacy_weighted_basis":
+            soft_gate = torch.ones_like(concentration)
+        elif self.config.residual_type_strategy == "detached_max_hard":
+            soft_gate = (concentration >= self.config.residual_type_concentration_threshold).float()
+        else:
+            soft_gate = torch.sigmoid(
+                (concentration - self.config.residual_type_concentration_threshold)
+                / self.config.residual_type_concentration_temperature
+            )
+        residual_gate = output.residual_gate.detach().float()
+        residual_norm = output.residual_mu.detach().float().norm(dim=-1)
+        with (
+            torch.no_grad(),
+            torch.autocast(
+                device_type=output.prototype_latent.device.type,
+                dtype=torch.float16,
+                enabled=output.prototype_latent.device.type == "cuda",
+            ),
+        ):
+            prototype_only_expression = self.expression_decoder(output.prototype_latent)
+        expression_delta = (
+            (output.expression.detach().float() - prototype_only_expression.detach().float())
+            .abs()
+            .mean(dim=1)
+        )
+
+        def _distribution(values: Tensor) -> Dict[str, float]:
+            if values.numel() == 0:
+                return {"mean": 0.0, "median": 0.0, "p95": 0.0, "maximum": 0.0}
+            return {
+                "mean": float(values.mean().cpu()),
+                "median": float(values.median().cpu()),
+                "p95": float(torch.quantile(values, 0.95).cpu()),
+                "maximum": float(values.max().cpu()),
+            }
+
+        diagnostics.update(
+            {
+                "above_threshold_fraction": (
+                    float(
+                        (concentration >= self.config.residual_type_concentration_threshold)
+                        .float()
+                        .mean()
+                        .cpu()
+                    )
+                    if concentration.numel()
+                    else 0.0
+                ),
+                "type_concentration": _distribution(concentration),
+                "concentration_gate": _distribution(soft_gate),
+                "residual_gate": _distribution(residual_gate),
+                "residual_norm": _distribution(residual_norm),
+                "residual_on_vs_prototype_only_mean_absolute_expression_delta": (
+                    _distribution(expression_delta)
+                ),
+                "effectively_zero_fraction": (
+                    float((residual_norm <= 1.0e-6).float().mean().cpu())
+                    if residual_norm.numel()
+                    else 0.0
+                ),
+            }
+        )
+        selected_type = output.type_probabilities.detach().argmax(dim=1)
+        by_type: Dict[str, Any] = {}
+        for type_index in range(self.config.num_cell_types):
+            selected = selected_type == type_index
+            if not bool(selected.any()):
+                by_type[str(type_index)] = {
+                    "cell_count": 0,
+                    "effectively_zero_fraction": 0.0,
+                    "residual_norm": _distribution(residual_norm[selected]),
+                    "mean_absolute_expression_delta": _distribution(expression_delta[selected]),
+                }
+                continue
+            type_norm = residual_norm[selected]
+            type_expression_delta = expression_delta[selected]
+            by_type[str(type_index)] = {
+                "cell_count": int(selected.sum().cpu()),
+                "effectively_zero_fraction": float((type_norm <= 1.0e-6).float().mean().cpu()),
+                "residual_norm": _distribution(type_norm),
+                "mean_absolute_expression_delta": _distribution(type_expression_delta),
+            }
+        diagnostics["by_type_index"] = by_type
+        return diagnostics
+
+    def encode_frozen_morphology(
+        self,
+        morphology: Tensor,
+        edge_index: Optional[Tensor] = None,
+        edge_weight: Optional[Tensor] = None,
+        *,
+        use_graph: Optional[bool] = None,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Return independent image embedding, type posterior, and bridge latent.
+
+        This path deliberately accepts no RNA prototypes.  It is intended for
+        producing a frozen molecular E-step from a separately validated
+        morphology/cross-modal checkpoint, so the target prototype bank cannot
+        leak into the image representation used to construct transport costs.
+        """
+
+        if morphology.ndim != 2 or morphology.shape[1] != self.config.morphology_dim:
+            raise ValueError("morphology has the wrong shape")
+        if not torch.is_floating_point(morphology):
+            raise TypeError("morphology must be floating point")
+        graph_enabled = self.config.graph_mode != "off" if use_graph is None else use_graph
+        if graph_enabled:
+            if edge_index is None:
+                edge_index = torch.empty((2, 0), dtype=torch.long, device=morphology.device)
+            context = self.graph_encoder(morphology, edge_index, edge_weight)
+            context = context * self.graph_context_gate.to(dtype=context.dtype)
+        else:
+            context = morphology.new_zeros((len(morphology), self.config.graph_output_dim))
+        embedding = self.trunk(torch.cat((morphology, context), dim=-1))
+        _, type_probabilities, _, _, _ = self._hierarchical_types(embedding)
+        image_latent = self.prototype_query_head(embedding)
+        return embedding, type_probabilities, image_latent
+
     def forward(
         self,
         morphology: Tensor,
@@ -660,6 +827,7 @@ class HEIRModel(nn.Module):
         sample_index: Optional[Tensor] = None,
         cell_type_constraints: Optional[Tensor] = None,
         sample_latent: Optional[bool] = None,
+        use_graph: Optional[bool] = None,
     ) -> HEIROutput:
         """Predict cell types and molecular states for a bag of nuclei."""
 
@@ -667,9 +835,17 @@ class HEIRModel(nn.Module):
             raise ValueError("morphology has the wrong shape")
         if not torch.is_floating_point(morphology):
             raise TypeError("morphology must be floating point")
-        if edge_index is None:
-            edge_index = torch.empty((2, 0), dtype=torch.long, device=morphology.device)
-        context = self.graph_encoder(morphology, edge_index, edge_weight)
+        graph_enabled = self.config.graph_mode != "off" if use_graph is None else use_graph
+        if graph_enabled:
+            if edge_index is None:
+                edge_index = torch.empty((2, 0), dtype=torch.long, device=morphology.device)
+            context = self.graph_encoder(morphology, edge_index, edge_weight)
+            context = context * self.graph_context_gate.to(dtype=context.dtype)
+        else:
+            # The primary graph-off path is exactly invariant to graph inputs,
+            # including the graph encoder's self projection on an empty edge
+            # set. This makes `off` a real architectural ablation.
+            context = morphology.new_zeros((len(morphology), self.config.graph_output_dim))
         embedding = self.trunk(torch.cat((morphology, context), dim=-1))
         type_logits, type_probabilities, raw_fine_logits, parent_logits, hierarchy_parent = (
             self._hierarchical_types(embedding)
@@ -740,9 +916,15 @@ class HEIRModel(nn.Module):
                 cell_residual_max_norm = self.residual_type_max_norms.to(
                     dtype=type_probabilities.dtype
                 ).index_select(0, selected_type)
-                concentration_gate = (
-                    type_concentration >= self.config.residual_type_concentration_threshold
-                ).to(dtype=type_probabilities.dtype)
+                if self.config.residual_type_strategy == "detached_max_hard":
+                    concentration_gate = (
+                        type_concentration >= self.config.residual_type_concentration_threshold
+                    ).to(dtype=type_probabilities.dtype)
+                else:
+                    concentration_gate = torch.sigmoid(
+                        (type_concentration - self.config.residual_type_concentration_threshold)
+                        / self.config.residual_type_concentration_temperature
+                    ).to(dtype=type_probabilities.dtype)
             residual_gate = (
                 cell_residual_max_norm
                 * torch.sigmoid(self.residual_gate_head(embedding).squeeze(-1))
@@ -1013,18 +1195,30 @@ class HEIRModel(nn.Module):
     def checkpoint(self) -> Dict[str, Any]:
         """Create a self-describing checkpoint."""
 
+        config = self.config.to_dict()
+        geometry: Dict[str, Any] = {
+            "type_max_norms": self.residual_type_max_norms.detach().cpu(),
+            "type_strategy": self.config.residual_type_strategy,
+            "type_concentration_threshold": self.config.residual_type_concentration_threshold,
+            "type_concentration_temperature": (self.config.residual_type_concentration_temperature),
+            "basis_trainable": bool(
+                self.residual_type_basis is not None and self.residual_type_basis.requires_grad
+            ),
+        }
+        schema = _HEIR_CHECKPOINT_SCHEMA
+        if self.config.residual_type_strategy == "detached_max_hard":
+            # Preserve a loaded historical v3 model without silently changing
+            # its predictions or inventing a v4 continuous-gate contract.
+            schema = _LEGACY_RESTRICTED_CHECKPOINT_SCHEMA
+            config["residual_type_strategy"] = "detached_max"
+            config.pop("residual_type_concentration_temperature", None)
+            geometry["type_strategy"] = "detached_max"
+            geometry.pop("type_concentration_temperature", None)
         return {
-            "schema": _HEIR_CHECKPOINT_SCHEMA,
-            "config": self.config.to_dict(),
+            "schema": schema,
+            "config": config,
             "state_dict": self.state_dict(),
-            "residual_geometry": {
-                "type_max_norms": self.residual_type_max_norms.detach().cpu(),
-                "type_strategy": self.config.residual_type_strategy,
-                "type_concentration_threshold": (self.config.residual_type_concentration_threshold),
-                "basis_trainable": bool(
-                    self.residual_type_basis is not None and self.residual_type_basis.requires_grad
-                ),
-            },
+            "residual_geometry": geometry,
         }
 
     @classmethod
@@ -1037,16 +1231,21 @@ class HEIRModel(nn.Module):
     ) -> "HEIRModel":
         """Reconstruct a model from :meth:`checkpoint` output.
 
-        Early v3 restricted-residual checkpoints did not record their use of
-        a probability-weighted mixture of non-aligned type bases.  Loading one
-        requires an explicit opt-in so it cannot silently acquire the new
-        detached-type semantics.
+        Early v3 restricted-residual checkpoints used a detached hard
+        concentration gate.  That gate is restored exactly.  Older v3
+        checkpoints that did not record their probability-weighted mixture of
+        non-aligned type bases still require an explicit migration opt-in.
         """
 
         if "config" not in checkpoint or "state_dict" not in checkpoint:
             raise KeyError("checkpoint must contain config and state_dict")
         schema = checkpoint.get("schema")
-        if schema not in {None, _LEGACY_TIED_CHECKPOINT_SCHEMA, _HEIR_CHECKPOINT_SCHEMA}:
+        if schema not in {
+            None,
+            _LEGACY_TIED_CHECKPOINT_SCHEMA,
+            _LEGACY_RESTRICTED_CHECKPOINT_SCHEMA,
+            _HEIR_CHECKPOINT_SCHEMA,
+        }:
             raise ValueError("unsupported HEIR model checkpoint schema")
         config_values = dict(checkpoint["config"])
         if schema is None:
@@ -1062,6 +1261,13 @@ class HEIRModel(nn.Module):
             # algebraic cancellation intentionally instead of silently loading
             # its full-rank head into the restricted v3 residual.
             config_values["legacy_unrestricted_residual"] = True
+        elif schema == _HEIR_CHECKPOINT_SCHEMA:
+            if "residual_type_strategy" not in config_values:
+                raise ValueError("v4 checkpoint residual type strategy is missing")
+            if "residual_type_concentration_temperature" not in config_values:
+                raise ValueError("v4 checkpoint residual concentration temperature is missing")
+            if config_values.get("residual_type_strategy") == "detached_max_hard":
+                raise ValueError("v4 checkpoints require the continuous detached_max gate")
         legacy_unrestricted = bool(
             config_values.get("legacy_unrestricted_residual", False)
             or config_values.get("legacy_independent_prototype_query", False)
@@ -1073,16 +1279,31 @@ class HEIRModel(nn.Module):
                 )
             config_values["residual_type_strategy"] = "legacy_weighted_basis"
             config_values["residual_type_concentration_threshold"] = 0.0
+        elif (
+            schema == _LEGACY_RESTRICTED_CHECKPOINT_SCHEMA
+            and config_values.get("residual_type_strategy") == "detached_max"
+        ):
+            config_values["residual_type_strategy"] = "detached_max_hard"
+        legacy_graph_contract = "graph_mode" not in config_values
         model = cls(HEIRConfig.from_dict(config_values))
-        model.load_state_dict(checkpoint["state_dict"], strict=strict)
+        state_dict = dict(checkpoint["state_dict"])
+        if "graph_context_gate" not in state_dict:
+            if not legacy_graph_contract and strict:
+                raise ValueError("checkpoint graph context gate is missing")
+            state_dict["graph_context_gate"] = torch.tensor(1.0)
+        model.load_state_dict(state_dict, strict=strict)
         geometry = checkpoint.get("residual_geometry")
         if not model.config.legacy_unrestricted_residual and not isinstance(geometry, Mapping):
             raise ValueError("restricted checkpoint residual geometry is missing")
         if isinstance(geometry, Mapping) and not model.config.legacy_unrestricted_residual:
             strategy = geometry.get("type_strategy")
             threshold = geometry.get("type_concentration_threshold")
+            temperature = geometry.get("type_concentration_temperature")
             if model.config.residual_type_strategy == "legacy_weighted_basis":
                 if strategy not in {None, "legacy_weighted_basis"}:
+                    raise ValueError("checkpoint residual type strategy differs from config")
+            elif model.config.residual_type_strategy == "detached_max_hard":
+                if strategy not in {"detached_max", "detached_max_hard"}:
                     raise ValueError("checkpoint residual type strategy differs from config")
             elif strategy != model.config.residual_type_strategy:
                 raise ValueError("checkpoint residual type strategy differs from config")
@@ -1096,6 +1317,17 @@ class HEIRModel(nn.Module):
                 abs_tol=1.0e-12,
             ):
                 raise ValueError("checkpoint residual concentration threshold differs from config")
+            if schema == _HEIR_CHECKPOINT_SCHEMA and temperature is None:
+                raise ValueError("v4 checkpoint residual concentration temperature is missing")
+            if temperature is not None and not math.isclose(
+                float(temperature),
+                model.config.residual_type_concentration_temperature,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            ):
+                raise ValueError(
+                    "checkpoint residual concentration temperature differs from config"
+                )
             norms = torch.as_tensor(geometry["type_max_norms"])
             if norms.shape != model.residual_type_max_norms.shape:
                 raise ValueError("checkpoint residual geometry has the wrong type count")

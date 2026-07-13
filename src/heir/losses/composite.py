@@ -197,6 +197,7 @@ class HEIRCompositeLoss(nn.Module):
         uot_unknown_cost: Optional[Tensor] = None,
         uot_unknown_mass: Optional[Tensor] = None,
         precomputed_uot: Optional[UnbalancedSinkhornResult] = None,
+        compute_uot: bool = True,
         target_pseudobulk: Optional[Tensor] = None,
         gene_weights: Optional[Tensor] = None,
         program_matrix: Optional[Tensor] = None,
@@ -297,11 +298,14 @@ class HEIRCompositeLoss(nn.Module):
                     target_mass = repeated_weights[0]
                 else:
                     target_mass = repeated_weights.new_empty(repeated_weights.shape[1])
-        if precomputed_uot is not None and self.config.uot_weight:
+        if not compute_uot and precomputed_uot is not None:
+            raise ValueError("precomputed_uot cannot be supplied when compute_uot is false")
+        if compute_uot and precomputed_uot is not None and self.config.uot_weight:
             terms["uot"] = precomputed_uot.loss
             diagnostics.update(precomputed_uot.diagnostics())
         elif (
-            cost is not None
+            compute_uot
+            and cost is not None
             and target_mass is not None
             and cost.shape[-1] > 0
             and self.config.uot_weight

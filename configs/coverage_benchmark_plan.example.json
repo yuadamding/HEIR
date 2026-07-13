@@ -1,0 +1,27 @@
+{
+  "comparison_pairs": [
+    [
+      "HEIR",
+      "type_mean"
+    ]
+  ],
+  "methods": [
+    {
+      "endpoint_input": "../artifacts/heir_coverage_endpoint.npz",
+      "endpoint_input_sha256": "REPLACE_WITH_HEIR_ENDPOINT_SHA256",
+      "name": "HEIR",
+      "predictions": "../artifacts/heir_predictions.npz",
+      "predictions_sha256": "REPLACE_WITH_HEIR_PREDICTION_SHA256"
+    },
+    {
+      "endpoint_input": "../artifacts/type_mean_coverage_endpoint.npz",
+      "endpoint_input_sha256": "REPLACE_WITH_TYPE_MEAN_ENDPOINT_SHA256",
+      "name": "type_mean",
+      "predictions": "../artifacts/type_mean_predictions.npz",
+      "predictions_sha256": "REPLACE_WITH_TYPE_MEAN_PREDICTION_SHA256"
+    }
+  ],
+  "schema": "heir.coverage_benchmark_plan.v1",
+  "truth": "../artifacts/locked_spatial_truth.npz",
+  "truth_sha256": "REPLACE_WITH_TRUTH_SHA256"
+}

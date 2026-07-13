@@ -8,6 +8,7 @@ import torch
 
 from ..config import RefinementConfig
 from ..training.batch import HEIRTrainingBatch
+from ..training.contracts import MolecularEStepArtifact
 from ..training.trainer import HEIRTrainer, HEIRTrainingResult
 from ..utils import resolve_device
 from .anchors import (
@@ -249,6 +250,119 @@ class IterativeRefiner:
             transported_target_mass,
         )
 
+    @staticmethod
+    def _artifact_estep(
+        model: torch.nn.Module,
+        batch: HEIRTrainingBatch,
+    ) -> Tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        Optional[np.ndarray],
+        np.ndarray,
+        float,
+        float,
+        np.ndarray,
+    ]:
+        """Read a frozen molecular E-step without consulting the student.
+
+        Type and prototype probabilities used by the optional pseudo-anchor
+        loss are deterministic marginals of the frozen responsibilities.  In
+        particular, scale views and live image predictions cannot change the
+        molecular targets used in any M round.
+        """
+
+        if batch.molecular_responsibilities is None:
+            raise ValueError(
+                "strict-artifact refinement requires frozen molecular_responsibilities "
+                "for every training batch"
+            )
+        responsibilities = (
+            batch.molecular_responsibilities.detach().cpu().numpy().astype(np.float64, copy=True)
+        )
+        if responsibilities.ndim != 2 or responsibilities.shape != (
+            len(batch.morphology),
+            len(batch.prototype_means),
+        ):
+            raise ValueError("frozen molecular responsibilities are misaligned")
+        if not np.isfinite(responsibilities).all() or np.any(responsibilities < 0):
+            raise ValueError("frozen molecular responsibilities must be finite and non-negative")
+        known_mass = responsibilities.sum(axis=1)
+        if np.any(known_mass > 1.0 + 1.0e-4):
+            raise ValueError("frozen molecular responsibility rows exceed unit known mass")
+
+        conditional_prototypes = responsibilities / np.maximum(known_mass[:, None], 1.0e-12)
+        zero_known = known_mass <= 0
+        conditional_prototypes[zero_known] = 1.0 / max(responsibilities.shape[1], 1)
+        prototype_types = batch.prototype_types.detach().cpu().numpy().astype(np.int64)
+        num_types = int(model.config.num_cell_types)
+        type_probabilities = np.zeros((len(responsibilities), num_types), dtype=np.float64)
+        for prototype_index, type_index in enumerate(prototype_types):
+            if type_index < 0 or type_index >= num_types:
+                raise ValueError("frozen molecular responsibilities use an invalid prototype type")
+            type_probabilities[:, type_index] += conditional_prototypes[:, prototype_index]
+        # Zero-known rows are rejected through the frozen unknown mass below.
+        # Give the anchor lifecycle a neutral simplex row rather than allowing
+        # an arbitrary prototype-count imbalance to look like evidence.
+        type_probabilities[zero_known] = 1.0 / num_types
+
+        unknown_probability = np.clip(1.0 - known_mass, 0.0, 1.0)
+        abstain = unknown_probability >= float(model.config.abstain_threshold)
+        parent_probabilities: Optional[np.ndarray] = None
+        mapping = model.config.fine_to_parent
+        if mapping is not None:
+            num_parents = max(mapping) + 1
+            parent_probabilities = np.zeros(
+                (len(responsibilities), num_parents),
+                dtype=np.float64,
+            )
+            for type_index, parent_index in enumerate(mapping):
+                parent_probabilities[:, parent_index] += type_probabilities[:, type_index]
+
+        if responsibilities.shape[1] > 1:
+            entropy = -(
+                conditional_prototypes * np.log(np.maximum(conditional_prototypes, 1.0e-12))
+            ).sum(axis=1) / np.log(responsibilities.shape[1])
+            assignment_entropy = float(entropy[~zero_known].mean()) if (~zero_known).any() else 0.0
+        else:
+            assignment_entropy = 0.0
+        cell_weights = (
+            np.ones(len(responsibilities), dtype=np.float64)
+            if batch.cell_weights is None
+            else batch.cell_weights.detach().cpu().numpy().astype(np.float64)
+        )
+        weight_sum = float(cell_weights.sum())
+        transported_target_mass = (
+            np.zeros(responsibilities.shape[1], dtype=np.float64)
+            if weight_sum <= 0
+            else (responsibilities * cell_weights[:, None]).sum(axis=0) / weight_sum
+        )
+        indices = [
+            index for index, role in enumerate(batch.source_roles) if role == "frozen_e_step"
+        ]
+        if len(indices) != 1:
+            raise ValueError("strict refinement requires one frozen E-step source")
+        artifact = MolecularEStepArtifact.load_npz(batch.source_artifacts[indices[0]])
+        marginal_residual = max(
+            artifact.source_marginal_residual,
+            artifact.target_marginal_residual,
+        )
+        return (
+            type_probabilities.astype(np.float32),
+            conditional_prototypes.astype(np.float32),
+            abstain,
+            unknown_probability.astype(np.float32),
+            None if parent_probabilities is None else parent_probabilities.astype(np.float32),
+            responsibilities.astype(
+                batch.molecular_responsibilities.detach().cpu().numpy().dtype,
+                copy=False,
+            ),
+            assignment_entropy,
+            marginal_residual,
+            transported_target_mass,
+        )
+
     def fit(
         self,
         training_batches: Sequence[HEIRTrainingBatch],
@@ -265,6 +379,23 @@ class IterativeRefiner:
         # tested model version rather than an accidental optimizer side effect.
         trainer.model.freeze_expression_decoder(True)
         trainer.model.to(self.device)
+        molecular_e_step_mode = getattr(trainer, "molecular_e_step_mode", None)
+        if molecular_e_step_mode not in {
+            "strict_artifact",
+            "live_student_negative_control",
+        }:
+            raise ValueError(
+                "refinement trainer must declare molecular_e_step_mode as "
+                "strict_artifact or live_student_negative_control"
+            )
+        strict_artifact_estep = molecular_e_step_mode == "strict_artifact"
+        if strict_artifact_estep and any(
+            batch.molecular_responsibilities is None for batch in training_batches
+        ):
+            raise ValueError(
+                "strict-artifact refinement requires frozen molecular_responsibilities "
+                "for every training batch"
+            )
         if self.config.broad_refinement_rounds > 0 and trainer.model.config.fine_to_parent is None:
             raise ValueError(
                 "broad refinement requires a hierarchical model; use "
@@ -296,7 +427,7 @@ class IterativeRefiner:
             measured_priors[sample_key] = values.copy()
         committed_priors = {"%s::%s" % key: value.copy() for key, value in measured_priors.items()}
         # Round 0 is the complete rollback target: unrefined student, matching
-        # EMA teacher, measured priors, original batches, and no anchor state.
+        # round teacher, measured priors, original batches, and no anchor state.
         # Without its validation score, any finite first refinement candidate
         # would be committed unconditionally against +infinity.
         round_zero_validation_loss, previous_objectives = self._round_zero_validation(
@@ -332,25 +463,35 @@ class IterativeRefiner:
             revoked_total = 0
             predictions = []
             for batch in working_batches:
-                teacher_values = self._teacher_probabilities(teacher, batch)
-                parent_probabilities = teacher_values[-1]
-                broad_transport = bool(
-                    parent_probabilities is not None
-                    and parent_probabilities.shape[1] >= 2
-                    and round_id <= self.config.broad_refinement_rounds
-                )
-                (
-                    responsibilities,
-                    assignment_entropy,
-                    marginal_residual,
-                    transported_target_mass,
-                ) = self._teacher_transport(
-                    trainer,
-                    teacher,
-                    batch,
-                    parent_probabilities=parent_probabilities,
-                    broad_level=broad_transport,
-                )
+                if strict_artifact_estep:
+                    artifact_values = self._artifact_estep(trainer.model, batch)
+                    teacher_values = artifact_values[:5]
+                    (
+                        responsibilities,
+                        assignment_entropy,
+                        marginal_residual,
+                        transported_target_mass,
+                    ) = artifact_values[5:]
+                else:
+                    teacher_values = self._teacher_probabilities(teacher, batch)
+                    parent_probabilities = teacher_values[-1]
+                    broad_transport = bool(
+                        parent_probabilities is not None
+                        and parent_probabilities.shape[1] >= 2
+                        and round_id <= self.config.broad_refinement_rounds
+                    )
+                    (
+                        responsibilities,
+                        assignment_entropy,
+                        marginal_residual,
+                        transported_target_mass,
+                    ) = self._teacher_transport(
+                        trainer,
+                        teacher,
+                        batch,
+                        parent_probabilities=parent_probabilities,
+                        broad_level=broad_transport,
+                    )
                 predictions.append(
                     (
                         batch,
@@ -471,20 +612,17 @@ class IterativeRefiner:
                     batch.bag_id,
                     level_name,
                 )
+                # Same-checkpoint views are consistency diagnostics by default;
+                # they become a hard acceptance gate only under the explicit
+                # require_view_agreement sensitivity.
                 views = None
-                if view_probabilities is not None:
+                if self.config.require_view_agreement and view_probabilities is not None:
                     stable_key = "%s::%s::%s" % (
                         batch.donor_id,
                         batch.sample_id,
                         batch.bag_id,
                     )
                     views = view_probabilities.get(stable_key)
-                    if (
-                        views is None
-                        and not self.config.require_view_agreement
-                        and sample_bag_counts[sample_key] == 1
-                    ):
-                        views = view_probabilities.get(batch.sample_id)
                 if self.config.require_view_agreement:
                     if views is None or np.asarray(views).ndim not in (2, 3):
                         raise ValueError("missing scale-held-out views for %s" % stable_key)
@@ -547,6 +685,14 @@ class IterativeRefiner:
                         supported_types=supported_types,
                         max_per_class=self.config.max_anchors_per_class,
                     )
+                if strict_artifact_estep:
+                    # Re-reading one immutable round-0 artifact is not
+                    # independent longitudinal confirmation. Fixed-target
+                    # refinement therefore cannot mint pseudo anchors.
+                    selection = replace(
+                        selection,
+                        accepted=np.zeros_like(selection.accepted),
+                    )
                 # The model's own composite abstention remains an additional
                 # gate, distinct from the calibrated pathology-feature OOD flag.
                 if broad_level:
@@ -577,9 +723,10 @@ class IterativeRefiner:
                         (previous_state.labels[shared] != lifecycle.labels[shared]).sum()
                     )
                     previous_total += int((previous_accepted | current_accepted).sum())
-                # Only twice-confirmed anchors enter the hard label/routing
-                # interface. Provisional anchors remain auditable state until
-                # a second independent teacher round confirms them.
+                # Only twice-confirmed anchors enter confidence-weighted
+                # classification.  Trainer routing remains unconstrained by
+                # pseudo anchors in the primary path; provisional anchors stay
+                # auditable until a second round confirms them.
                 training_anchors = lifecycle.status == AnchorStatus.TRUSTED
                 labels = np.full(len(probabilities), -100, dtype=np.int64)
                 labels[training_anchors] = lifecycle.labels[training_anchors]
@@ -658,7 +805,8 @@ class IterativeRefiner:
             candidate_states.append(self._model_state(trainer.model))
             weak_safety_passed = bool(
                 np.isfinite(validation_loss)
-                and validation_loss <= global_best_loss + self.config.validation_loss_degradation
+                and validation_loss
+                <= round_zero_validation_loss + self.config.validation_loss_degradation
             )
             spatial_validation_score = (
                 None
@@ -704,7 +852,8 @@ class IterativeRefiner:
             if not round_committed:
                 # The candidate batches, priors, and lifecycle state were kept
                 # local until validation.  Restore the complete best snapshot
-                # immediately and never expose the failed student to the EMA.
+                # immediately and never expose the failed student to the
+                # round teacher.
                 trainer.model.load_state_dict(global_best_state)
                 teacher.load_state_dict(global_best_teacher_state)
                 working_batches = list(global_best_batches)
@@ -717,10 +866,10 @@ class IterativeRefiner:
             working_batches = refined_batches
             anchor_states = candidate_anchor_states
             committed_priors = {key: value.copy() for key, value in candidate_priors.items()}
-            if self.config.round_selection_mode == "fixed":
-                # Target cohorts use a development-locked round count. Weak
-                # objectives are safety checks only; every safe fixed round is
-                # retained rather than interpreted as spatial evidence.
+            if self.config.round_selection_mode == "fixed" and validation_loss < global_best_loss:
+                # Execute the development-locked round count, but retain the
+                # lowest-loss safe snapshot.  If no candidate improves round
+                # zero, the unrefined model remains the selected fallback.
                 global_best_loss = validation_loss
                 global_best_round = round_id
                 global_best_state = self._model_state(trainer.model)
@@ -744,7 +893,7 @@ class IterativeRefiner:
                 global_best_batches = list(working_batches)
                 global_best_anchors = self._anchor_states(anchor_states)
                 global_best_priors = {key: value.copy() for key, value in committed_priors.items()}
-            elif self.config.round_selection_mode == "weak" and validation_loss <= global_best_loss:
+            elif self.config.round_selection_mode == "weak" and validation_loss < global_best_loss:
                 global_best_loss = validation_loss
                 global_best_round = round_id
                 global_best_state = self._model_state(trainer.model)

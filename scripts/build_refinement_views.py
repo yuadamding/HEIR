@@ -16,7 +16,7 @@ import torch
 
 from heir.models import HEIRModel
 from heir.training import HEIRTrainingBatch
-from heir.utils import resolve_device
+from heir.utils import reject_output_input_collisions, resolve_device
 
 
 def _sha256(path: Path) -> str:
@@ -72,9 +72,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     checkpoint_path = args.checkpoint.expanduser().resolve()
     batch_path = args.batch.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    reject_output_input_collisions(
+        output_paths=(output_path,),
+        input_paths=(checkpoint_path, batch_path),
+        label="refinement-view artifact",
+    )
+    checkpoint_hash = _sha256(checkpoint_path)
+    batch_hash = _sha256(batch_path)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     model = HEIRModel.from_checkpoint(checkpoint).eval()
     batch = HEIRTrainingBatch.load_npz(batch_path)
+    bound_input_paths = (checkpoint_path, batch_path, *batch.source_artifacts)
+    reject_output_input_collisions(
+        output_paths=(output_path,),
+        input_paths=bound_input_paths,
+        label="refinement-view artifact",
+    )
     if not batch.nucleus_ids:
         raise ValueError("refinement views require stable nucleus IDs")
     if not batch.source_sha256:
@@ -100,8 +113,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     values = batch.to(device)
     probabilities = []
     source_hashes = []
-    checkpoint_hash = _sha256(checkpoint_path)
-    batch_hash = _sha256(batch_path)
     for block_index in range(blocks):
         morphology = values.morphology.clone()
         morphology[:, : width - tail] = 0
@@ -165,6 +176,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "shared_tail_features": tail,
         "device": str(device),
     }
+    if _sha256(checkpoint_path) != checkpoint_hash or _sha256(batch_path) != batch_hash:
+        raise RuntimeError(
+            "refinement-view checkpoint or batch changed during inference; discard the result"
+        )
+    reject_output_input_collisions(
+        output_paths=(output_path,),
+        input_paths=bound_input_paths,
+        label="refinement-view artifact",
+    )
     _atomic_npz(
         output_path,
         {

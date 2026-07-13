@@ -279,7 +279,16 @@ class CompositeLossTests(unittest.TestCase):
             sample_latent=False,
         )
         assert output.residual_gate is not None
-        torch.testing.assert_close(output.residual_gate, torch.zeros_like(output.residual_gate))
+        expected_gate = model.config.residual_max_norm * torch.sigmoid(torch.tensor(-2.0))
+        expected_gate = expected_gate * torch.sigmoid(
+            torch.tensor(
+                (1.0 / 3.0 - model.config.residual_type_concentration_threshold)
+                / model.config.residual_type_concentration_temperature
+            )
+        )
+        torch.testing.assert_close(
+            output.residual_gate, expected_gate.expand_as(output.residual_gate)
+        )
         self.assertTrue(torch.all(output.residual_logvar >= model.config.logvar_min))
         criterion = HEIRCompositeLoss(
             HEIRLossConfig(

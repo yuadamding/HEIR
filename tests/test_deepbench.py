@@ -127,6 +127,7 @@ def test_refined_prediction_manifest_binds_full_provenance_and_rejects_controls(
         decoder_sha256="b" * 64,
         annotation_status="published_integrated_annotation_sensitivity_not_clean_reannotation",
         specimen_prototype_sha256={section_id: sha256_file(native_prototype)},
+        training_donors=(section_id, "4399"),
         specimen_residual_geometry={section_id: geometry_identity},
     )
     refined_prototype = tmp_path / "refined-prototype.npz"
@@ -135,7 +136,7 @@ def test_refined_prediction_manifest_binds_full_provenance_and_rejects_controls(
     batch = {"source_sha256": [sha256_file(native_prototype)]}
     torch.save(
         {
-            "schema": "heir.model.v3",
+            "schema": "heir.model.v4",
             "config": {
                 "num_cell_types": 1,
                 "latent_dim": 2,
@@ -159,8 +160,11 @@ def test_refined_prediction_manifest_binds_full_provenance_and_rejects_controls(
                 "residual_geometry": str(residual_geometry.resolve()),
                 "residual_geometry_sha256": sha256_file(residual_geometry),
                 "residual_basis_trainable": False,
-                "training_donors": [section_id],
+                "training_donors": [section_id, "4399"],
+                "direct_training_donors": [section_id],
+                "validation_donors": [section_id],
                 "refinement_training_donors": [section_id],
+                "refinement_validation_donors": [section_id],
                 "training_batches": [batch],
                 "validation_batches": [batch],
                 "refinement_training_batches": [batch],
@@ -264,6 +268,14 @@ def test_refined_prediction_manifest_binds_full_provenance_and_rejects_controls(
     assert loaded[section_id].telemetry_sha256 == sha256_file(telemetry)
 
     checkpoint_payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    checkpoint_payload["metadata"]["training_donors"] = [section_id]
+    torch.save(checkpoint_payload, checkpoint)
+    prediction.checkpoint_sha256 = sha256_file(checkpoint)
+    row["checkpoint_sha256"] = prediction.checkpoint_sha256
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="all-exposure donor lineage"):
+        _load_refined_prediction_manifest(manifest, (section_id,), native)
+    checkpoint_payload["metadata"]["training_donors"] = [section_id, "4399"]
     checkpoint_payload["metadata"]["residual_basis_trainable"] = True
     torch.save(checkpoint_payload, checkpoint)
     prediction.checkpoint_sha256 = sha256_file(checkpoint)

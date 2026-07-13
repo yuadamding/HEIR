@@ -10,6 +10,7 @@ import io
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import numpy as np
@@ -356,6 +357,96 @@ def test_matrix_accepts_r2_native_schema_and_reports_generation(tmp_path: Path) 
     assert report["matrix_status"] == "complete"
     assert report["molecular_generation"] == "r2"
     assert report["manifests"]["native_scanvi"]["molecular_generation"] == "r2"
+
+
+def test_true_loo_fold_map_scores_only_same_latent_controls_and_preserves_claim_scope(
+    tmp_path: Path,
+) -> None:
+    arguments = _fixture(tmp_path)
+    native_path = arguments["native_manifest_path"]
+    native = json.loads(native_path.read_text(encoding="utf-8"))
+    decoder = tmp_path / "fold-decoder.pt"
+    decoder.write_bytes(b"target-fold-decoder")
+    native.update(
+        {
+            "schema": "heir.snpatho_scanvi_r2_manifest.v1",
+            "molecular_generation": "r2",
+            "distilled_decoder": {
+                "external_path": str(decoder.resolve()),
+                "sha256": sha256_file(decoder),
+            },
+        }
+    )
+    native_path.write_text(json.dumps(native), encoding="utf-8")
+    fold = SimpleNamespace(
+        sample="sample_a",
+        training_donors=("donor_b",),
+        latent_space_id="latent-native-test",
+        native_manifest=native_path.resolve(),
+        native_manifest_sha256=sha256_file(native_path),
+        decoder=decoder.resolve(),
+        decoder_sha256=sha256_file(decoder),
+    )
+    arguments["native_manifest_path"] = None
+    arguments["molecular_folds"] = {"sample_a": fold}
+
+    report = MATRIX.evaluate_matrix(**arguments)
+
+    assert report["matrix_status"] == "blocked"
+    assert report["status"] == "blocked_matrix"
+    assert any(
+        blocker["code"] == "requested_control_unavailable_cross_latent_space"
+        for blocker in report["matrix_blockers"]
+    )
+    assert report["negative_control"] is True
+    assert report["claim_scope"]["eligible_for_primary_performance_claims"] is False
+    assert report["request"]["requested_controls"] == list(MATRIX.DEFAULT_CONTROLS)
+    assert report["request"]["unsupported_controls"] == ["wrong_prototype_bank"]
+    assert "wrong_prototype_bank" not in report["request"]["controls"]
+    assert report["wrong_prototype_bank_contrasts"]["coverage_complete"] is False
+    assert (
+        report["wrong_prototype_bank_contrasts"]["availability"] == "unavailable_cross_latent_space"
+    )
+    assert not [case for case in report["cases"] if case["control"] == "wrong_prototype_bank"]
+    assert report["scored_artifact_count"] == report["requested_artifact_count"] == 10
+    assert report["manifests"]["native_scanvi"]["path"] is None
+    assert report["manifests"]["native_scanvi_folds"]["sample_a"]["decoder_sha256"] == (
+        sha256_file(decoder)
+    )
+
+
+def test_true_loo_fold_map_rejects_per_target_decoder_mismatch(tmp_path: Path) -> None:
+    arguments = _fixture(tmp_path)
+    native_path = arguments["native_manifest_path"]
+    native = json.loads(native_path.read_text(encoding="utf-8"))
+    decoder = tmp_path / "fold-decoder.pt"
+    decoder.write_bytes(b"target-fold-decoder")
+    native.update(
+        {
+            "schema": "heir.snpatho_scanvi_r2_manifest.v1",
+            "molecular_generation": "r2",
+            "distilled_decoder": {
+                "external_path": str(decoder.resolve()),
+                "sha256": sha256_file(decoder),
+            },
+        }
+    )
+    native_path.write_text(json.dumps(native), encoding="utf-8")
+    arguments["native_manifest_path"] = None
+    arguments["molecular_folds"] = {
+        "sample_a": SimpleNamespace(
+            sample="sample_a",
+            training_donors=("donor_b",),
+            latent_space_id="latent-native-test",
+            native_manifest=native_path.resolve(),
+            native_manifest_sha256=sha256_file(native_path),
+            decoder=decoder.resolve(),
+            decoder_sha256="0" * 64,
+        )
+    }
+
+    with pytest.raises(ValueError, match="decoder identity differs"):
+        MATRIX.evaluate_matrix(**arguments)
 
 
 def test_native_schema_rejects_declared_generation_mismatch() -> None:
@@ -1405,3 +1496,27 @@ def test_hash_valid_dummy_supporting_artifact_is_rejected(
 
     with pytest.raises(ValueError, match="schema"):
         _validate_test_evidence(tmp_path, requirement, report)
+
+
+@pytest.mark.parametrize("alias_kind", ("hardlink", "symlink"))
+def test_refinement_matrix_writer_rejects_input_aliases(
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    source = tmp_path / "bound-input.json"
+    source.write_text("frozen", encoding="utf-8")
+    alias = tmp_path / "report.json"
+    if alias_kind == "hardlink":
+        alias.hardlink_to(source)
+    else:
+        alias.symlink_to(source)
+
+    with pytest.raises(ValueError, match="would overwrite a bound input"):
+        MATRIX.write_report(
+            {},
+            json_output=alias,
+            tsv_output=tmp_path / "report.tsv",
+            markdown_output=tmp_path / "report.md",
+            input_paths=(source,),
+        )
+    assert source.read_text(encoding="utf-8") == "frozen"

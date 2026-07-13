@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,173 @@ SPEC.loader.exec_module(RUNNER)
 
 def _sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _record(path):
+    return {"path": str(path.resolve()), "sha256": _sha256(path)}
+
+
+def _execution_record(stage, status="skipped_valid"):
+    record = {
+        "sample": stage.sample,
+        "seed": stage.seed,
+        "stage": stage.name,
+        "status": status,
+        "validated_inputs": RUNNER._absolute_artifact_rows(stage.inputs),
+        "validated_outputs": RUNNER._absolute_artifact_rows(RUNNER._stage_output_artifacts(stage)),
+    }
+    if stage.unknown_mass is not None:
+        record["unknown_mass"] = stage.unknown_mass
+    return record
+
+
+def test_source_hash_rechecks_content_when_size_and_mtime_are_unchanged(tmp_path):
+    source = tmp_path / "runner.py"
+    source.write_bytes(b"first")
+    original_stat = source.stat()
+    original_digest = RUNNER._sha256(source)
+
+    source.write_bytes(b"later")
+    os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    assert source.stat().st_size == original_stat.st_size
+    assert source.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert RUNNER._sha256(source) != original_digest
+
+
+def test_runtime_environment_identity_is_reobserved_each_time(monkeypatch):
+    calls = 0
+
+    def distributions():
+        nonlocal calls
+        calls += 1
+        return ()
+
+    monkeypatch.setattr(RUNNER.importlib.metadata, "distributions", distributions)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    RUNNER._runtime_environment_identity()
+    RUNNER._runtime_environment_identity()
+
+    assert calls == 2
+
+
+def test_stage_output_capture_brackets_validation(tmp_path):
+    output = tmp_path / "prediction.npz"
+    output.write_bytes(b"before")
+    stage = RUNNER.PlannedStage(
+        sample="4066",
+        seed=17,
+        name="predict_refined",
+        command=(),
+        outputs=(output,),
+        validate=lambda: output.write_bytes(b"during"),
+        output_roles=("prediction",),
+    )
+
+    with pytest.raises(RuntimeError, match="validator mutated output artifacts"):
+        RUNNER._validate_and_capture_stage_outputs(stage)
+
+
+def test_final_artifact_recheck_deduplicates_canonical_paths(tmp_path, monkeypatch):
+    source = tmp_path / "shared.npz"
+    source.write_bytes(b"shared")
+    artifacts = (("input", source),)
+    captured = RUNNER._absolute_artifact_rows(artifacts)
+    observed = {}
+    calls = 0
+    original = RUNNER._sha256
+
+    def counted(path):
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(RUNNER, "_sha256", counted)
+    for stage_id in ("first", "second"):
+        RUNNER._manifest_rows_from_stage_capture(
+            artifacts,
+            captured,
+            manifest_directory=None,
+            stage_id=stage_id,
+            boundary="final",
+            observed_sha256=observed,
+        )
+
+    assert calls == 1
+
+
+def _write_true_loo_fold(tmp_path, target):
+    root = tmp_path / ("fold_" + target)
+    root.mkdir(parents=True)
+    training = tuple(sample for sample in RUNNER.SAMPLES if sample != target)
+    artifacts = {}
+    for name in (
+        "batch_train",
+        "batch_validation",
+        "prototypes",
+        "residual_geometry",
+        "decoder",
+    ):
+        path = root / (name + (".pt" if name == "decoder" else ".npz"))
+        path.write_bytes((target + ":" + name).encode())
+        artifacts[name] = path
+    latent_space_id = "sha256:" + hashlib.sha256(target.encode()).hexdigest()
+    label_ontology = ("B", "T")
+    native_path = root / "native_manifest.json"
+    native = {
+        "schema": "heir.snpatho_scanvi_r2_manifest.v1",
+        "status": "native_scanvi_true_leave_one_donor_out",
+        "expression_space_id": "log1p-cpm-10000-v1",
+        "latent_space_id": latent_space_id,
+        "molecular_producer": _record(ROOT / "scripts/train_snpatho_scanvi.py"),
+        "training_partition": {
+            "mode": "leave_one_donor_out",
+            "held_out_sample": target,
+            "backbone_training_donors": list(training),
+            "decoder_training_donors": list(training),
+            "label_ontology": list(label_ontology),
+            "label_ontology_sha256": RUNNER._ordered_string_sha256(label_ontology),
+            "held_out_mapping": {
+                "held_out_annotation_used_for_label_mapping": False,
+                "label_mapping_method": "frozen_training_donor_SCANVI_classifier",
+                "label_training_donors": list(training),
+            },
+        },
+        "distilled_decoder": {
+            "external_path": str(artifacts["decoder"].resolve()),
+            "sha256": _sha256(artifacts["decoder"]),
+            "contract": {"training_donors": list(training)},
+        },
+        "specimens": {
+            target: {
+                "rare_complete_prototypes": str(artifacts["prototypes"].resolve()),
+                "rare_complete_prototypes_sha256": _sha256(artifacts["prototypes"]),
+                "residual_geometry": str(artifacts["residual_geometry"].resolve()),
+                "residual_geometry_sha256": _sha256(artifacts["residual_geometry"]),
+            }
+        },
+    }
+    native_path.write_text(json.dumps(native), encoding="utf-8")
+    preparation_path = root / "preparation_manifest.json"
+    preparation = {
+        "schema": "heir.snpatho_refinement_input_preparation.v1",
+        "status": "complete",
+        "molecular_generation": "r2",
+        "latent_space_id": latent_space_id,
+        "producer": _record(ROOT / "scripts/prepare_snpatho_refinement_inputs.py"),
+        "native_manifest": _record(native_path),
+        "outputs": {
+            target: {
+                "batch_train": _record(artifacts["batch_train"]),
+                "batch_validation": _record(artifacts["batch_validation"]),
+                "prototypes": _record(artifacts["prototypes"]),
+                "residual_geometry": _record(artifacts["residual_geometry"]),
+            }
+        },
+    }
+    preparation_path.write_text(json.dumps(preparation), encoding="utf-8")
+    return preparation_path, artifacts
 
 
 def _write_prediction_case(tmp_path, *, control=None, unsupported_source_type=False):
@@ -140,6 +308,168 @@ def test_existing_prediction_validation_rejects_stale_input_and_partial_stage(tm
             False,
             validator=lambda: None,
             repository=tmp_path,
+        )
+
+
+def test_stage_runner_guards_source_immediately_before_and_after_subprocess(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    output = tmp_path / "output.npz"
+    phases = []
+
+    def fake_run(command, *, check, cwd):
+        assert command == ("source-bound-command",)
+        assert check is True
+        assert cwd == tmp_path
+        output.write_bytes(b"complete")
+
+    def guard(phase):
+        phases.append(phase)
+        if phase == "immediately_after_stage_subprocess":
+            raise RuntimeError("source changed during stage")
+
+    monkeypatch.setattr(RUNNER.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="source changed during stage"):
+        RUNNER._run(
+            ("source-bound-command",),
+            (output,),
+            True,
+            validator=lambda: None,
+            repository=tmp_path,
+            source_guard=guard,
+        )
+
+    assert phases == [
+        "immediately_before_stage_subprocess",
+        "immediately_after_stage_subprocess",
+    ]
+
+
+def test_stage_runner_guards_existing_output_adoption_transition(tmp_path):
+    output = tmp_path / "output.npz"
+    output.write_bytes(b"existing")
+    phases = []
+
+    status = RUNNER._run(
+        ("not-executed",),
+        (output,),
+        True,
+        validator=lambda: None,
+        repository=tmp_path,
+        source_guard=phases.append,
+    )
+
+    assert status == "skipped_valid"
+    assert phases == [
+        "before_existing_output_adoption",
+        "after_existing_output_adoption_validation",
+    ]
+
+
+def test_manifest_output_rejects_symlink_and_hardlink_aliases_of_all_protected_files(
+    tmp_path,
+):
+    source = tmp_path / "runner_dependency.py"
+    interpreter = tmp_path / "python"
+    module_entrypoint = tmp_path / "__main__.py"
+    cli_source = tmp_path / "cli.py"
+    stage_input = tmp_path / "batch.npz"
+    stage_output = tmp_path / "checkpoint.pt"
+    for path in (source, interpreter, module_entrypoint, cli_source, stage_input, stage_output):
+        path.write_bytes(path.name.encode())
+    source_identity = {"files": [{"path": str(source)}]}
+    cli_source_binding = {
+        "python_executable": str(interpreter),
+        "module_entrypoint": str(module_entrypoint),
+        "cli_source": str(cli_source),
+    }
+    stage = RUNNER.PlannedStage(
+        sample="4066",
+        seed=17,
+        name="train_round0",
+        command=(),
+        outputs=(stage_output,),
+        validate=lambda: None,
+        inputs=(("train_batch", stage_input),),
+    )
+
+    symlink_manifest = tmp_path / "source-symlink.json"
+    symlink_manifest.symlink_to(SCRIPT)
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        RUNNER._reject_manifest_output_collisions(
+            ROOT,
+            symlink_manifest,
+            (stage,),
+            source_identity=source_identity,
+            cli_source_binding=cli_source_binding,
+        )
+
+    for index, protected in enumerate(
+        (source, interpreter, module_entrypoint, cli_source, stage_input, stage_output)
+    ):
+        hardlink_manifest = tmp_path / ("hardlink-%d.json" % index)
+        os.link(protected, hardlink_manifest)
+        with pytest.raises(ValueError, match="output would overwrite a bound input"):
+            RUNNER._reject_manifest_output_collisions(
+                ROOT,
+                hardlink_manifest,
+                (stage,),
+                source_identity=source_identity,
+                cli_source_binding=cli_source_binding,
+            )
+
+
+def test_main_rejects_manifest_alias_before_any_stage_execution(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "runner.py"
+    interpreter = tmp_path / "python"
+    module_entrypoint = tmp_path / "__main__.py"
+    cli_source = tmp_path / "cli.py"
+    stage_input = tmp_path / "batch.npz"
+    for path in (source, interpreter, module_entrypoint, cli_source, stage_input):
+        path.write_bytes(path.name.encode())
+    manifest = tmp_path / "manifest.json"
+    os.link(stage_input, manifest)
+    source_identity = {"files": [{"path": str(source)}]}
+    cli_binding = {
+        "python_executable": str(interpreter),
+        "module_entrypoint": str(module_entrypoint),
+        "cli_source": str(cli_source),
+    }
+    stage = RUNNER.PlannedStage(
+        sample="4066",
+        seed=17,
+        name="train_round0",
+        command=("must-not-run",),
+        outputs=(tmp_path / "checkpoint.pt",),
+        validate=lambda: None,
+        inputs=(("train_batch", stage_input),),
+    )
+    monkeypatch.setattr(
+        RUNNER, "refinement_run_source_identity", lambda repository: source_identity
+    )
+    monkeypatch.setattr(RUNNER, "_heir_source_binding", lambda repository, **kwargs: cli_binding)
+    monkeypatch.setattr(RUNNER, "_assert_execution_source_unchanged", lambda *args, **kwargs: None)
+    monkeypatch.setattr(RUNNER, "build_plan", lambda *args, **kwargs: (stage,))
+    monkeypatch.setattr(
+        RUNNER,
+        "_run",
+        lambda *args, **kwargs: pytest.fail(
+            "stage execution was reached before collision preflight"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        RUNNER.main(
+            [
+                "--execute",
+                "--controls",
+                "--manifest-output",
+                str(manifest),
+            ]
         )
 
 
@@ -265,6 +595,10 @@ def test_checkpoint_history_pair_rejects_mismatched_json_identity(tmp_path):
                 "training_stage": "personalized",
                 "seed": 17,
                 "training_donors": ["4066"],
+                "direct_training_donors": ["4066"],
+                "initialization_validation_status": "uninitialized_negative_control",
+                "molecular_e_step_mode": "live_student_negative_control",
+                "excluded_from_primary_claims": True,
                 "best_epoch": 3,
                 "best_validation_loss": 1.25,
                 "uot_unknown_mass": 0.05,
@@ -273,6 +607,15 @@ def test_checkpoint_history_pair_rejects_mismatched_json_identity(tmp_path):
                 "residual_geometry_sha256": _sha256(geometry),
                 "training_batches": [dict(train_identity)],
                 "validation_batches": [dict(validation_identity)],
+                "training_batch_artifacts": [
+                    {"path": str(train_batch), "sha256": _sha256(train_batch)}
+                ],
+                "validation_batch_artifacts": [
+                    {
+                        "path": str(validation_batch),
+                        "sha256": _sha256(validation_batch),
+                    }
+                ],
             }
         },
         checkpoint,
@@ -511,6 +854,156 @@ def test_r2_plan_routes_all_molecular_inputs_and_decoder_to_r2(tmp_path):
     assert str((ROOT / "src").resolve()) in views.command[3]
 
 
+def test_true_loo_three_fold_plan_uses_target_specific_hash_bound_inputs(tmp_path):
+    specifications = []
+    expected = {}
+    for sample in RUNNER.SAMPLES:
+        manifest, artifacts = _write_true_loo_fold(tmp_path, sample)
+        specifications.append("%s=%s" % (sample, manifest))
+        expected[sample] = artifacts
+    folds = RUNNER.load_true_loo_molecular_folds(
+        ROOT,
+        specifications,
+        required_samples=RUNNER.SAMPLES,
+    )
+
+    plan = RUNNER.build_plan(
+        ROOT,
+        artifact_root=tmp_path / "outputs",
+        samples=RUNNER.SAMPLES,
+        seeds=(17,),
+        controls=True,
+        molecular_generation="r2",
+        molecular_folds=folds,
+    )
+    train_stages = [stage for stage in plan if stage.name == "train_round0"]
+    assert {stage.sample for stage in train_stages} == set(RUNNER.SAMPLES)
+    assert len({fold.latent_space_id for fold in folds.values()}) == len(RUNNER.SAMPLES)
+    assert len({fold.decoder_sha256 for fold in folds.values()}) == len(RUNNER.SAMPLES)
+    for stage in train_stages:
+        inputs = dict(stage.inputs)
+        artifacts = expected[stage.sample]
+        assert inputs["train_batch"] == artifacts["batch_train"].resolve()
+        assert inputs["validation_batch"] == artifacts["batch_validation"].resolve()
+        assert inputs["residual_geometry"] == artifacts["residual_geometry"].resolve()
+        assert inputs["rna_decoder"] == artifacts["decoder"].resolve()
+        assert (
+            inputs["molecular_fold_preparation_manifest"]
+            == folds[stage.sample].preparation_manifest
+        )
+        assert inputs["molecular_fold_native_manifest"] == folds[stage.sample].native_manifest
+        assert stage.command[stage.command.index("--rna-vae-checkpoint") + 1] == str(
+            artifacts["decoder"].resolve()
+        )
+    assert not [stage for stage in plan if stage.control == "wrong_prototype_bank"]
+    assert {stage.name for stage in plan if stage.control is not None} == set(
+        RUNNER.PREDICTION_CONTROLS
+    )
+    full_plan = RUNNER.build_plan(
+        ROOT,
+        artifact_root=tmp_path / "outputs",
+        samples=RUNNER.SAMPLES,
+        seeds=RUNNER.SEEDS,
+        controls=True,
+        molecular_generation="r2",
+        molecular_folds=folds,
+    )
+    full_payload = RUNNER.full_matrix_plan_payload(
+        full_plan,
+        molecular_generation="r2",
+        molecular_folds=folds,
+    )
+    assert full_payload["stage_count"] == 129
+    assert full_payload["wrong_prototype_bank_pairings"] == []
+    assert full_payload["wrong_prototype_bank_coverage_complete"] is False
+
+    prediction_stages = []
+    for seed in RUNNER.SEEDS:
+        for sample in RUNNER.SAMPLES:
+            prediction = tmp_path / "predictions" / sample / ("seed_%d.npz" % seed)
+            prediction.parent.mkdir(parents=True, exist_ok=True)
+            prediction.write_bytes((sample + ":" + str(seed)).encode())
+            prediction_stages.append(
+                RUNNER.PlannedStage(
+                    sample=sample,
+                    seed=seed,
+                    name="predict_refined",
+                    command=(),
+                    outputs=(prediction,),
+                    validate=lambda: None,
+                )
+            )
+    compatibility, cases = RUNNER._compatibility_cases(
+        ROOT,
+        prediction_stages,
+        manifest_directory=tmp_path,
+        molecular_generation="r2",
+        molecular_folds=folds,
+    )
+    assert compatibility["negative_control"] is True
+    assert compatibility["schema"] == RUNNER.TRUE_LOO_FIVE_SEED_MANIFEST_SCHEMA
+    assert compatibility["native_scanvi_manifest_sha256"] is None
+    assert len(compatibility["native_scanvi_fold_bundle_sha256"]) == 64
+    assert compatibility["latent_space_id"] is None
+    assert set(compatibility["latent_space_id_by_sample"]) == set(RUNNER.SAMPLES)
+    assert set(compatibility["native_scanvi_fold_manifests"]) == set(RUNNER.SAMPLES)
+    assert "wrong_prototype_bank" not in compatibility["controls_available"]
+    assert compatibility["wrong_prototype_bank_pairings"] == []
+    assert compatibility["wrong_prototype_bank_coverage_complete"] is False
+    assert compatibility["wrong_prototype_bank_unavailable_reason"]
+    assert len(cases) == len(RUNNER.SEEDS) * len(RUNNER.SAMPLES)
+    assert all(
+        row["molecular_fold_decoder_sha256"] == folds[row["section_id"]].decoder_sha256
+        for row in cases
+    )
+
+
+def test_true_loo_fold_loader_rejects_target_in_decoder_scope_and_missing_fold(tmp_path):
+    manifest, _ = _write_true_loo_fold(tmp_path, "4066")
+    preparation = json.loads(manifest.read_text(encoding="utf-8"))
+    native_path = Path(preparation["native_manifest"]["path"])
+    native = json.loads(native_path.read_text(encoding="utf-8"))
+    native["distilled_decoder"]["contract"]["training_donors"] = list(RUNNER.SAMPLES)
+    native_path.write_text(json.dumps(native), encoding="utf-8")
+    preparation["native_manifest"] = _record(native_path)
+    manifest.write_text(json.dumps(preparation), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="decoder contract does not exclude"):
+        RUNNER.load_true_loo_molecular_folds(
+            ROOT,
+            ["4066=%s" % manifest],
+            required_samples=("4066",),
+        )
+
+    valid_manifest, _ = _write_true_loo_fold(tmp_path / "valid", "4066")
+    with pytest.raises(ValueError, match="exactly cover requested samples"):
+        RUNNER.load_true_loo_molecular_folds(
+            ROOT,
+            ["4066=%s" % valid_manifest],
+            required_samples=("4066", "4399"),
+        )
+
+
+def test_true_loo_fold_loader_rejects_reused_decoder_identity(tmp_path):
+    first_manifest, first_artifacts = _write_true_loo_fold(tmp_path / "first", "4066")
+    second_manifest, _ = _write_true_loo_fold(tmp_path / "second", "4399")
+    second_preparation = json.loads(second_manifest.read_text(encoding="utf-8"))
+    second_native_path = Path(second_preparation["native_manifest"]["path"])
+    second_native = json.loads(second_native_path.read_text(encoding="utf-8"))
+    second_native["distilled_decoder"]["external_path"] = str(first_artifacts["decoder"].resolve())
+    second_native["distilled_decoder"]["sha256"] = _sha256(first_artifacts["decoder"])
+    second_native_path.write_text(json.dumps(second_native), encoding="utf-8")
+    second_preparation["native_manifest"] = _record(second_native_path)
+    second_manifest.write_text(json.dumps(second_preparation), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="reuse a decoder identity"):
+        RUNNER.load_true_loo_molecular_folds(
+            ROOT,
+            ["4066=%s" % first_manifest, "4399=%s" % second_manifest],
+            required_samples=("4066", "4399"),
+        )
+
+
 def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp_path):
     for relative in RUNNER.UNKNOWN_MASS_SOURCE_FILES:
         source = ROOT / relative
@@ -532,16 +1025,7 @@ def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp
             if not stage_input.exists():
                 stage_input.parent.mkdir(parents=True, exist_ok=True)
                 stage_input.write_bytes(b"synthetic input")
-    records = [
-        {
-            "sample": stage.sample,
-            "seed": stage.seed,
-            "stage": stage.name,
-            "unknown_mass": stage.unknown_mass,
-            "status": "skipped_valid",
-        }
-        for stage in plan
-    ]
+    records = [_execution_record(stage) for stage in plan]
 
     manifest = RUNNER.build_unknown_mass_manifest(
         tmp_path,
@@ -553,6 +1037,7 @@ def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp
     assert manifest["schema"] == RUNNER.UNKNOWN_MASS_MANIFEST_SCHEMA
     assert manifest["execution_mode"] == "all_skipped_valid"
     assert manifest["manifest_role"] == "post_execute_output_adoption_and_validation"
+    assert manifest["stage_time_artifact_identities_complete"] is True
     assert manifest["cli_source_binding"]["schema"] == "heir.source_bound_cli.v1"
     assert len(manifest["cli_source_binding"]["cli_source_sha256"]) == 64
     assert manifest["stage_count"] == 25
@@ -561,13 +1046,22 @@ def test_unknown_mass_manifest_binds_full_recipe_outputs_and_adoption_status(tmp
     for planned, manifested in zip(plan, manifest["stages"]):
         assert manifested["command"] == list(planned.command)
         assert manifested["status"] == "skipped_valid"
-        assert [row["role"] for row in manifested["inputs"]] == [
-            role for role, _ in planned.inputs
-        ]
+        assert manifested["artifact_identity_capture"] == (RUNNER.STAGE_ARTIFACT_IDENTITY_CAPTURE)
+        assert [row["role"] for row in manifested["inputs"]] == [role for role, _ in planned.inputs]
         assert [row["path"] for row in manifested["outputs"]] == [
             str(path.resolve()) for path in planned.outputs
         ]
         assert all(len(row["sha256"]) == 64 for row in manifested["outputs"])
+
+    first_input = plan[0].inputs[0][1]
+    first_input.write_bytes(b"mutated after its stage was validated")
+    with pytest.raises(RuntimeError, match="changed after stage validation"):
+        RUNNER.build_unknown_mass_manifest(
+            tmp_path,
+            plan,
+            records,
+            samples=("4066",),
+        )
 
 
 def test_full_run_manifest_marks_posthoc_adoption_as_unverified(
@@ -652,7 +1146,7 @@ def test_full_run_manifest_marks_posthoc_adoption_as_unverified(
     manifest = RUNNER.build_refinement_run_manifest(
         tmp_path,
         (stage,),
-        [{"sample": "4066", "seed": 17, "stage": "predict_refined", "status": "skipped_valid"}],
+        [_execution_record(stage)],
         manifest_path=tmp_path / "reports" / "manifest.json",
     )
 
@@ -661,6 +1155,7 @@ def test_full_run_manifest_marks_posthoc_adoption_as_unverified(
     assert manifest["execution"]["posthoc_adoption_present"] is True
     assert manifest["execution"]["original_execution_source_verified"] is False
     assert manifest["execution"]["execution_provenance_verified"] is False
+    assert manifest["execution"]["stage_time_artifact_identities_complete"] is True
     assert manifest["stages"][0]["status"] == ("adopted_existing_output_after_current_validation")
 
 
@@ -769,24 +1264,54 @@ def test_full_run_manifest_fails_closed_on_legacy_shuffle_telemetry(
             "cli_source_sha256": "c" * 64,
         },
     )
-    record = [{"sample": "4066", "seed": 17, "stage": "image_shuffle", "status": "completed"}]
+    record = [_execution_record(stage, status="completed")]
+    execution_source_identity = {
+        "schema": "heir.source_identity.v1",
+        "aggregate_sha256": "b" * 64,
+    }
+    execution_cli_source_binding = {
+        "schema": "heir.source_bound_cli.v1",
+        "cli_source_sha256": "c" * 64,
+    }
+
+    final_tree_only = RUNNER.build_refinement_run_manifest(
+        tmp_path,
+        (stage,),
+        record,
+        manifest_path=tmp_path / "reports" / "manifest.json",
+    )
+    assert final_tree_only["execution_source_identity"] is None
+    assert final_tree_only["execution"]["original_execution_source_verified"] is False
+    assert final_tree_only["manifest_role"] == (
+        "current_invocation_outputs_source_identity_unverified"
+    )
 
     manifest = RUNNER.build_refinement_run_manifest(
         tmp_path,
         (stage,),
         record,
         manifest_path=tmp_path / "reports" / "manifest.json",
+        execution_source_identity=execution_source_identity,
+        execution_cli_source_binding=execution_cli_source_binding,
     )
     assert manifest["execution"]["execution_transform_hash_verified"] is True
+    assert manifest["execution"]["execution_source_identity_captured_before_stage_1"] is True
+    assert manifest["execution"]["execution_source_identity_unchanged"] is True
+    assert manifest["execution"]["execution_cli_source_binding_unchanged"] is True
+    assert manifest["execution"]["original_execution_source_verified"] is True
+    assert manifest["execution_source_identity"] == execution_source_identity
     assert manifest["stages"][0]["telemetry_transform"] == recipe
 
     payload = json.loads(telemetry.read_text(encoding="utf-8"))
     payload["negative_control"].pop("transform")
     telemetry.write_text(json.dumps(payload), encoding="utf-8")
+    record = [_execution_record(stage, status="completed")]
     with pytest.raises(ValueError, match="missing or stale transform hashes"):
         RUNNER.build_refinement_run_manifest(
             tmp_path,
             (stage,),
             record,
             manifest_path=tmp_path / "reports" / "manifest.json",
+            execution_source_identity=execution_source_identity,
+            execution_cli_source_binding=execution_cli_source_binding,
         )

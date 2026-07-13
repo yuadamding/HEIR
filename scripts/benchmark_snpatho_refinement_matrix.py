@@ -36,7 +36,7 @@ from heir.evaluation.deepbench import (
     deepbench_expression_metrics,
 )
 from heir.inference import PredictionBundle, validate_wrong_donor_prototype_filter
-from heir.utils import sha256_file
+from heir.utils import reject_output_input_collisions, sha256_file
 
 REPORT_SCHEMA = "heir.snpatho_refinement_matrix.v1"
 REFINEMENT_RUN_MANIFEST_SCHEMA = "heir.snpatho_refinement_run_manifest.v2"
@@ -540,6 +540,45 @@ def _load_current_runner(repository: Path) -> Any:
     return module
 
 
+def load_true_loo_molecular_folds(
+    repository: Path,
+    specifications: Sequence[str],
+    *,
+    required_samples: Sequence[str],
+) -> Mapping[str, Any]:
+    """Load the runner's target-specific fold map and recheck scorer identities."""
+
+    repository = repository.expanduser().resolve()
+    runner = _load_current_runner(repository)
+    folds = runner.load_true_loo_molecular_folds(
+        repository,
+        specifications,
+        required_samples=required_samples,
+    )
+    for sample, fold in folds.items():
+        native = _json_object(
+            fold.native_manifest,
+            "%s native true-LOO manifest" % sample,
+            schema=NATIVE_MANIFEST_SCHEMAS["r2"],
+        )
+        if _native_molecular_generation(native) != "r2":
+            raise ValueError("true-LOO native manifest must use molecular generation r2")
+        if native.get("latent_space_id") != fold.latent_space_id:
+            raise ValueError("true-LOO scorer latent identity differs for %s" % sample)
+        decoder = native.get("distilled_decoder")
+        if not isinstance(decoder, Mapping) or decoder.get("sha256") != fold.decoder_sha256:
+            raise ValueError("true-LOO scorer decoder identity differs for %s" % sample)
+        decoder_name = Path(str(decoder.get("external_path", ""))).expanduser()
+        decoder_path = (
+            decoder_name.resolve()
+            if decoder_name.is_absolute()
+            else (repository / decoder_name).resolve()
+        )
+        if decoder_path != fold.decoder or sha256_file(decoder_path) != fold.decoder_sha256:
+            raise ValueError("true-LOO scorer decoder file differs for %s" % sample)
+    return folds
+
+
 def _manifest_artifact_rows(
     value: object,
     *,
@@ -583,10 +622,11 @@ def validate_refinement_run_manifest(
     path: Path,
     *,
     repository: Path,
-    native_manifest_path: Path,
-    native_manifest: Mapping[str, Any],
+    native_manifest_path: Optional[Path],
+    native_manifest: Optional[Mapping[str, Any]],
     requests: Sequence[ArtifactRequest],
     artifact_root: Optional[Path] = None,
+    molecular_folds: Optional[Mapping[str, Any]] = None,
 ) -> RunManifestValidation:
     """Validate the exact run plan, every artifact hash, and recursive stage lineage."""
 
@@ -597,19 +637,98 @@ def validate_refinement_run_manifest(
         raise ValueError(
             "refinement run manifest schema is not %s" % REFINEMENT_RUN_MANIFEST_SCHEMA
         )
-    if payload.get("native_scanvi_manifest_sha256") != sha256_file(native_manifest_path):
-        raise ValueError("refinement run manifest is not bound to the native scANVI manifest")
-    molecular_generation = str(payload.get("molecular_generation", "r1"))
-    if molecular_generation != _native_molecular_generation(native_manifest):
-        raise ValueError("refinement run molecular generation differs from native scANVI")
-
     runner = _load_current_runner(repository)
+    fold_lookup = {} if molecular_folds is None else dict(molecular_folds)
+    molecular_generation = str(payload.get("molecular_generation", "r1"))
+    fold_native: Dict[str, Mapping[str, Any]] = {}
+    if fold_lookup:
+        if native_manifest_path is not None or native_manifest is not None:
+            raise ValueError("true-LOO scoring cannot also use one shared native manifest")
+        if molecular_generation != "r2" or set(fold_lookup) != set(runner.SAMPLES):
+            raise ValueError("refinement run true-LOO fold coverage is invalid")
+        for sample, fold in fold_lookup.items():
+            fold_native[sample] = _json_object(
+                fold.native_manifest,
+                "%s native true-LOO manifest" % sample,
+                schema=NATIVE_MANIFEST_SCHEMAS["r2"],
+            )
+        expected_bundle_sha256 = runner._canonical_sha256(
+            {sample: fold_lookup[sample].native_manifest_sha256 for sample in runner.SAMPLES}
+        )
+        if (
+            payload.get("native_scanvi_manifest_sha256") is not None
+            or payload.get("native_scanvi_fold_bundle_sha256") != expected_bundle_sha256
+            or payload.get("latent_space_id") is not None
+            or payload.get("latent_space_id_by_sample")
+            != {sample: fold_lookup[sample].latent_space_id for sample in runner.SAMPLES}
+        ):
+            raise ValueError("refinement run is not bound to the exact true-LOO fold map")
+        recorded_folds = payload.get("native_scanvi_fold_manifests")
+        if not isinstance(recorded_folds, Mapping) or set(recorded_folds) != set(fold_lookup):
+            raise ValueError("refinement run true-LOO fold manifest inventory is incomplete")
+        for sample, fold in fold_lookup.items():
+            recorded = recorded_folds[sample]
+            if not isinstance(recorded, Mapping) or any(
+                (
+                    recorded.get("held_out_sample") != sample,
+                    recorded.get("training_donors") != list(fold.training_donors),
+                    recorded.get("latent_space_id") != fold.latent_space_id,
+                    recorded.get("preparation_manifest_sha256") != fold.preparation_manifest_sha256,
+                    recorded.get("native_manifest_sha256") != fold.native_manifest_sha256,
+                    recorded.get("decoder_sha256") != fold.decoder_sha256,
+                )
+            ):
+                raise ValueError("refinement run true-LOO fold identity differs for %s" % sample)
+        claim_scope = payload.get("claim_scope")
+        required_reasons = {
+            "uninitialized_morphology_negative_control",
+            "live_student_e_step_negative_control",
+        }
+        if (
+            payload.get("negative_control") is not True
+            or not isinstance(claim_scope, Mapping)
+            or claim_scope.get("eligible_for_primary_performance_claims") is not False
+            or not required_reasons.issubset(set(claim_scope.get("reasons", ())))
+        ):
+            raise ValueError("true-LOO run manifest does not preserve negative-control claim scope")
+    else:
+        if native_manifest_path is None or native_manifest is None:
+            raise ValueError("shared native-manifest scoring inputs are absent")
+        if payload.get("native_scanvi_manifest_sha256") != sha256_file(native_manifest_path):
+            raise ValueError("refinement run manifest is not bound to the native scANVI manifest")
+        if molecular_generation != _native_molecular_generation(native_manifest):
+            raise ValueError("refinement run molecular generation differs from native scANVI")
+
     current_source = runner.refinement_run_source_identity(repository)
     recorded_source = payload.get("validation_recipe_source_identity")
     if not isinstance(recorded_source, Mapping) or recorded_source != current_source:
         raise ValueError(
             "refinement run validation-recipe source identity differs from current source"
         )
+    current_cli_source_binding = runner._heir_source_binding(
+        repository,
+        require_sources=True,
+    )
+    validation_cli_source_binding = payload.get(
+        "validation_cli_source_binding",
+        payload.get("cli_source_binding"),
+    )
+    if (
+        not isinstance(validation_cli_source_binding, Mapping)
+        or validation_cli_source_binding != current_cli_source_binding
+    ):
+        raise ValueError("refinement run validation CLI identity differs from current source")
+    execution_source_identity = payload.get("execution_source_identity")
+    execution_cli_source_binding = payload.get("cli_source_binding")
+    execution_source_captured = bool(
+        isinstance(execution_source_identity, Mapping)
+        and isinstance(execution_cli_source_binding, Mapping)
+    )
+    execution_source_continuous = bool(
+        execution_source_captured
+        and execution_source_identity == recorded_source
+        and execution_cli_source_binding == validation_cli_source_binding
+    )
     expected_stages = runner.build_plan(
         repository,
         samples=runner.SAMPLES,
@@ -617,10 +736,12 @@ def validate_refinement_run_manifest(
         controls=True,
         artifact_root=artifact_root,
         molecular_generation=molecular_generation,
+        molecular_folds=fold_lookup or None,
     )
     expected_plan = runner.full_matrix_plan_payload(
         expected_stages,
         molecular_generation=molecular_generation,
+        molecular_folds=fold_lookup or None,
     )
     if payload.get("plan_sha256") != runner._canonical_sha256(expected_plan):
         raise ValueError("refinement run manifest plan SHA-256 differs from the current exact plan")
@@ -633,10 +754,6 @@ def validate_refinement_run_manifest(
     if payload.get("stage_count") != len(rows):
         raise ValueError("refinement run manifest stage_count is inconsistent")
 
-    native_specimens = native_manifest.get("specimens")
-    decoder = native_manifest.get("distilled_decoder")
-    if not isinstance(native_specimens, Mapping) or not isinstance(decoder, Mapping):
-        raise ValueError("native scANVI manifest lacks recursive lineage artifacts")
     stages_by_key: Dict[Tuple[str, int, str], Mapping[str, Any]] = {}
     completed = 0
     adopted = 0
@@ -684,7 +801,7 @@ def validate_refinement_run_manifest(
         if runner_status == "completed":
             completed += 1
             expected_status = "completed_current_invocation"
-            expected_original = True
+            expected_original = execution_source_continuous
         elif runner_status == "skipped_valid":
             adopted += 1
             expected_status = "adopted_existing_output_after_current_validation"
@@ -695,6 +812,7 @@ def validate_refinement_run_manifest(
             raw.get("status") != expected_status
             or raw.get("current_recipe_validation") != "passed"
             or raw.get("original_execution_source_verified") is not expected_original
+            or raw.get("artifact_identity_capture") != runner.STAGE_ARTIFACT_IDENTITY_CAPTURE
         ):
             raise ValueError("refinement run stage execution semantics are inconsistent")
 
@@ -718,6 +836,13 @@ def validate_refinement_run_manifest(
         if recipe is not None:
             control_transform_verified.append(transform_verified)
 
+        stage_native = fold_native.get(expected.sample, native_manifest)
+        if not isinstance(stage_native, Mapping):
+            raise ValueError("native scANVI manifest is unavailable for %s" % expected.sample)
+        native_specimens = stage_native.get("specimens")
+        decoder = stage_native.get("distilled_decoder")
+        if not isinstance(native_specimens, Mapping) or not isinstance(decoder, Mapping):
+            raise ValueError("native scANVI manifest lacks recursive lineage artifacts")
         specimen = native_specimens.get(expected.sample)
         if not isinstance(specimen, Mapping):
             raise ValueError("native scANVI manifest lacks specimen %s" % expected.sample)
@@ -747,7 +872,7 @@ def validate_refinement_run_manifest(
     if not isinstance(execution, Mapping):
         raise ValueError("refinement run manifest execution summary must be an object")
     transform_verified = all(control_transform_verified) if control_transform_verified else True
-    original_verified = completed == len(rows)
+    original_verified = completed == len(rows) and execution_source_continuous
     execution_verified = original_verified and transform_verified
     if execution.get("stage_status_counts") != {
         "completed": completed,
@@ -756,8 +881,14 @@ def validate_refinement_run_manifest(
         raise ValueError("refinement run manifest execution counts are inconsistent")
     if (
         execution.get("posthoc_adoption_present") is not (adopted > 0)
+        or execution.get("execution_source_identity_captured_before_stage_1")
+        is not execution_source_captured
+        or execution.get("execution_source_identity_unchanged") is not execution_source_continuous
+        or execution.get("execution_cli_source_binding_unchanged")
+        is not execution_source_continuous
         or execution.get("original_execution_source_verified") is not original_verified
         or execution.get("execution_transform_hash_verified") is not transform_verified
+        or execution.get("stage_time_artifact_identities_complete") is not True
         or execution.get("execution_provenance_verified") is not execution_verified
         or execution.get("current_recipe_validation_complete") is not True
     ):
@@ -2730,7 +2861,7 @@ def evaluate_matrix(
     repository: Path,
     artifact_root: Path,
     truth_manifest_path: Path,
-    native_manifest_path: Path,
+    native_manifest_path: Optional[Path],
     evidence_manifest_path: Optional[Path] = None,
     samples: Sequence[str],
     seeds: Sequence[int],
@@ -2744,13 +2875,23 @@ def evaluate_matrix(
     minimum_nuclei: int = 3,
     run_manifest_path: Optional[Path] = None,
     practical_delta_threshold: float = DEFAULT_PRACTICAL_DELTA_THRESHOLD,
+    molecular_folds: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate every available requested artifact and retain all blockers."""
 
     samples = tuple(dict.fromkeys(str(value) for value in samples))
     seeds = tuple(dict.fromkeys(int(value) for value in seeds))
-    controls = tuple(
+    requested_controls = tuple(
         dict.fromkeys(LEGACY_CONTROL_ALIASES.get(str(value), str(value)) for value in controls)
+    )
+    fold_lookup = {} if molecular_folds is None else dict(molecular_folds)
+    unsupported_true_loo_controls = (
+        ("wrong_prototype_bank",)
+        if fold_lookup and "wrong_prototype_bank" in requested_controls
+        else ()
+    )
+    controls = tuple(
+        control for control in requested_controls if control not in unsupported_true_loo_controls
     )
     control_seeds = tuple(dict.fromkeys(int(value) for value in control_seeds))
     if sample_sites is None:
@@ -2773,20 +2914,69 @@ def evaluate_matrix(
     repository = repository.expanduser().resolve()
     artifact_root = artifact_root.expanduser().resolve()
     truth_manifest_path = truth_manifest_path.expanduser().resolve()
-    native_manifest_path = native_manifest_path.expanduser().resolve()
     truth_manifest = _json_object(truth_manifest_path, "frozen truth manifest")
-    native_manifest = _json_object(native_manifest_path, "native scANVI manifest")
-    molecular_generation = _native_molecular_generation(native_manifest)
+    native_manifest: Optional[Mapping[str, Any]] = None
+    native_by_sample: Dict[str, tuple[Path, Mapping[str, Any]]] = {}
+    if fold_lookup:
+        if native_manifest_path is not None:
+            raise ValueError("true-LOO fold scoring cannot also use --native-manifest")
+        if set(fold_lookup) != set(samples):
+            raise ValueError("true-LOO scorer fold map must exactly cover requested samples")
+        for sample in samples:
+            fold = fold_lookup[sample]
+            if fold.sample != sample or sample in set(fold.training_donors):
+                raise ValueError("true-LOO scorer fold donor scope is invalid for %s" % sample)
+            native_path = fold.native_manifest.expanduser().resolve()
+            if sha256_file(native_path) != fold.native_manifest_sha256:
+                raise ValueError("true-LOO native manifest hash differs for %s" % sample)
+            native = _json_object(
+                native_path,
+                "%s native true-LOO manifest" % sample,
+                schema=NATIVE_MANIFEST_SCHEMAS["r2"],
+            )
+            if native.get("latent_space_id") != fold.latent_space_id:
+                raise ValueError("true-LOO native latent identity differs for %s" % sample)
+            decoder = native.get("distilled_decoder")
+            if not isinstance(decoder, Mapping) or decoder.get("sha256") != fold.decoder_sha256:
+                raise ValueError("true-LOO native decoder identity differs for %s" % sample)
+            decoder_name = Path(str(decoder.get("external_path", ""))).expanduser()
+            decoder_path = (
+                decoder_name.resolve()
+                if decoder_name.is_absolute()
+                else (repository / decoder_name).resolve()
+            )
+            if decoder_path != fold.decoder or sha256_file(decoder_path) != fold.decoder_sha256:
+                raise ValueError("true-LOO native decoder file differs for %s" % sample)
+            native_by_sample[sample] = (native_path, native)
+        molecular_generation = "r2"
+    else:
+        if native_manifest_path is None:
+            raise ValueError("native scANVI manifest is required without true-LOO folds")
+        native_manifest_path = native_manifest_path.expanduser().resolve()
+        native_manifest = _json_object(native_manifest_path, "native scANVI manifest")
+        molecular_generation = _native_molecular_generation(native_manifest)
+        native_by_sample = {sample: (native_manifest_path, native_manifest) for sample in samples}
     blockers = []
+    if unsupported_true_loo_controls:
+        blockers.append(
+            _blocker(
+                "requested_control_unavailable_cross_latent_space",
+                "wrong-prototype-bank controls were requested, but independent true-LOO "
+                "folds have distinct latent spaces and no target-fold-compatible wrong banks "
+                "were produced; the remaining matrix is scored but the requested matrix is "
+                "incomplete",
+            )
+        )
     sample_inputs: Dict[str, SampleInputs] = {}
     for sample in samples:
         try:
+            sample_native_path, sample_native = native_by_sample[sample]
             sample_inputs[sample] = load_sample_inputs(
                 sample=sample,
                 truth_manifest_path=truth_manifest_path,
                 truth_manifest=truth_manifest,
-                native_manifest_path=native_manifest_path,
-                native_manifest=native_manifest,
+                native_manifest_path=sample_native_path,
+                native_manifest=sample_native,
                 repository=repository,
             )
         except (OSError, TypeError, ValueError) as error:
@@ -2848,6 +3038,7 @@ def evaluate_matrix(
                 native_manifest=native_manifest,
                 requests=requests,
                 artifact_root=artifact_root,
+                molecular_folds=fold_lookup or None,
             )
         except (OSError, TypeError, ValueError) as error:
             execution_provenance_blockers.append(
@@ -2925,6 +3116,16 @@ def evaluate_matrix(
         sample_sites=sample_sites,
         wrong_donor_pairings=comparison_wrong_donor_pairings,
     )
+    if fold_lookup:
+        wrong_donor_summary = {
+            **wrong_donor_summary,
+            "coverage_complete": False,
+            "availability": "unavailable_cross_latent_space",
+            "unavailable_reason": (
+                "Independent true-LOO folds have distinct latent spaces. No wrong-prototype "
+                "bank is valid unless it is regenerated under the target fold transform."
+            ),
+        }
     check_statuses = [str(check["status"]) for check in checks]
     if blockers or "blocked" in check_statuses:
         strict_status = "blocked"
@@ -2959,7 +3160,11 @@ def evaluate_matrix(
             "native_scanvi_reference": {
                 "path": str(value.reference_path),
                 "sha256": value.reference_sha256,
-                "hash_validation": "matched_native_scanvi_manifest",
+                "hash_validation": (
+                    "matched_target_specific_true_loo_native_manifest"
+                    if fold_lookup
+                    else "matched_native_scanvi_manifest"
+                ),
             },
         }
         for sample, value in sample_inputs.items()
@@ -2998,14 +3203,47 @@ def evaluate_matrix(
         "execution_transform_hash_verified": execution_transform_hash_verified,
         "strict_ordering_status": strict_status,
         "practical_delta_threshold": practical_delta_threshold,
-        "analysis_role": "native_scanvi_published_integrated_annotation_sensitivity",
+        "analysis_role": (
+            "true_leave_one_donor_out_uninitialized_live_e_step_negative_control"
+            if fold_lookup
+            else "native_scanvi_published_integrated_annotation_sensitivity"
+        ),
+        "negative_control": bool(fold_lookup),
+        "claim_scope": (
+            {
+                "eligible_for_primary_performance_claims": False,
+                "reasons": [
+                    "uninitialized_morphology_negative_control",
+                    "live_student_e_step_negative_control",
+                ],
+            }
+            if fold_lookup
+            else None
+        ),
         "molecular_generation": molecular_generation,
-        "annotation_provenance": native_manifest.get("annotation_provenance"),
+        "annotation_provenance": (
+            {sample: native_by_sample[sample][1].get("annotation_provenance") for sample in samples}
+            if fold_lookup
+            else native_manifest.get("annotation_provenance")
+        ),
         "request": {
             "samples": list(samples),
             "seeds": list(seeds),
             "trajectory_seed": trajectory_seed,
             "controls": list(controls),
+            "requested_controls": list(requested_controls),
+            "unsupported_controls": list(unsupported_true_loo_controls),
+            "control_coverage": {
+                "wrong_prototype_bank": {
+                    "available": not fold_lookup,
+                    "coverage_complete": not fold_lookup,
+                    "reason": (
+                        "target-fold-compatible wrong banks were not produced"
+                        if fold_lookup
+                        else None
+                    ),
+                }
+            },
             "control_seeds": list(control_seeds),
             "practical_delta_threshold": practical_delta_threshold,
             "wrong_prototype_bank_pairings": [
@@ -3042,10 +3280,24 @@ def evaluate_matrix(
                 "sha256": sha256_file(truth_manifest_path),
             },
             "native_scanvi": {
-                "path": str(native_manifest_path),
-                "sha256": sha256_file(native_manifest_path),
+                "path": None if fold_lookup else str(native_manifest_path),
+                "sha256": None if fold_lookup else sha256_file(native_manifest_path),
                 "molecular_generation": molecular_generation,
             },
+            "native_scanvi_folds": (
+                {
+                    sample: {
+                        "path": str(fold_lookup[sample].native_manifest),
+                        "sha256": fold_lookup[sample].native_manifest_sha256,
+                        "decoder": str(fold_lookup[sample].decoder),
+                        "decoder_sha256": fold_lookup[sample].decoder_sha256,
+                        "latent_space_id": fold_lookup[sample].latent_space_id,
+                    }
+                    for sample in samples
+                }
+                if fold_lookup
+                else None
+            ),
             "additional_evidence": evidence_manifest_provenance,
             "refinement_run": (
                 None
@@ -3348,18 +3600,91 @@ def _atomic_write_texts(outputs: Mapping[Path, str]) -> None:
                 pass
 
 
+def _declared_path_values(value: object, *, bases: Sequence[Path]) -> Tuple[Path, ...]:
+    """Collect path-valued fields from a validated report or one of its manifests."""
+
+    paths = []
+    semantic_path_keys = {
+        "cli_source",
+        "decoder",
+        "gene_panel",
+        "latent_reference",
+        "module_entrypoint",
+        "molecular_producer",
+        "native_scanvi_manifest",
+        "panel_reference",
+        "predictions",
+        "prototypes",
+        "python_executable",
+        "rare_complete_prototypes",
+        "refined_prototype",
+        "refinement_audit",
+        "residual_geometry",
+        "source_root",
+        "telemetry",
+        "truth",
+    }
+
+    def visit(node: object) -> None:
+        if isinstance(node, Mapping):
+            for raw_key, child in node.items():
+                key = str(raw_key)
+                if (
+                    (key == "path" or key.endswith("_path") or key in semantic_path_keys)
+                    and isinstance(child, str)
+                    and child.strip()
+                ):
+                    candidate = Path(child).expanduser()
+                    if candidate.is_absolute():
+                        paths.append(candidate.resolve())
+                    else:
+                        paths.extend((base / candidate).resolve() for base in bases)
+                visit(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return tuple(dict.fromkeys(paths))
+
+
+def _bound_input_paths(
+    report: Mapping[str, Any],
+    *,
+    repository: Path,
+    manifest_paths: Sequence[Path],
+) -> Tuple[Path, ...]:
+    """Inventory every report path plus paths declared by its primary manifests."""
+
+    repository = repository.expanduser().resolve()
+    inputs = list(_declared_path_values(report, bases=(repository,)))
+    for raw_path in manifest_paths:
+        path = raw_path.expanduser().resolve()
+        inputs.append(path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        inputs.extend(_declared_path_values(payload, bases=(path.parent, repository)))
+    return tuple(dict.fromkeys(inputs))
+
+
 def write_report(
     report: Mapping[str, Any],
     *,
     json_output: Path,
     tsv_output: Path,
     markdown_output: Path,
+    input_paths: Sequence[Path],
 ) -> None:
     destinations = tuple(
         path.expanduser().resolve() for path in (json_output, tsv_output, markdown_output)
     )
-    if len(set(destinations)) != 3:
-        raise ValueError("JSON, TSV, and Markdown outputs must be distinct")
+    reject_output_input_collisions(
+        destinations,
+        input_paths,
+        label="snPATHO refinement-matrix report",
+    )
     _atomic_write_texts(
         {
             destinations[0]: json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -3397,6 +3722,16 @@ def _arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
         "--native-manifest",
         type=Path,
         default=None,
+    )
+    parser.add_argument(
+        "--molecular-fold-preparation-manifest",
+        action="append",
+        default=[],
+        metavar="TARGET=PATH",
+        help=(
+            "repeat once per requested target to score a true-LOO runner manifest with "
+            "target-specific native manifests, decoders, and latent spaces"
+        ),
     )
     parser.add_argument(
         "--run-manifest",
@@ -3456,16 +3791,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.artifact_root is None
         else args.artifact_root
     )
-    native_manifest = (
-        repository
-        / (
-            "reports/snpatho_scanvi_r1_manifest.json"
-            if args.molecular_generation == "r1"
-            else "artifacts/snpatho/r2_scanvi/native_manifest.json"
-        )
-        if args.native_manifest is None
-        else args.native_manifest
-    )
     run_manifest = (
         repository
         / (
@@ -3478,6 +3803,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     samples = tuple(args.sample) if args.sample else DEFAULT_SAMPLES
     seeds = tuple(args.seed) if args.seed else DEFAULT_SEEDS
+    molecular_folds = (
+        load_true_loo_molecular_folds(
+            repository,
+            args.molecular_fold_preparation_manifest,
+            required_samples=samples,
+        )
+        if args.molecular_fold_preparation_manifest
+        else None
+    )
+    if molecular_folds is not None and args.molecular_generation != "r2":
+        raise ValueError("true-LOO molecular fold manifests require --molecular-generation r2")
+    if molecular_folds is not None and args.native_manifest is not None:
+        raise ValueError("true-LOO molecular folds cannot be combined with --native-manifest")
+    native_manifest = (
+        None
+        if molecular_folds is not None
+        else (
+            repository
+            / (
+                "reports/snpatho_scanvi_r1_manifest.json"
+                if args.molecular_generation == "r1"
+                else "artifacts/snpatho/r2_scanvi/native_manifest.json"
+            )
+            if args.native_manifest is None
+            else args.native_manifest
+        )
+    )
     controls = tuple(args.control) if args.control else DEFAULT_CONTROLS
     control_seeds = (
         tuple(args.control_seed)
@@ -3500,12 +3852,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         minimum_nuclei=args.minimum_nuclei,
         run_manifest_path=run_manifest,
         practical_delta_threshold=args.practical_delta_threshold,
+        molecular_folds=molecular_folds,
     )
+    manifest_paths = [args.truth_manifest, run_manifest]
+    if native_manifest is not None:
+        manifest_paths.append(native_manifest)
+    if args.evidence_manifest is not None:
+        manifest_paths.append(args.evidence_manifest)
+    if molecular_folds is not None:
+        for fold in molecular_folds.values():
+            manifest_paths.extend((fold.preparation_manifest, fold.native_manifest))
+    guard_controls = tuple(
+        control
+        for control in controls
+        if not (
+            molecular_folds is not None
+            and LEGACY_CONTROL_ALIASES.get(control, control) == "wrong_prototype_bank"
+        )
+    )
+    requested_input_paths = []
+    for request in build_requests(
+        artifact_root=artifact_root,
+        samples=samples,
+        seeds=seeds,
+        trajectory_seed=args.trajectory_seed,
+        controls=guard_controls,
+        control_seeds=control_seeds,
+        wrong_donor_target=args.wrong_donor_target,
+        wrong_donor_source=args.wrong_donor_source,
+    ):
+        requested_input_paths.extend((request.prediction, request.telemetry))
+        if request.prototype_source is not None:
+            requested_input_paths.append(request.prototype_source)
     write_report(
         report,
         json_output=args.json_output,
         tsv_output=args.tsv_output,
         markdown_output=args.markdown_output,
+        input_paths=(
+            *_bound_input_paths(
+                report,
+                repository=repository,
+                manifest_paths=manifest_paths,
+            ),
+            *requested_input_paths,
+        ),
     )
     print(
         json.dumps(

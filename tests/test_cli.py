@@ -14,22 +14,40 @@ import pytest
 import torch
 from scipy import sparse
 
+from heir import cli as cli_module
 from heir.cli import (
+    _assert_file_records_unchanged,
+    _canonical_parent_exclusion_reasons,
+    _freeze_file_records,
+    _freeze_transitive_batch_source_records,
     _load_refinement_views,
     _log_normalize,
+    _reject_output_input_collisions,
     _sha256,
+    _structural_model_config,
+    _upstream_exclusion_reasons,
+    _validate_refinement_parent_validation_scope,
     _validate_residual_geometry_training_provenance,
     _wrong_donor_ontology_intersection,
     build_parser,
     main,
 )
-from heir.data import HistologyBag, PrototypeSet, RNAReference
+from heir.data import HistologyBag, PrototypeSet, RNAReference, SpatialTruthArtifact
 from heir.data.manifest import MANIFEST_COLUMNS, ManifestRecord
 from heir.inference import PredictionBundle
+from heir.losses import unbalanced_sinkhorn
 from heir.models import HEIRConfig, HEIRModel
 from heir.models.rna import RNAVAE, RNAVAEConfig
 from heir.prior import fit_rna_residual_geometry
-from heir.training import HEIRTrainingBatch, TrainingStage
+from heir.training import (
+    HEIRTrainingBatch,
+    MolecularEStepArtifact,
+    TrainingStage,
+    array_content_sha256,
+    frozen_transport_telemetry,
+    ordered_identity_sha256,
+    recompute_initialization_validation,
+)
 from heir.uncertainty import MahalanobisOOD
 
 
@@ -55,6 +73,35 @@ def test_refine_cli_defaults_use_two_round_trust_and_fixed_prior() -> None:
     assert args.objective_relative_stability_tolerance == pytest.approx(0.01)
     assert args.objective_stability_tolerance is None
     assert not args.save_round_checkpoints
+    assert args.teacher_ema == 0.0
+    assert not args.require_scale_view_agreement
+    assert not args.live_student_e_step_negative_control
+
+
+def test_strict_refinement_accepts_exact_parent_validation_lineage() -> None:
+    _validate_refinement_parent_validation_scope(
+        validation_donors=("target",),
+        checkpoint_donors=("bridge", "target"),
+        parent_validation_donors=("target",),
+        strict_fixed_artifact=True,
+        allow_split_overlap=False,
+    )
+    with pytest.raises(ValueError, match="exact parent validation set"):
+        _validate_refinement_parent_validation_scope(
+            validation_donors=("target",),
+            checkpoint_donors=("bridge", "target"),
+            parent_validation_donors=("different",),
+            strict_fixed_artifact=True,
+            allow_split_overlap=False,
+        )
+    with pytest.raises(ValueError, match="trained on validation donors"):
+        _validate_refinement_parent_validation_scope(
+            validation_donors=("target",),
+            checkpoint_donors=("bridge", "target"),
+            parent_validation_donors=(),
+            strict_fixed_artifact=False,
+            allow_split_overlap=False,
+        )
 
 
 def test_train_cli_accepts_frozen_rna_residual_geometry() -> None:
@@ -74,6 +121,217 @@ def test_train_cli_accepts_frozen_rna_residual_geometry() -> None:
     assert args.residual_geometry == "rna_geometry.npz"
     assert not args.finetune_residual_basis
     assert not args.unsafe_allow_legacy_residual_geometry_provenance
+    assert args.graph_mode == "off"
+    assert not args.uninitialized_morphology_negative_control
+    assert not args.live_student_e_step_negative_control
+
+
+def test_upstream_exclusion_metadata_is_canonical_and_propagated() -> None:
+    assert _upstream_exclusion_reasons({}, "rna") == []
+    assert _upstream_exclusion_reasons(
+        {
+            "excluded_from_primary_claims": True,
+            "exclusion_reasons": ["sensitivity"],
+        },
+        "rna",
+    ) == ["rna:sensitivity"]
+    for malformed in (
+        {"excluded_from_primary_claims": 1, "exclusion_reasons": []},
+        {"excluded_from_primary_claims": True, "exclusion_reasons": []},
+        {"excluded_from_primary_claims": False, "exclusion_reasons": ["hidden"]},
+        {"excluded_from_primary_claims": True, "exclusion_reasons": "hidden"},
+    ):
+        with pytest.raises(ValueError, match="exclusion"):
+            _upstream_exclusion_reasons(malformed, "rna")
+
+
+def test_frozen_input_record_rejects_mutation_after_load(tmp_path: Path) -> None:
+    source = tmp_path / "batch.npz"
+    source.write_bytes(b"loaded bytes")
+    records = _freeze_file_records([str(source)], "test batch")
+    _assert_file_records_unchanged(records, "test batch")
+
+    source.write_bytes(b"mutated bytes")
+    with pytest.raises(ValueError, match="changed after it was loaded"):
+        _assert_file_records_unchanged(records, "test batch")
+
+
+def test_refinement_parent_exclusions_are_canonical_and_preserved() -> None:
+    assert _canonical_parent_exclusion_reasons(
+        {
+            "excluded_from_primary_claims": True,
+            "exclusion_reasons": ["negative_control"],
+        }
+    ) == ("negative_control",)
+    assert _canonical_parent_exclusion_reasons({}) == ()
+    for metadata in (
+        {"excluded_from_primary_claims": 0, "exclusion_reasons": []},
+        {"excluded_from_primary_claims": True, "exclusion_reasons": []},
+        {"excluded_from_primary_claims": False, "exclusion_reasons": ["hidden"]},
+        {"excluded_from_primary_claims": True, "exclusion_reasons": "negative_control"},
+    ):
+        with pytest.raises(ValueError, match="primary-claim exclusion"):
+            _canonical_parent_exclusion_reasons(metadata)
+
+
+def test_transitive_batch_sources_are_frozen_and_rechecked(tmp_path: Path) -> None:
+    source = tmp_path / "source.npz"
+    source.write_bytes(b"source bytes")
+    batch = HEIRTrainingBatch(
+        morphology=torch.zeros((2, 3)),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        edge_weight=None,
+        prototype_means=torch.zeros((2, 2)),
+        prototype_variances=torch.ones((2, 2)),
+        prototype_types=torch.tensor([0, 1]),
+        prototype_weights=torch.tensor([0.5, 0.5]),
+        target_composition=torch.tensor([0.5, 0.5]),
+        target_pseudobulk=torch.zeros(2),
+        source_artifacts=(str(source),),
+        source_sha256=(_sha256(str(source)),),
+        source_roles=("sample_assay",),
+    )
+    records = _freeze_transitive_batch_source_records([batch], "test transitive input")
+    _assert_file_records_unchanged(records, "test transitive input")
+    source.write_bytes(b"mutated")
+    with pytest.raises(ValueError, match="changed after it was loaded"):
+        _assert_file_records_unchanged(records, "test transitive input")
+
+
+def test_output_paths_cannot_overwrite_direct_or_transitive_inputs(tmp_path: Path) -> None:
+    direct = tmp_path / "run" / "heir.pt"
+    direct.parent.mkdir()
+    direct.write_bytes(b"parent")
+    records = _freeze_file_records([str(direct)], "parent checkpoint")
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        _reject_output_input_collisions([direct], records, label="training")
+    hardlink = tmp_path / "hardlink-to-parent.pt"
+    hardlink.hardlink_to(direct)
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        _reject_output_input_collisions([hardlink], records, label="training")
+
+    transitive = tmp_path / "run" / "prototypes" / "donor__sample.npz"
+    transitive.parent.mkdir()
+    transitive.write_bytes(b"prototype")
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        _reject_output_input_collisions(
+            [transitive],
+            (),
+            transitive_input_paths=[str(transitive)],
+            label="refinement",
+        )
+
+    archive = tmp_path / "molecular.tar.gz"
+    archive.write_bytes(b"archive")
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        _reject_output_input_collisions(
+            [archive],
+            (),
+            transitive_input_paths=[str(archive) + "::matrix.mtx.gz"],
+            label="refinement",
+        )
+
+    input_directory = tmp_path / "spaceranger-outs"
+    input_directory.mkdir()
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        _reject_output_input_collisions(
+            [input_directory / "filtered_feature_bc_matrix.h5"],
+            (),
+            transitive_input_paths=[str(input_directory)],
+            label="refinement",
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "output_name"),
+    [("train", "heir.pt"), ("refine", "heir_refined.pt")],
+)
+def test_training_commands_reject_in_place_checkpoint_overwrite(
+    tmp_path: Path, command: str, output_name: str, capsys
+) -> None:
+    destination = tmp_path / command
+    destination.mkdir()
+    checkpoint = destination / output_name
+    checkpoint.write_bytes(b"bound input checkpoint")
+    batch = tmp_path / (command + "_batch.npz")
+    batch.write_bytes(b"not parsed because collision fails first")
+    arguments = [
+        command,
+        "--checkpoint" if command == "refine" else "--initial-heir-checkpoint",
+        str(checkpoint),
+        "--train-batch",
+        str(batch),
+        "--validation-batch",
+        str(batch),
+        "--output",
+        str(destination),
+    ]
+    if command == "train":
+        receipt = tmp_path / "receipt.json"
+        receipt.write_text("{}", encoding="utf-8")
+        arguments.extend(["--initialization-receipt", str(receipt)])
+    with pytest.raises(SystemExit):
+        main(arguments)
+    assert "output would overwrite a bound input" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("command", "output_flag"),
+    [
+        ("evaluate", "--output"),
+        ("evaluate-spatial", "--output"),
+        ("evaluate-spatial", "--aggregates-output"),
+    ],
+)
+def test_legacy_evaluators_reject_output_input_collisions(
+    tmp_path: Path, command: str, output_flag: str, capsys
+) -> None:
+    predictions = tmp_path / "predictions.npz"
+    truth = tmp_path / "truth.npz"
+    predictions.write_bytes(b"collision checked before prediction parsing")
+    truth.write_bytes(b"collision checked before truth parsing")
+    with pytest.raises(SystemExit):
+        main(
+            [
+                command,
+                "--predictions",
+                str(predictions),
+                "--truth",
+                str(truth),
+                output_flag,
+                str(predictions),
+            ]
+        )
+    assert "output would overwrite a bound input" in capsys.readouterr().err
+
+
+def test_initialization_compatibility_retains_unexposed_checkpoint_gate_semantics() -> None:
+    base = HEIRConfig(
+        morphology_dim=4,
+        num_cell_types=2,
+        expression_dim=4,
+        latent_dim=2,
+        graph_hidden_dim=4,
+        graph_output_dim=4,
+        graph_layers=1,
+        graph_mode="distance_only",
+        graph_context_gate_init=0.0,
+        trunk_hidden_dims=(4,),
+        decoder_hidden_dims=(4,),
+    )
+    historical = replace(
+        base,
+        graph_context_gate_init=1.0,
+        residual_type_strategy="detached_max_hard",
+        residual_type_concentration_threshold=0.7,
+        residual_type_concentration_temperature=0.1,
+    )
+    structurally_different = replace(base, graph_mode="off")
+    different_residual_rank = replace(base, residual_rank=1)
+
+    assert _structural_model_config(base) == _structural_model_config(historical)
+    assert _structural_model_config(base) != _structural_model_config(structurally_different)
+    assert _structural_model_config(base) != _structural_model_config(different_residual_rank)
 
 
 def test_predict_cli_exposes_prespecified_negative_controls() -> None:
@@ -103,6 +361,67 @@ def test_predict_cli_exposes_prespecified_negative_controls() -> None:
     assert args.graph_node_shuffle
     assert args.wrong_donor_control
     assert not args.no_graph
+
+
+def test_predict_rejects_output_aliases_before_loading_inputs(tmp_path: Path) -> None:
+    inputs = {
+        "checkpoint": tmp_path / "checkpoint.pt",
+        "histology": tmp_path / "histology.npz",
+        "prototypes": tmp_path / "prototypes.npz",
+        "genes": tmp_path / "genes.tsv",
+        "program": tmp_path / "programs.npz",
+        "ood": tmp_path / "ood.npz",
+    }
+    for role, path in inputs.items():
+        path.write_bytes(("unparsed-" + role).encode("utf-8"))
+    base = [
+        "predict",
+        "--checkpoint",
+        str(inputs["checkpoint"]),
+        "--histology",
+        str(inputs["histology"]),
+        "--prototypes",
+        str(inputs["prototypes"]),
+        "--genes",
+        str(inputs["genes"]),
+        "--program-artifact",
+        str(inputs["program"]),
+        "--ood-artifact",
+        str(inputs["ood"]),
+        "--donor-id",
+        "target",
+    ]
+    original = {role: path.read_bytes() for role, path in inputs.items()}
+    for role, path in inputs.items():
+        parsed = build_parser().parse_args(
+            [*base, "--output", str(path), "--telemetry-output", str(tmp_path / (role + ".json"))]
+        )
+        with pytest.raises(ValueError, match="output would overwrite a bound input"):
+            parsed.func(parsed)
+    parsed = build_parser().parse_args(
+        [
+            *base,
+            "--output",
+            str(tmp_path / "prediction.npz"),
+            "--telemetry-output",
+            str(inputs["genes"]),
+        ]
+    )
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        parsed.func(parsed)
+    shared_output = tmp_path / "shared-output.npz"
+    parsed = build_parser().parse_args(
+        [
+            *base,
+            "--output",
+            str(shared_output),
+            "--telemetry-output",
+            str(shared_output),
+        ]
+    )
+    with pytest.raises(ValueError, match="output paths collide with each other"):
+        parsed.func(parsed)
+    assert {role: path.read_bytes() for role, path in inputs.items()} == original
 
 
 def test_wrong_donor_ontology_intersection_is_deterministic_and_requires_support() -> None:
@@ -239,6 +558,278 @@ def _write_input_artifacts(tmp_path):
     return histology_path, reference_path, prototypes_path, genes_path
 
 
+def test_predict_rechecks_frozen_inputs_before_publication(tmp_path: Path, monkeypatch) -> None:
+    histology, _, prototypes, genes = _write_input_artifacts(tmp_path)
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=4,
+            num_cell_types=2,
+            expression_dim=4,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=4,
+            graph_layers=1,
+            graph_mode="off",
+            trunk_hidden_dims=(4,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+        )
+    )
+    checkpoint = model.checkpoint()
+    checkpoint["metadata"] = {
+        "schema": "heir.test.prediction_input_freeze.v1",
+        "type_names": ["A", "B"],
+        "gene_names": ["g1", "g2", "g3", "g4"],
+        "latent_space_id": "test-latent-v1",
+        "feature_space_id": "pathology-encoder-v1",
+        "expression_space_id": "log1p-cpm-10000-v1",
+    }
+    checkpoint_path = tmp_path / "heir.pt"
+    torch.save(checkpoint, checkpoint_path)
+    original_predict_cells = cli_module.predict_cells
+
+    def mutate_gene_panel_after_inference(*args, **kwargs):
+        prediction = original_predict_cells(*args, **kwargs)
+        genes.write_text("g1\ng2\ng3\ng4\nchanged-after-load\n", encoding="utf-8")
+        return prediction
+
+    monkeypatch.setattr(cli_module, "predict_cells", mutate_gene_panel_after_inference)
+    output = tmp_path / "prediction.npz"
+    parsed = build_parser().parse_args(
+        [
+            "predict",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--histology",
+            str(histology),
+            "--prototypes",
+            str(prototypes),
+            "--genes",
+            str(genes),
+            "--output",
+            str(output),
+            "--donor-id",
+            "donor1",
+            "--latent-samples",
+            "1",
+            "--device",
+            "cpu",
+        ]
+    )
+    with pytest.raises(ValueError, match="prediction input changed after it was loaded"):
+        parsed.func(parsed)
+    assert not output.exists()
+
+
+def _write_test_initialization_receipt(tmp_path, teacher) -> Path:
+    torch.manual_seed(7)
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=4,
+            num_cell_types=2,
+            expression_dim=2,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=3,
+            graph_layers=1,
+            graph_mode="off",
+            trunk_hidden_dims=(5,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+        )
+    ).eval()
+    with torch.no_grad():
+        trunk = model.trunk[0]
+        trunk.weight.zero_()
+        trunk.weight[:4, :4].copy_(torch.eye(4))
+        trunk.bias.zero_()
+        model.trunk[1].weight.fill_(1.0)
+        model.trunk[1].bias.zero_()
+        model.fine_type_head.weight.copy_(
+            torch.tensor([[-5.0, 5.0, 0.0, 0.0, 0.0], [5.0, -5.0, 0.0, 0.0, 0.0]])
+        )
+        model.fine_type_head.bias.zero_()
+    nucleus_ids = np.asarray(["e0", "e1", "e2", "e3"])
+    donor_ids = np.asarray(["donor1"] * 4)
+    labels = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    morphology = np.asarray(
+        [[-2.0, 2.0, 0.0, 0.0]] * 2 + [[2.0, -2.0, 0.0, 0.0]] * 2,
+        dtype=np.float32,
+    )
+    target_latent = np.asarray([[-1.0, 0.0]] * 2 + [[1.0, 0.0]] * 2, dtype=np.float32)
+    with torch.no_grad():
+        embedding, _, _ = model.encode_frozen_morphology(torch.from_numpy(morphology))
+        direction = embedding[2] - embedding[0]
+        latent_weight = 2.0 * direction / direction.square().sum()
+        model.prototype_query_head.weight.zero_()
+        model.prototype_query_head.bias.zero_()
+        model.prototype_query_head.weight[0].copy_(latent_weight)
+        model.prototype_query_head.bias[0].copy_(-1.0 - torch.dot(latent_weight, embedding[0]))
+    checkpoint_payload = model.checkpoint()
+    checkpoint_payload["metadata"] = {
+        "type_names": ["A", "B"],
+        "training_donors": ["development-donor"],
+        "feature_space_id": "pathology-encoder-v1",
+        "latent_space_id": "test-latent-v1",
+        "excluded_from_primary_claims": False,
+        "exclusion_reasons": [],
+    }
+    torch.save(checkpoint_payload, teacher)
+    label_source = tmp_path / "independent_labels.npz"
+    np.savez_compressed(
+        label_source,
+        schema=np.asarray("heir.independent_initialization_labels.v1"),
+        nucleus_ids=nucleus_ids,
+        donor_ids=donor_ids,
+        type_labels=labels,
+        type_names=np.asarray(["A", "B"]),
+        independent_of_checkpoint=np.asarray(True),
+    )
+    latent_source = tmp_path / "registered_latent.npz"
+    np.savez_compressed(
+        latent_source,
+        schema=np.asarray("heir.registered_image_latent_targets.v1"),
+        nucleus_ids=nucleus_ids,
+        target_latent=target_latent,
+        latent_space_id=np.asarray("test-latent-v1"),
+        independent_of_checkpoint=np.asarray(True),
+    )
+    evidence_artifact = tmp_path / "initialization_evidence.npz"
+    np.savez_compressed(
+        evidence_artifact,
+        morphology=morphology,
+        edge_index=np.empty((2, 0), dtype=np.int64),
+        nucleus_ids=nucleus_ids,
+        donor_ids=donor_ids,
+        type_labels=labels,
+        type_names=np.asarray(["A", "B"]),
+        target_latent=target_latent,
+        feature_space_id=np.asarray("pathology-encoder-v1"),
+        latent_space_id=np.asarray("test-latent-v1"),
+        label_source_sha256=np.asarray(_sha256(str(label_source))),
+        latent_target_source_sha256=np.asarray(_sha256(str(latent_source))),
+        labels_independent_of_checkpoint=np.asarray(True),
+        latent_targets_independent_of_checkpoint=np.asarray(True),
+    )
+    bindings = {
+        "evidence_artifact": {
+            "path": str(evidence_artifact),
+            "sha256": _sha256(str(evidence_artifact)),
+        },
+        "label_source": {"path": str(label_source), "sha256": _sha256(str(label_source))},
+        "latent_target_source": {
+            "path": str(latent_source),
+            "sha256": _sha256(str(latent_source)),
+        },
+    }
+    seeds = [17, 41, 89]
+    thresholds = {
+        "minimum_macro_f1": 0.65,
+        "minimum_image_shuffle_macro_f1_delta": 0.05,
+        "minimum_latent_cosine": 0.0,
+        "minimum_image_shuffle_latent_cosine_delta": 0.01,
+        "maximum_latent_rmse": 1.0,
+        "maximum_ece": 0.10,
+        "maximum_brier": 0.25,
+        "minimum_predicted_class_occupancy_fraction": 0.75,
+        "minimum_per_type_support": 2,
+    }
+    plan = tmp_path / "initialization_plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "schema": "heir.initialization_validation_plan.v1",
+                "status": "ready",
+                "checkpoint": {
+                    "path": str(teacher),
+                    "sha256": hashlib.sha256(teacher.read_bytes()).hexdigest(),
+                },
+                "evaluation_artifact": bindings["evidence_artifact"],
+                "label_source": bindings["label_source"],
+                "latent_target_source": bindings["latent_target_source"],
+                "held_out_donors": ["donor1"],
+                "seeds": seeds,
+                "thresholds": thresholds,
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay = recompute_initialization_validation(
+        checkpoint=checkpoint_payload,
+        morphology=morphology,
+        edge_index=np.empty((2, 0), dtype=np.int64),
+        edge_weight=None,
+        labels=labels,
+        target_latent=target_latent,
+        donor_ids=donor_ids,
+        seeds=seeds,
+    )
+    metrics = replay["metrics"]
+    report = tmp_path / "initialization_evidence_report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema": "heir.initialization_validation_evidence.v1",
+                "status": "complete",
+                "pass": True,
+                "checkpoint": {
+                    "path": str(teacher),
+                    "sha256": hashlib.sha256(teacher.read_bytes()).hexdigest(),
+                },
+                "plan": {
+                    "path": str(plan),
+                    "sha256": hashlib.sha256(plan.read_bytes()).hexdigest(),
+                },
+                **bindings,
+                "feature_space_id": "pathology-encoder-v1",
+                "latent_space_id": "test-latent-v1",
+                "type_ontology_sha256": ordered_identity_sha256(("A", "B")),
+                "training_donors": ["development-donor"],
+                "held_out_donors": ["donor1"],
+                "capabilities": {"broad_type": True, "image_to_latent": True},
+                "thresholds": thresholds,
+                "metrics": metrics,
+                "donor_metrics": replay["donor_metrics"],
+                "shuffle_controls": replay["shuffle_controls"],
+                "checks": {
+                    "macro_f1": True,
+                    "image_shuffle_macro_f1_delta": True,
+                    "latent_cosine": True,
+                    "image_shuffle_latent_cosine_delta": True,
+                    "latent_rmse": True,
+                    "ece": True,
+                    "brier": True,
+                    "predicted_class_occupancy": True,
+                    "per_type_support": True,
+                },
+                "execution": {"device": "cpu-float32", "seeds": seeds},
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt = tmp_path / "bridge_receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "heir.validated_initialization.v1",
+                "status": "complete",
+                "pass": True,
+                "checkpoint_sha256": hashlib.sha256(teacher.read_bytes()).hexdigest(),
+                "feature_space_id": "pathology-encoder-v1",
+                "latent_space_id": "test-latent-v1",
+                "type_ontology_sha256": ordered_identity_sha256(("A", "B")),
+                "training_donors": ["development-donor"],
+                "held_out_donors": ["donor1"],
+                "capabilities": {"broad_type": True, "image_to_latent": True},
+                "evidence_report": str(report),
+                "evidence_report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return receipt
+
+
 def test_predict_wrong_donor_filters_only_in_memory_and_binds_original_source(
     tmp_path,
     capsys,
@@ -277,6 +868,8 @@ def test_predict_wrong_donor_filters_only_in_memory_and_binds_original_source(
             graph_hidden_dim=4,
             graph_output_dim=4,
             graph_layers=1,
+            graph_mode="distance_only",
+            graph_context_gate_init=1.0,
             trunk_hidden_dims=(4,),
             decoder_hidden_dims=(4,),
             dropout=0.0,
@@ -837,6 +1430,58 @@ def test_refinement_view_artifact_binds_checkpoint_batch_and_identities(tmp_path
         ],
         check=True,
     )
+    batch_digest_before_collision_check = hashlib.sha256(batch_path.read_bytes()).hexdigest()
+    colliding_output = tmp_path / "views-hardlink-to-batch.npz"
+    colliding_output.hardlink_to(batch_path)
+    collision = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "scripts" / "build_refinement_views.py"),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--batch",
+            str(batch_path),
+            "--output",
+            str(colliding_output),
+            "--shared-tail-features",
+            "0",
+            "--device",
+            "cpu",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert collision.returncode != 0
+    assert "output would overwrite a bound input" in collision.stderr
+    assert hashlib.sha256(batch_path.read_bytes()).hexdigest() == (
+        batch_digest_before_collision_check
+    )
+    source_digest_before_collision_check = hashlib.sha256(histology.read_bytes()).hexdigest()
+    transitive_collision_output = tmp_path / "views-hardlink-to-histology.npz"
+    transitive_collision_output.hardlink_to(histology)
+    transitive_collision = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "scripts" / "build_refinement_views.py"),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--batch",
+            str(batch_path),
+            "--output",
+            str(transitive_collision_output),
+            "--shared-tail-features",
+            "0",
+            "--device",
+            "cpu",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert transitive_collision.returncode != 0
+    assert "output would overwrite a bound input" in transitive_collision.stderr
+    assert hashlib.sha256(histology.read_bytes()).hexdigest() == (
+        source_digest_before_collision_check
+    )
     with np.load(views_path, allow_pickle=False) as archive:
         payload = {name: np.array(archive[name], copy=True) for name in archive.files}
     metadata = json.loads(str(payload["metadata_json"].item()))
@@ -918,7 +1563,7 @@ def test_refinement_view_artifact_binds_checkpoint_batch_and_identities(tmp_path
         load(unversioned)
 
 
-def test_assemble_batch_uses_ood_mask_as_default_unknown_targets(tmp_path):
+def test_assemble_batch_keeps_ood_separate_from_biological_unknown_targets(tmp_path):
     histology, reference, prototypes, _ = _write_input_artifacts(tmp_path)
     bag = HistologyBag.load_npz(histology)
     development_features = np.vstack((bag.features - 0.5, bag.features + 0.5))
@@ -932,7 +1577,7 @@ def test_assemble_batch_uses_ood_mask_as_default_unknown_targets(tmp_path):
     detector.source_sha256 = ("d" * 64,)
     ood = tmp_path / "calibrated_ood.npz"
     detector.to_npz(ood)
-    output = tmp_path / "batch_with_unknown_targets.npz"
+    output = tmp_path / "batch_with_ood_mask.npz"
     assert (
         main(
             [
@@ -960,12 +1605,248 @@ def test_assemble_batch_uses_ood_mask_as_default_unknown_targets(tmp_path):
     batch = HEIRTrainingBatch.load_npz(output)
     expected = detector.is_ood(bag.features)
     assert batch.ood_mask is not None
-    assert batch.unknown_targets is not None
+    assert batch.unknown_targets is None
     np.testing.assert_array_equal(batch.ood_mask.numpy(), expected)
-    np.testing.assert_array_equal(batch.unknown_targets.numpy(), expected.astype(np.float32))
     assert str(ood.resolve()) in batch.source_artifacts
     source_index = batch.source_artifacts.index(str(ood.resolve()))
     assert batch.source_sha256[source_index] == hashlib.sha256(ood.read_bytes()).hexdigest()
+
+
+def test_assemble_batch_uses_only_explicit_biological_unknown_targets(tmp_path):
+    histology, reference, prototypes, _ = _write_input_artifacts(tmp_path)
+    bag = HistologyBag.load_npz(histology)
+    target_values = np.linspace(0.0, 1.0, bag.n_nuclei, dtype=np.float32)
+    target_path = tmp_path / "biological_unknown_targets.npz"
+    np.savez_compressed(
+        target_path,
+        nucleus_ids=bag.nucleus_ids[::-1],
+        unknown_targets=target_values[::-1],
+    )
+    output = tmp_path / "batch_with_explicit_unknown_targets.npz"
+
+    assert (
+        main(
+            [
+                "assemble-batch",
+                "--histology",
+                str(histology),
+                "--reference",
+                str(reference),
+                "--prototypes",
+                str(prototypes),
+                "--unknown-targets",
+                str(target_path),
+                "--output",
+                str(output),
+                "--donor-id",
+                "donor1",
+                "--block-id",
+                "block1",
+                "--analysis-role",
+                "development",
+            ]
+        )
+        == 0
+    )
+    batch = HEIRTrainingBatch.load_npz(output)
+    assert batch.ood_mask is None
+    assert batch.unknown_targets is not None
+    np.testing.assert_allclose(batch.unknown_targets.numpy(), target_values)
+    assert str(target_path.resolve()) in batch.source_artifacts
+
+
+def test_assemble_batch_attaches_hash_bound_frozen_molecular_estep(tmp_path):
+    histology, reference, prototypes, _ = _write_input_artifacts(tmp_path)
+    bag = HistologyBag.load_npz(histology)
+    prototype_bank = PrototypeSet.load_npz(prototypes)
+    source_paths = (histology, prototypes, reference)
+    source_mass = np.asarray(
+        bag.segmentation_confidence * (1.0 - bag.artifact_probability), dtype=np.float32
+    )
+    source_mass[np.asarray(bag.artifact_probability) >= 0.5] = 0.0
+    teacher = tmp_path / "bridge_teacher.pt"
+    receipt = _write_test_initialization_receipt(tmp_path, teacher)
+    teacher_payload = torch.load(teacher, map_location="cpu", weights_only=True)
+    teacher_model = HEIRModel.from_checkpoint(teacher_payload).to(dtype=torch.float32).eval()
+    prototype_types = np.asarray([0, 1], dtype=np.int64)
+    prototype_weights = np.asarray(prototype_bank.weights, dtype=np.float32)
+    with torch.inference_mode():
+        _, type_probabilities, image_latent = teacher_model.encode_frozen_morphology(
+            torch.from_numpy(np.array(bag.features, dtype=np.float32, copy=True)),
+            torch.from_numpy(np.array(bag.edge_index, dtype=np.int64, copy=True)),
+            torch.from_numpy(np.array(bag.edge_weight, dtype=np.float32, copy=True)),
+        )
+        means = torch.from_numpy(np.array(prototype_bank.means, dtype=np.float32, copy=True))
+        variances = torch.from_numpy(
+            np.array(prototype_bank.variances, dtype=np.float32, copy=True)
+        ).clamp_min(teacher_model.config.prototype_variance_floor)
+        gaussian_cost = 0.5 * (
+            (image_latent.unsqueeze(1) - means.unsqueeze(0)).square() / variances.unsqueeze(0)
+            + variances.unsqueeze(0).log()
+        ).mean(dim=2)
+        type_cost = (
+            -type_probabilities.index_select(1, torch.from_numpy(prototype_types))
+            .clamp_min(1.0e-8)
+            .log()
+        )
+        known_cost = gaussian_cost + type_cost
+        transport = unbalanced_sinkhorn(
+            known_cost,
+            source_mass=torch.from_numpy(source_mass),
+            target_mass=torch.from_numpy(prototype_weights),
+            epsilon=0.5,
+            marginal_relaxation=1.0,
+            iterations=500,
+            convergence_tolerance=1.0e-4,
+            unknown_mass=0.1,
+            unknown_cost=1.0,
+            add_unknown=True,
+        )
+    assert bool(transport.converged)
+    raw_plan = transport.plan.float().numpy()
+    plan = np.zeros_like(raw_plan, dtype=np.float32)
+    positive = source_mass > 0
+    plan[positive] = raw_plan[positive] / raw_plan[positive].sum(axis=1, keepdims=True)
+    plan[~positive, -1] = 1.0
+    cost = (
+        torch.cat((known_cost, known_cost.new_full((len(known_cost), 1), 1.0)), dim=1)
+        .float()
+        .numpy()
+    )
+    normalized_source_mass = source_mass / source_mass.sum(dtype=np.float32)
+    desired_target = np.concatenate((prototype_weights * 0.9, np.asarray([0.1])))
+    realized_target = (plan * normalized_source_mass[:, None]).sum(axis=0)
+    source_marginal_residual = float(np.max(np.abs(plan.sum(axis=1) - 1.0)))
+    target_marginal_residual = float(np.abs(realized_target - desired_target).sum())
+    telemetry = frozen_transport_telemetry(
+        raw_transport_plan=raw_plan,
+        transport_cost=cost,
+        source_mass=source_mass,
+        target_weights=prototype_weights,
+        fixed_unknown_mass=0.1,
+        epsilon=0.5,
+        marginal_relaxation=1.0,
+    )
+    e_step = MolecularEStepArtifact(
+        transport_plan=plan.astype(np.float32),
+        raw_transport_plan=raw_plan,
+        transport_cost=cost,
+        source_mass=source_mass,
+        nucleus_ids=tuple(str(value) for value in bag.nucleus_ids.tolist()),
+        prototype_ids=tuple(str(value) for value in prototype_bank.prototype_ids.tolist()),
+        source_artifacts=tuple(str(path.resolve()) for path in source_paths),
+        source_sha256=tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in source_paths),
+        source_roles=("histology", "prototype_bank", "rna_reference"),
+        teacher_checkpoint=str(teacher),
+        teacher_checkpoint_sha256=hashlib.sha256(teacher.read_bytes()).hexdigest(),
+        initialization_receipt=str(receipt),
+        initialization_receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+        teacher_role="independent_crossmodal_bridge",
+        teacher_training_donors=("development-donor",),
+        target_donor="donor1",
+        feature_space_id=bag.feature_space_id,
+        latent_space_id=prototype_bank.latent_space_id,
+        type_ontology_sha256=ordered_identity_sha256(("A", "B")),
+        morphology_sha256=array_content_sha256(bag.features),
+        prototype_means_sha256=array_content_sha256(prototype_bank.means),
+        prototype_variances_sha256=array_content_sha256(prototype_bank.variances),
+        prototype_types_sha256=array_content_sha256(prototype_types),
+        prototype_weights_sha256=array_content_sha256(prototype_weights),
+        image_latent_sha256=array_content_sha256(image_latent.float().numpy()),
+        type_probabilities_sha256=array_content_sha256(type_probabilities.float().numpy()),
+        transport_cost_sha256=array_content_sha256(cost),
+        source_mass_sha256=array_content_sha256(source_mass),
+        artifact_threshold=0.5,
+        type_cost_weight=1.0,
+        unknown_cost=1.0,
+        fixed_unknown_mass=0.1,
+        uot_epsilon=0.5,
+        uot_marginal_relaxation=1.0,
+        uot_iterations=500,
+        uot_iterations_run=transport.iterations_run,
+        uot_convergence_tolerance=1.0e-4,
+        uot_maximum_marginal_residual=2.0,
+        converged=True,
+        source_marginal_residual=source_marginal_residual,
+        target_marginal_residual=target_marginal_residual,
+        solver_source_marginal_error=telemetry["solver_source_marginal_error"],
+        solver_target_marginal_error=telemetry["solver_target_marginal_error"],
+        source_dual_residual=float(transport.source_dual_residual.item()),
+        target_dual_residual=float(transport.target_dual_residual.item()),
+        transport_objective=telemetry["transport_objective"],
+    )
+    e_step_path = tmp_path / "frozen_e_step.npz"
+    e_step.save_npz(e_step_path)
+    output = tmp_path / "strict_batch.npz"
+
+    assert (
+        main(
+            [
+                "assemble-batch",
+                "--histology",
+                str(histology),
+                "--reference",
+                str(reference),
+                "--prototypes",
+                str(prototypes),
+                "--molecular-e-step",
+                str(e_step_path),
+                "--output",
+                str(output),
+                "--donor-id",
+                "donor1",
+                "--block-id",
+                "block1",
+            ]
+        )
+        == 0
+    )
+    batch = HEIRTrainingBatch.load_npz(output)
+    assert batch.molecular_responsibilities is not None
+    np.testing.assert_array_equal(
+        batch.molecular_responsibilities.numpy(),
+        e_step.responsibilities,
+    )
+    index = batch.source_roles.index("frozen_e_step")
+    assert batch.source_sha256[index] == hashlib.sha256(e_step_path.read_bytes()).hexdigest()
+    assert "development-donor" in batch.molecular_training_donors
+
+
+def test_personalized_train_fails_closed_without_validated_initialization(tmp_path):
+    histology, reference, prototypes, _ = _write_input_artifacts(tmp_path)
+    batch = tmp_path / "personalized_batch.npz"
+    assert (
+        main(
+            [
+                "assemble-batch",
+                "--histology",
+                str(histology),
+                "--reference",
+                str(reference),
+                "--prototypes",
+                str(prototypes),
+                "--output",
+                str(batch),
+                "--donor-id",
+                "donor1",
+                "--block-id",
+                "block1",
+            ]
+        )
+        == 0
+    )
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "train",
+                "--train-batch",
+                str(batch),
+                "--validation-batch",
+                str(batch),
+                "--output",
+                str(tmp_path / "blocked"),
+            ]
+        )
 
 
 def test_build_prototypes_binds_emitted_latent_reference_for_safe_assembly(tmp_path):
@@ -1266,6 +2147,8 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
                 "0.73",
                 "--rna-vae-checkpoint",
                 str(rna_checkpoint_path),
+                "--uninitialized-morphology-negative-control",
+                "--live-student-e-step-negative-control",
                 "--allow-split-overlap",
                 "--device",
                 "cpu",
@@ -1279,6 +2162,21 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
     assert trained_payload["config"]["abstain_threshold"] == pytest.approx(0.73)
     assert trained_payload["metadata"]["uot_unknown_mass"] == pytest.approx(0.05)
     assert trained_payload["metadata"]["uot_unknown_mass_mode"] == "fixed"
+    assert trained_payload["metadata"]["excluded_from_primary_claims"] is True
+    assert set(trained_payload["metadata"]["exclusion_reasons"]) >= {
+        "uninitialized_morphology_negative_control",
+        "live_student_e_step_negative_control",
+        "train_validation_source_overlap_allowed",
+    }
+    assert set(trained_payload["metadata"]["training_donors"]) == {"donor0", "donor1"}
+    assert trained_payload["metadata"]["direct_training_donors"] == ["donor1"]
+    assert trained_payload["metadata"]["validation_donors"] == ["donor1"]
+    assert trained_payload["metadata"]["training_batch_artifacts"] == [
+        {"path": str(train_batch.resolve()), "sha256": _sha256(str(train_batch))}
+    ]
+    assert trained_payload["metadata"]["validation_batch_artifacts"] == [
+        {"path": str(validation_batch.resolve()), "sha256": _sha256(str(validation_batch))}
+    ]
 
     predictions = tmp_path / "predictions.npz"
     prediction_telemetry = tmp_path / "prediction_telemetry.json"
@@ -1318,6 +2216,9 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
     assert telemetry["peak_cuda_memory_bytes"] == 0
     assert telemetry["nuclei"] == 12
     assert telemetry["prediction_sha256"] == hashlib.sha256(predictions.read_bytes()).hexdigest()
+    assert telemetry["residual_diagnostics"]["schema"] == ("heir.residual_gate_diagnostics.v1")
+    assert telemetry["residual_diagnostics"]["donor_id"] == "donor1"
+    assert set(telemetry["residual_diagnostics"]["by_type"]) == {"A", "B"}
     repeated_predictions = tmp_path / "predictions_repeated.npz"
     assert (
         main(
@@ -1347,6 +2248,14 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
     np.testing.assert_array_equal(bundle.expression_mean, repeated_bundle.expression_mean)
     np.testing.assert_array_equal(bundle.expression_lower, repeated_bundle.expression_lower)
 
+    excluded_refinement_rna = tmp_path / "excluded_refinement_rna.pt"
+    excluded_rna_checkpoint = dict(rna_checkpoint)
+    excluded_rna_checkpoint["metadata"] = {
+        **rna_checkpoint["metadata"],
+        "excluded_from_primary_claims": True,
+        "exclusion_reasons": ["refinement_only_rna_sensitivity"],
+    }
+    torch.save(excluded_rna_checkpoint, excluded_refinement_rna)
     refined = tmp_path / "refined"
     assert (
         main(
@@ -1366,7 +2275,10 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
                 "0",
                 "--epochs-per-round",
                 "1",
+                "--rna-vae-checkpoint",
+                str(excluded_refinement_rna),
                 "--allow-no-view-agreement",
+                "--live-student-e-step-negative-control",
                 "--allow-split-overlap",
                 "--device",
                 "cpu",
@@ -1388,6 +2300,15 @@ def test_real_artifact_train_and_predict_smoke(tmp_path):
     assert refined_payload["metadata"]["refinement_rounds_executed"] == 1
     assert refined_payload["metadata"]["uot_unknown_mass"] == pytest.approx(0.05)
     assert refined_payload["metadata"]["uot_unknown_mass_mode"] == "fixed"
+    assert set(refined_payload["metadata"]["training_donors"]) == {"donor0", "donor1"}
+    assert refined_payload["metadata"]["refinement_validation_donors"] == ["donor1"]
+    assert refined_payload["metadata"]["refinement_training_batch_artifacts"] == [
+        {"path": str(train_batch.resolve()), "sha256": _sha256(str(train_batch))}
+    ]
+    assert (
+        "refinement_rna_decoder:refinement_only_rna_sensitivity"
+        in refined_payload["metadata"]["exclusion_reasons"]
+    )
     assert (refined / "prototypes" / "donor1__sample1.npz").is_file()
 
 
@@ -1594,5 +2515,367 @@ def test_evaluate_spatial_aligns_names_and_ignores_empty_spots(tmp_path):
                 str(prediction_path),
                 "--truth",
                 str(reordered_truth),
+            ]
+        )
+
+
+def test_evaluate_spatial_coverage_runs_frozen_full_endpoint(tmp_path):
+    cells = 6
+    expression = np.log1p(
+        np.asarray(
+            [[1.0, 2.0], [3.0, 4.0], [4.0, 6.0], [8.0, 10.0], [2.0, 8.0], [6.0, 2.0]],
+            dtype=np.float32,
+        )
+    )
+    probabilities = np.tile(np.asarray([[0.75, 0.25]], dtype=np.float32), (cells, 1))
+    prediction = PredictionBundle(
+        nucleus_ids=np.asarray(["n%d" % index for index in range(cells)]),
+        coordinates_um=np.zeros((cells, 2), dtype=np.float32),
+        type_probabilities=probabilities,
+        type_names=np.asarray(["A", "B"]),
+        labels=np.zeros(cells, dtype=np.int64),
+        prototype_probabilities=probabilities,
+        prototype_ids=np.asarray(["pA", "pB"]),
+        latent_mean=np.zeros((cells, 2), dtype=np.float32),
+        latent_variance=np.ones((cells, 2), dtype=np.float32),
+        expression_mean=expression,
+        expression_lower=np.maximum(expression - 0.1, 0.0),
+        expression_upper=expression + 0.1,
+        gene_names=np.asarray(["g1", "g2"]),
+        unknown_probability=np.zeros(cells, dtype=np.float32),
+        abstain_score=np.zeros(cells, dtype=np.float32),
+        abstain=np.zeros(cells, dtype=bool),
+        ood_score=np.zeros(cells, dtype=np.float32),
+        refinement_round=0,
+        sample_id="sample1",
+        donor_id="donor1",
+        slide_id="slide1",
+        checkpoint_sha256="a" * 64,
+        prototype_sha256="b" * 64,
+        histology_sha256="c" * 64,
+        latent_space_id="latent-test",
+        model_version="test",
+        expression_space_id="log1p-cpm-10000-v1",
+        inference_seed=17,
+        latent_samples=20,
+        probability_threshold=0.6,
+        artifact_threshold=0.5,
+    )
+    prediction_path = tmp_path / "prediction_coverage.npz"
+    prediction.to_npz(prediction_path)
+    spot_index = np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64)
+    rna_mass = np.asarray([1.0, 3.0, 2.0, 1.0, 1.0, 2.0])
+    linear = np.expm1(expression[:, ::-1])
+    observed = np.vstack(
+        [
+            np.log1p(
+                np.average(linear[spot_index == spot], axis=0, weights=rna_mass[spot_index == spot])
+            )
+            for spot in range(3)
+        ]
+    )
+    truth_path = tmp_path / "coverage_truth.npz"
+    SpatialTruthArtifact(
+        observed_expression=observed,
+        gene_names=np.asarray(["g2", "g1"]),
+        spot_ids=np.asarray(["s1", "s2", "s3"]),
+        nucleus_ids=prediction.nucleus_ids,
+        nucleus_spot_index=spot_index,
+        spot_library_sizes=np.ones(3, dtype=np.float64),
+        spot_coordinates_px=np.asarray([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]),
+        nucleus_spot_distance_px=np.zeros(cells, dtype=np.float64),
+        analysis_role="locked_validation",
+        cohort_id="test-cohort",
+        donor_id="donor1",
+        specimen_id="sample1",
+        block_id="block1",
+        section_id="section1",
+        outer_fold="heldout",
+        inner_fold="none",
+        barcode_suffix_policy="exact",
+        spot_radius_px=1.0,
+        source_artifacts=np.asarray(["locked-counts", "frozen-manifest"]),
+        source_sha256=np.asarray(["d" * 64, "e" * 64]),
+        source_roles=np.asarray(["locked_spatial_counts", "shared_manifest"]),
+        expression_space_id=prediction.expression_space_id,
+    ).save_npz(truth_path)
+    endpoint_path = tmp_path / "coverage_endpoint.npz"
+    np.savez_compressed(
+        endpoint_path,
+        __contract__=np.asarray("heir.coverage_endpoint_input"),
+        __version__=np.asarray(1, dtype=np.int64),
+        endpoint=np.asarray("full_coverage_type_mean_fallback"),
+        nucleus_ids=prediction.nucleus_ids,
+        gene_names=np.asarray(["g2", "g1"]),
+        spot_ids=np.asarray(["s1", "s2", "s3"]),
+        nucleus_spot_index=spot_index,
+        evaluation_spot_mask=np.ones(3, dtype=bool),
+        cell_rna_mass=rna_mass,
+        frozen_type_index=np.zeros(cells, dtype=np.int64),
+        type_names=np.asarray(["A", "B"]),
+        frozen_type_mean_log_expression=np.log1p(np.asarray([[3.0, 2.0], [5.0, 4.0]])),
+    )
+    output = tmp_path / "coverage_metrics.json"
+    assert (
+        main(
+            [
+                "evaluate-spatial-coverage",
+                "--predictions",
+                str(prediction_path),
+                "--truth",
+                str(truth_path),
+                "--endpoint-input",
+                str(endpoint_path),
+                "--endpoint-input-sha256",
+                _sha256(str(endpoint_path)),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(output.read_text())
+    method = report["methods"]["HEIR"]
+    assert method["coverage"]["endpoint"] == "full_coverage_type_mean_fallback"
+    assert method["coverage"]["realized_coverage"] == pytest.approx(1.0)
+    assert method["summary"]["median_gene_mse"] == pytest.approx(0.0, abs=1e-12)
+    assert report["claim_scope"]["historical_report_rewrite"] is False
+    assert report["provenance"]["aggregation_constructed_before_truth_values_loaded"] is True
+    assert report["provenance"]["endpoint_input_hash_asserted_before_load"] is True
+    assert (
+        report["provenance"]["comparison_design_hash_asserted_before_truth_values_loaded"] is False
+    )
+    assert report["claim_scope"]["eligible_for_paired_method_comparisons"] is False
+    assert set(report["provenance"]["source_sha256"]) == {
+        "heir.cli",
+        "heir.evaluation.coverage",
+        "heir.inference",
+        "heir.data.spatial_truth",
+    }
+    assert len(report["provenance"]["endpoint_input_sha256"]) == 64
+
+    prediction_bytes = prediction_path.read_bytes()
+    collision_args = build_parser().parse_args(
+        [
+            "evaluate-spatial-coverage",
+            "--predictions",
+            str(prediction_path),
+            "--truth",
+            str(truth_path),
+            "--endpoint-input",
+            str(endpoint_path),
+            "--output",
+            str(prediction_path),
+        ]
+    )
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        collision_args.func(collision_args)
+    assert prediction_path.read_bytes() == prediction_bytes
+
+    truth_bytes = truth_path.read_bytes()
+    aggregate_collision_args = build_parser().parse_args(
+        [
+            "evaluate-spatial-coverage",
+            "--predictions",
+            str(prediction_path),
+            "--truth",
+            str(truth_path),
+            "--endpoint-input",
+            str(endpoint_path),
+            "--output",
+            str(tmp_path / "collision-report.json"),
+            "--aggregates-output",
+            str(truth_path),
+        ]
+    )
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        aggregate_collision_args.func(aggregate_collision_args)
+    assert truth_path.read_bytes() == truth_bytes
+
+    shared_output = tmp_path / "shared-coverage-output"
+    duplicate_output_args = build_parser().parse_args(
+        [
+            "evaluate-spatial-coverage",
+            "--predictions",
+            str(prediction_path),
+            "--truth",
+            str(truth_path),
+            "--endpoint-input",
+            str(endpoint_path),
+            "--output",
+            str(shared_output),
+            "--aggregates-output",
+            str(shared_output),
+        ]
+    )
+    with pytest.raises(ValueError, match="output paths collide with each other"):
+        duplicate_output_args.func(duplicate_output_args)
+
+    baseline_prediction_path = tmp_path / "baseline_prediction_coverage.npz"
+    baseline_expression = expression + np.asarray(
+        [[0.00], [0.05], [0.10], [0.15], [0.20], [0.25]], dtype=np.float32
+    )
+    replace(
+        prediction,
+        expression_mean=baseline_expression,
+        expression_lower=np.maximum(baseline_expression - 0.1, 0.0),
+        expression_upper=baseline_expression + 0.1,
+        checkpoint_sha256="f" * 64,
+    ).to_npz(baseline_prediction_path)
+    plan_path = tmp_path / "coverage_benchmark_plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema": "heir.coverage_benchmark_plan.v1",
+                "truth": truth_path.name,
+                "truth_sha256": _sha256(str(truth_path)),
+                "methods": [
+                    {
+                        "name": "HEIR",
+                        "predictions": prediction_path.name,
+                        "predictions_sha256": _sha256(str(prediction_path)),
+                        "endpoint_input": endpoint_path.name,
+                        "endpoint_input_sha256": _sha256(str(endpoint_path)),
+                    },
+                    {
+                        "name": "frozen-baseline",
+                        "predictions": baseline_prediction_path.name,
+                        "predictions_sha256": _sha256(str(baseline_prediction_path)),
+                        "endpoint_input": endpoint_path.name,
+                        "endpoint_input_sha256": _sha256(str(endpoint_path)),
+                    },
+                ],
+                "comparison_pairs": [["HEIR", "frozen-baseline"]],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    planned_output = tmp_path / "planned_coverage_metrics.json"
+    assert (
+        main(
+            [
+                "evaluate-spatial-coverage",
+                "--plan",
+                str(plan_path),
+                "--plan-sha256",
+                _sha256(str(plan_path)),
+                "--output",
+                str(planned_output),
+            ]
+        )
+        == 0
+    )
+    planned_report = json.loads(planned_output.read_text())
+    assert set(planned_report["methods"]) == {"HEIR", "frozen-baseline"}
+    assert len(planned_report["paired_comparisons"]) == 1
+    assert planned_report["paired_comparisons"][0]["left"] == "HEIR"
+    assert planned_report["paired_comparisons"][0]["right"] == "frozen-baseline"
+    assert planned_report["claim_scope"]["eligible_for_paired_method_comparisons"] is True
+    assert planned_report["claim_scope"]["evaluation_design"] == "locked_multi_method_plan"
+    assert (
+        planned_report["provenance"]["comparison_design_hash_asserted_before_truth_values_loaded"]
+        is True
+    )
+    common_mask = planned_report["truth_gene_mask"]["sha256"]
+    assert all(
+        value["truth_gene_mask_sha256"] == common_mask
+        for value in planned_report["methods"].values()
+    )
+    plan_bytes = plan_path.read_bytes()
+    plan_collision_args = build_parser().parse_args(
+        [
+            "evaluate-spatial-coverage",
+            "--plan",
+            str(plan_path),
+            "--plan-sha256",
+            _sha256(str(plan_path)),
+            "--output",
+            str(plan_path),
+        ]
+    )
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        plan_collision_args.func(plan_collision_args)
+    assert plan_path.read_bytes() == plan_bytes
+    baseline_bytes = baseline_prediction_path.read_bytes()
+    transitive_plan_collision_args = build_parser().parse_args(
+        [
+            "evaluate-spatial-coverage",
+            "--plan",
+            str(plan_path),
+            "--plan-sha256",
+            _sha256(str(plan_path)),
+            "--output",
+            str(baseline_prediction_path),
+        ]
+    )
+    with pytest.raises(ValueError, match="output would overwrite a bound input"):
+        transitive_plan_collision_args.func(transitive_plan_collision_args)
+    assert baseline_prediction_path.read_bytes() == baseline_bytes
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "evaluate-spatial-coverage",
+                "--plan",
+                str(plan_path),
+                "--plan-sha256",
+                "0" * 64,
+                "--output",
+                str(planned_output),
+            ]
+        )
+
+    selective_endpoint_path = tmp_path / "selective_coverage_endpoint.npz"
+    np.savez_compressed(
+        selective_endpoint_path,
+        __contract__=np.asarray("heir.coverage_endpoint_input"),
+        __version__=np.asarray(1, dtype=np.int64),
+        endpoint=np.asarray("fixed_coverage_selective"),
+        nucleus_ids=prediction.nucleus_ids,
+        gene_names=np.asarray(["g2", "g1"]),
+        spot_ids=np.asarray(["s1", "s2", "s3"]),
+        nucleus_spot_index=spot_index,
+        evaluation_spot_mask=np.ones(3, dtype=bool),
+        cell_rna_mass=rna_mass,
+        uncertainty=np.asarray([0.0, 1.0, 0.1, 1.1, 0.2, 1.2]),
+        target_coverage=np.asarray(0.5),
+    )
+    selective_output = tmp_path / "selective_coverage_metrics.json"
+    assert (
+        main(
+            [
+                "evaluate-spatial-coverage",
+                "--predictions",
+                str(prediction_path),
+                "--truth",
+                str(truth_path),
+                "--endpoint-input",
+                str(selective_endpoint_path),
+                "--output",
+                str(selective_output),
+            ]
+        )
+        == 0
+    )
+    selective_report = json.loads(selective_output.read_text())
+    selective_method = selective_report["methods"]["HEIR"]
+    assert selective_method["coverage"]["endpoint"] == "fixed_coverage_selective"
+    assert selective_method["coverage"]["realized_coverage"] == pytest.approx(0.5)
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "evaluate-spatial-coverage",
+                "--predictions",
+                str(prediction_path),
+                "--truth",
+                str(truth_path),
+                "--endpoint-input",
+                str(endpoint_path),
+                "--endpoint-input-sha256",
+                "0" * 64,
+                "--output",
+                str(output),
             ]
         )

@@ -15,6 +15,7 @@ model:
   graph_hidden_dim: 256
   graph_output_dim: 256
   graph_layers: 3
+  graph_mode: "off"
   trunk_hidden_dims: [512, 256]
   decoder_hidden_dims: [256, 256]
   dropout: 0.10
@@ -80,12 +81,12 @@ refinement:
   maximum_rounds: 4
   min_probability: 0.90
   max_normalized_entropy: 0.20
-  teacher_ema: 0.99
+  teacher_ema: 0.0
   # Primary analysis keeps the measured sample molecular prior fixed. Values
   # below 1.0 are reserved for prespecified prior-update sensitivities.
   prior_old_weight: 1.0
   minimum_segmentation_confidence: 0.50
-  require_view_agreement: true
+  require_view_agreement: false
   maximum_prior_total_variation: 0.10
   max_anchors_per_class: 10000
   stable_rounds_required: 1

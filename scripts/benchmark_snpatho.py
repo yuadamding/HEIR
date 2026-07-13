@@ -12,6 +12,7 @@ from heir.evaluation import (
     run_snpatho_benchmark,
     write_snpatho_benchmark,
 )
+from heir.utils import reject_output_input_collisions
 
 
 def main() -> int:
@@ -30,16 +31,19 @@ def main() -> int:
     )
     args = parser.parse_args()
     plan = load_snpatho_plan(args.plan)
-    outputs = {args.output.expanduser().resolve()}
+    outputs = [args.output]
     if args.tsv is not None:
-        outputs.add(args.tsv.expanduser().resolve())
-    reserved = {plan.source_path, plan.gene_panel}
+        outputs.append(args.tsv)
+    reserved = [plan.source_path, plan.gene_panel]
     for case in plan.cases:
-        reserved.update((case.predictions, case.truth, case.matched_reference))
+        reserved.extend((case.predictions, case.truth, case.matched_reference))
         if case.telemetry is not None:
-            reserved.add(case.telemetry)
-    if outputs & reserved:
-        raise ValueError("benchmark output must not overwrite its plan or input artifacts")
+            reserved.append(case.telemetry)
+    reject_output_input_collisions(
+        outputs,
+        reserved,
+        label="snPATHO benchmark",
+    )
     result = run_snpatho_benchmark(
         plan,
         seed=args.seed,

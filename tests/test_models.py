@@ -1,6 +1,7 @@
 """Shape, routing, checkpoint, and gradient tests for authoritative HEIR models."""
 
 import copy
+import json
 import unittest
 
 import torch
@@ -84,6 +85,24 @@ class HEIRModelTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(morphology.grad).all())
         self.assertGreater(float(morphology.grad.norm().detach()), 0.0)
 
+    def test_frozen_morphology_bridge_accepts_no_prototypes_and_matches_type_path(self) -> None:
+        model = HEIRModel(small_config(graph_mode="off", hard_type_routing=False)).eval()
+        morphology = torch.randn(7, 6)
+        means = torch.randn(5, 4)
+        types = torch.tensor([0, 0, 1, 2, 2], dtype=torch.long)
+
+        embedding, probabilities, image_latent = model.encode_frozen_morphology(morphology)
+        output = model(
+            morphology,
+            prototype_means=means,
+            prototype_types=types,
+            sample_latent=False,
+        )
+
+        self.assertEqual(embedding.shape, (7, 8))
+        self.assertEqual(image_latent.shape, (7, 4))
+        torch.testing.assert_close(probabilities, output.type_probabilities)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for AMP regression")
     def test_cuda_autocast_end_to_end_forward_backward(self) -> None:
         model = HEIRModel(small_config(hard_type_routing=False)).cuda()
@@ -152,6 +171,63 @@ class HEIRModelTests(unittest.TestCase):
             optimized.parameters(), reference.parameters()
         ):
             torch.testing.assert_close(optimized_parameter.grad, reference_parameter.grad)
+
+    def test_graph_off_is_exactly_invariant_to_graph_inputs(self) -> None:
+        model = HEIRModel(small_config(graph_mode="off")).eval()
+        morphology = torch.randn(7, 6)
+        empty = torch.empty((2, 0), dtype=torch.long)
+        edges = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+        common = {
+            "prototype_means": torch.randn(3, 4),
+            "prototype_types": torch.tensor([0, 1, 2]),
+            "sample_latent": False,
+        }
+
+        without_graph = model(morphology, empty, **common)
+        with_graph = model(morphology, edges, torch.rand(edges.shape[1]), **common)
+
+        torch.testing.assert_close(with_graph.cell_embedding, without_graph.cell_embedding)
+        torch.testing.assert_close(with_graph.expression, without_graph.expression)
+
+    def test_distance_graph_is_explicit_and_starts_with_zero_residual_gate(self) -> None:
+        model = HEIRModel(
+            small_config(graph_mode="distance_only", graph_context_gate_init=0.0)
+        ).eval()
+        morphology = torch.randn(7, 6)
+        empty = torch.empty((2, 0), dtype=torch.long)
+        edges = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+        common = {
+            "prototype_means": torch.randn(3, 4),
+            "prototype_types": torch.tensor([0, 1, 2]),
+            "sample_latent": False,
+        }
+
+        zero_empty = model(morphology, empty, **common)
+        zero_edges = model(morphology, edges, **common)
+        torch.testing.assert_close(zero_edges.cell_embedding, zero_empty.cell_embedding)
+
+        with torch.no_grad():
+            model.graph_context_gate.fill_(1.0)
+        enabled_empty = model(morphology, empty, **common)
+        enabled_edges = model(morphology, edges, **common)
+        self.assertFalse(torch.equal(enabled_edges.cell_embedding, enabled_empty.cell_embedding))
+        restored = HEIRModel.from_checkpoint(model.checkpoint())
+        self.assertEqual(restored.config.graph_mode, "distance_only")
+        torch.testing.assert_close(restored.graph_context_gate, torch.tensor(1.0))
+
+    def test_legacy_checkpoint_preserves_full_strength_distance_graph(self) -> None:
+        model = HEIRModel(
+            small_config(graph_mode="distance_only", graph_context_gate_init=1.0)
+        ).eval()
+        checkpoint = copy.deepcopy(model.checkpoint())
+        checkpoint["config"].pop("graph_mode")
+        checkpoint["config"].pop("graph_context_gate_init")
+        checkpoint["state_dict"].pop("graph_context_gate")
+
+        restored = HEIRModel.from_checkpoint(checkpoint).eval()
+
+        self.assertEqual(restored.config.graph_mode, "distance_only")
+        torch.testing.assert_close(restored.graph_context_gate, torch.tensor(1.0))
 
     def test_optional_scgpt_head_is_checkpointed_and_trainable(self) -> None:
         model = HEIRModel(small_config(hard_type_routing=False, scgpt_embedding_dim=7))
@@ -459,6 +535,9 @@ class HEIRModelTests(unittest.TestCase):
         with torch.no_grad():
             model.fine_type_head.weight.zero_()
             model.fine_type_head.bias.zero_()
+            assert model.parent_type_head is not None
+            model.parent_type_head.weight.zero_()
+            model.parent_type_head.bias.zero_()
             model.residual_coefficient_head.weight.zero_()
             model.residual_coefficient_head.bias.fill_(100.0)
             model.residual_gate_head.weight.zero_()
@@ -473,11 +552,18 @@ class HEIRModelTests(unittest.TestCase):
             prototype_types=types,
             sample_latent=False,
         )
-        torch.testing.assert_close(uncertain.residual_mu, torch.zeros_like(uncertain.residual_mu))
         assert uncertain.residual_gate is not None
-        torch.testing.assert_close(
-            uncertain.residual_gate, torch.zeros_like(uncertain.residual_gate)
+        expected_uncertain_gate = maximums[0] * torch.sigmoid(
+            torch.tensor(
+                (1.0 / 3.0 - model.config.residual_type_concentration_threshold)
+                / model.config.residual_type_concentration_temperature
+            )
         )
+        torch.testing.assert_close(
+            uncertain.residual_gate,
+            expected_uncertain_gate.expand_as(uncertain.residual_gate),
+        )
+        self.assertTrue(torch.all(uncertain.residual_mu.norm(dim=-1) < 0.01))
 
         with torch.no_grad():
             model.fine_type_head.bias.copy_(torch.tensor([-30.0, 30.0, -30.0]))
@@ -498,6 +584,190 @@ class HEIRModelTests(unittest.TestCase):
         )
         self.assertTrue(torch.all(concentrated.residual_mu.norm(dim=-1) <= 0.2 + 1.0e-6))
 
+    def test_residual_concentration_gate_is_continuous_around_threshold(self) -> None:
+        threshold = 0.6
+        temperature = 0.02
+        model = HEIRModel(
+            small_config(
+                fine_to_parent=None,
+                hard_type_routing=False,
+                residual_type_concentration_threshold=threshold,
+                residual_type_concentration_temperature=temperature,
+            )
+        ).eval()
+        assert model.residual_gate_head is not None
+        with torch.no_grad():
+            model.fine_type_head.weight.zero_()
+            model.residual_gate_head.weight.zero_()
+            model.residual_gate_head.bias.zero_()
+
+        observed = []
+        for concentration in (threshold - 0.001, threshold, threshold + 0.001):
+            probabilities = torch.tensor(
+                [concentration, (1.0 - concentration) / 2.0, (1.0 - concentration) / 2.0]
+            )
+            with torch.no_grad():
+                model.fine_type_head.bias.copy_(probabilities.log())
+            output = model(torch.zeros(1, 6), sample_latent=False)
+            assert output.residual_gate is not None
+            observed.append(output.residual_gate[0])
+
+        expected = (
+            0.5
+            * model.config.residual_max_norm
+            * torch.sigmoid(
+                (torch.tensor([threshold - 0.001, threshold, threshold + 0.001]) - threshold)
+                / temperature
+            )
+        )
+        torch.testing.assert_close(torch.stack(observed), expected)
+        self.assertTrue(observed[0] < observed[1] < observed[2])
+        self.assertLess(float(observed[2] - observed[0]), 0.02)
+
+    def test_residual_gate_cannot_backpropagate_into_type_head(self) -> None:
+        model = HEIRModel(
+            small_config(
+                fine_to_parent=None,
+                hard_type_routing=False,
+                residual_type_concentration_temperature=0.03,
+            )
+        )
+        assert model.residual_coefficient_head is not None
+        assert model.residual_gate_head is not None
+        with torch.no_grad():
+            model.residual_coefficient_head.bias.fill_(0.5)
+        output = model(torch.randn(5, 6), sample_latent=False)
+        assert output.residual_gate is not None
+        (output.residual_gate.sum() + output.residual_mu.square().sum()).backward()
+
+        self.assertIsNone(model.fine_type_head.weight.grad)
+        self.assertIsNone(model.fine_type_head.bias.grad)
+        self.assertIsNotNone(model.residual_gate_head.bias.grad)
+        assert model.residual_gate_head.bias.grad is not None
+        self.assertGreater(float(model.residual_gate_head.bias.grad), 0.0)
+
+    def test_residual_temperature_config_and_checkpoint_contract(self) -> None:
+        for invalid in (0.0, -0.01, float("inf"), float("nan")):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "temperature must be finite and positive"):
+                    small_config(residual_type_concentration_temperature=invalid)
+
+        configured = small_config(residual_type_concentration_temperature=0.037)
+        restored_config = HEIRConfig.from_dict(configured.to_dict())
+        self.assertEqual(restored_config.residual_type_concentration_temperature, 0.037)
+
+        configured_model = HEIRModel(configured).eval()
+        checkpoint = configured_model.checkpoint()
+        self.assertEqual(checkpoint["schema"], "heir.model.v4")
+        self.assertEqual(
+            checkpoint["residual_geometry"]["type_concentration_temperature"],
+            0.037,
+        )
+        restored = HEIRModel.from_checkpoint(checkpoint).eval()
+        self.assertEqual(restored.config.residual_type_concentration_temperature, 0.037)
+        morphology = torch.randn(4, 6)
+        expected = configured_model(morphology, sample_latent=False)
+        observed = restored(morphology, sample_latent=False)
+        torch.testing.assert_close(observed.residual_gate, expected.residual_gate)
+        torch.testing.assert_close(observed.expression, expected.expression)
+
+        historical = copy.deepcopy(checkpoint)
+        historical["schema"] = "heir.model.v3"
+        historical["config"].pop("residual_type_concentration_temperature")
+        historical["residual_geometry"].pop("type_concentration_temperature")
+        historical_model = HEIRModel.from_checkpoint(historical)
+        self.assertEqual(historical_model.config.residual_type_concentration_temperature, 0.05)
+        self.assertEqual(historical_model.config.residual_type_strategy, "detached_max_hard")
+
+        missing_v4_temperature = copy.deepcopy(checkpoint)
+        missing_v4_temperature["config"].pop("residual_type_concentration_temperature")
+        missing_v4_temperature["residual_geometry"].pop("type_concentration_temperature")
+        with self.assertRaisesRegex(ValueError, "v4 checkpoint.*temperature is missing"):
+            HEIRModel.from_checkpoint(missing_v4_temperature)
+
+        missing_v4_strategy = copy.deepcopy(checkpoint)
+        missing_v4_strategy["config"].pop("residual_type_strategy")
+        missing_v4_strategy["residual_geometry"].pop("type_strategy")
+        with self.assertRaisesRegex(ValueError, "v4 checkpoint.*strategy is missing"):
+            HEIRModel.from_checkpoint(
+                missing_v4_strategy,
+                allow_legacy_mixed_residual_basis=True,
+            )
+
+        inconsistent = copy.deepcopy(checkpoint)
+        inconsistent["residual_geometry"]["type_concentration_temperature"] = 0.04
+        with self.assertRaisesRegex(ValueError, "temperature differs"):
+            HEIRModel.from_checkpoint(inconsistent)
+
+    def test_v3_checkpoint_round_trip_preserves_hard_residual_gate_predictions(self) -> None:
+        historical_model = HEIRModel(
+            small_config(
+                fine_to_parent=None,
+                hard_type_routing=False,
+                graph_mode="distance_only",
+                graph_context_gate_init=1.0,
+                residual_type_strategy="detached_max_hard",
+                residual_type_concentration_threshold=0.6,
+            )
+        ).eval()
+        assert historical_model.residual_coefficient_head is not None
+        assert historical_model.residual_gate_head is not None
+        with torch.no_grad():
+            historical_model.fine_type_head.weight.zero_()
+            historical_model.fine_type_head.bias.copy_(torch.tensor([0.55, 0.25, 0.20]).log())
+            historical_model.residual_coefficient_head.bias.fill_(0.5)
+            historical_model.residual_gate_head.bias.fill_(1.0)
+
+        morphology = torch.randn(4, 6)
+        expected = historical_model(morphology, sample_latent=False)
+        assert expected.residual_gate is not None
+        torch.testing.assert_close(expected.residual_gate, torch.zeros(4))
+
+        checkpoint = historical_model.checkpoint()
+        self.assertEqual(checkpoint["schema"], "heir.model.v3")
+        self.assertEqual(checkpoint["config"]["residual_type_strategy"], "detached_max")
+        self.assertNotIn("residual_type_concentration_temperature", checkpoint["config"])
+        checkpoint["config"].pop("graph_mode")
+        checkpoint["config"].pop("graph_context_gate_init")
+        checkpoint["state_dict"].pop("graph_context_gate")
+        restored = HEIRModel.from_checkpoint(checkpoint).eval()
+        self.assertEqual(restored.config.residual_type_strategy, "detached_max_hard")
+        observed = restored(morphology, sample_latent=False)
+
+        torch.testing.assert_close(observed.residual_gate, expected.residual_gate)
+        torch.testing.assert_close(observed.residual_mu, expected.residual_mu)
+        torch.testing.assert_close(observed.expression, expected.expression)
+        self.assertEqual(restored.checkpoint()["schema"], "heir.model.v3")
+
+    def test_residual_gate_diagnostics_are_json_ready(self) -> None:
+        model = HEIRModel(
+            small_config(
+                fine_to_parent=None,
+                hard_type_routing=False,
+                residual_type_concentration_temperature=0.025,
+            )
+        ).eval()
+        output = model(torch.randn(5, 6), sample_latent=False)
+        diagnostics = model.residual_gate_diagnostics(output)
+
+        json.dumps(diagnostics)
+        self.assertEqual(diagnostics["schema"], "heir.residual_gate_diagnostics.v1")
+        self.assertEqual(diagnostics["cell_count"], 5)
+        self.assertTrue(diagnostics["available"])
+        self.assertEqual(diagnostics["concentration_temperature"], 0.025)
+        self.assertIn("p95", diagnostics["concentration_gate"])
+        self.assertIn("maximum", diagnostics["residual_norm"])
+
+        weighted_model = HEIRModel(
+            small_config(
+                fine_to_parent=None,
+                residual_type_strategy="legacy_weighted_basis",
+            )
+        ).eval()
+        weighted_output = weighted_model(torch.randn(3, 6), sample_latent=False)
+        weighted_diagnostics = weighted_model.residual_gate_diagnostics(weighted_output)
+        self.assertEqual(weighted_diagnostics["concentration_gate"]["mean"], 1.0)
+
     def test_residual_sampling_promotes_mixed_precision_geometry(self) -> None:
         basis = torch.zeros(3, 4, 2, dtype=torch.float32)
         basis[:, 0, 0] = 1.0
@@ -515,10 +785,13 @@ class HEIRModelTests(unittest.TestCase):
     def test_legacy_mixed_basis_checkpoint_requires_explicit_migration(self) -> None:
         model = HEIRModel(small_config(residual_rank=2)).eval()
         checkpoint = model.checkpoint()
+        checkpoint["schema"] = "heir.model.v3"
         checkpoint["config"].pop("residual_type_strategy")
         checkpoint["config"].pop("residual_type_concentration_threshold")
+        checkpoint["config"].pop("residual_type_concentration_temperature")
         checkpoint["residual_geometry"].pop("type_strategy")
         checkpoint["residual_geometry"].pop("type_concentration_threshold")
+        checkpoint["residual_geometry"].pop("type_concentration_temperature")
 
         with self.assertRaisesRegex(ValueError, "allow_legacy_mixed_residual_basis=True"):
             HEIRModel.from_checkpoint(checkpoint)

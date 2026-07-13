@@ -21,6 +21,8 @@ from heir.training import HEIRTrainingBatch, HEIRTrainingResult
 
 
 class _RecordingTrainer:
+    molecular_e_step_mode = "live_student_negative_control"
+
     def __init__(self, model: HEIRModel) -> None:
         self.model = model
         self.calls = []
@@ -258,6 +260,23 @@ def test_broad_transport_uses_binary_parent_support_without_probability_reweight
     )
 
 
+def test_default_round_teacher_copies_the_accepted_student_exactly() -> None:
+    student = torch.nn.Sequential(
+        torch.nn.Linear(3, 4),
+        torch.nn.BatchNorm1d(4),
+    )
+    teacher = EMATeacher(student)
+    assert teacher.decay == 0.0
+
+    with torch.no_grad():
+        for value in student.state_dict().values():
+            value.fill_(3 if not torch.is_floating_point(value) else 3.25)
+    teacher.update(student)
+
+    for name, expected in student.state_dict().items():
+        assert torch.equal(teacher.model.state_dict()[name], expected)
+
+
 def test_spatial_selection_uses_frozen_score_and_weak_objectives_only_as_safety() -> None:
     model = HEIRModel(
         HEIRConfig(
@@ -339,11 +358,57 @@ def test_view_agreement_fails_closed_without_independent_views() -> None:
     with pytest.raises(ValueError, match="scale-held-out view predictions"):
         IterativeRefiner(
             lambda: trainer,
-            RefinementConfig(broad_refinement_rounds=0),
+            RefinementConfig(
+                broad_refinement_rounds=0,
+                require_view_agreement=True,
+            ),
         ).fit(
             [_batch(3, "bag0", 0.0)],
             [_batch(3, "bag1", 0.0)],
         )
+
+
+def test_same_checkpoint_views_are_not_anchor_evidence_by_default(monkeypatch) -> None:
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=3,
+            num_cell_types=2,
+            expression_dim=2,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=3,
+            graph_layers=1,
+            trunk_hidden_dims=(4,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+            hard_type_routing=False,
+            abstain_threshold=1.0,
+        )
+    )
+    trainer = _RecordingTrainer(model)
+    observed_views = []
+    original = iterative_module.select_anchors
+
+    def record_views(*args, **kwargs):
+        observed_views.append(kwargs.get("view_predictions"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(iterative_module, "select_anchors", record_views)
+    config = RefinementConfig(
+        maximum_rounds=1,
+        broad_refinement_rounds=0,
+        min_probability=0.0,
+        max_normalized_entropy=1.0,
+        minimum_segmentation_confidence=0.0,
+    )
+    batch = _batch(3, "bag0", 0.0)
+    IterativeRefiner(lambda: trainer, config).fit(
+        [batch],
+        [batch],
+        view_probabilities={"donor-a::sample-a::bag0": np.asarray([[0, 0, 0], [1, 1, 1]])},
+    )
+
+    assert observed_views == [None]
 
 
 def test_broad_refinement_requires_a_hierarchical_model() -> None:
@@ -469,8 +534,168 @@ class _DegradingTrainer(_RecordingTrainer):
         self.model_states.append(
             {name: value.detach().clone() for name, value in self.model.state_dict().items()}
         )
-        loss = 1.0 if call_id == 1 else 2.0
+        loss = 0.9 if call_id == 1 else 2.0
         return HEIRTrainingResult(0, loss, tuple())
+
+
+class _LossScriptTrainer(_RecordingTrainer):
+    def __init__(self, model: HEIRModel, losses) -> None:
+        super().__init__(model)
+        self.losses = iter(losses)
+        self.model_states = []
+
+    def fit(self, training_batches, validation_batches):
+        del validation_batches
+        self.calls.append(tuple(training_batches))
+        with torch.no_grad():
+            next(self.model.parameters()).fill_(float(len(self.calls)))
+        self.model_states.append(
+            {name: value.detach().clone() for name, value in self.model.state_dict().items()}
+        )
+        return HEIRTrainingResult(0, float(next(self.losses)), tuple())
+
+
+def test_validation_safety_uses_immutable_round_zero_ceiling() -> None:
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=3,
+            num_cell_types=2,
+            expression_dim=2,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=3,
+            graph_layers=1,
+            trunk_hidden_dims=(4,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+            hard_type_routing=False,
+            abstain_threshold=1.0,
+        )
+    )
+    trainer = _LossScriptTrainer(model, (1.009, 1.018))
+    initial_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    config = RefinementConfig(
+        maximum_rounds=2,
+        broad_refinement_rounds=0,
+        min_probability=0.0,
+        max_normalized_entropy=1.0,
+        minimum_segmentation_confidence=0.0,
+        maximum_validation_loss_degradation=0.01,
+    )
+
+    result = IterativeRefiner(lambda: trainer, config).fit(
+        [_batch(3, "train", 0.0)],
+        [_batch(3, "validation", 0.0)],
+    )
+
+    assert [round_.committed for round_ in result.rounds] == [True, False]
+    assert result.selected_round == 0
+    assert result.stopped_reason == "validation_degraded_rollback"
+    for name, expected in initial_state.items():
+        assert torch.equal(trainer.model.state_dict()[name], expected)
+
+
+def test_fixed_schedule_retains_lowest_loss_safe_round() -> None:
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=3,
+            num_cell_types=2,
+            expression_dim=2,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=3,
+            graph_layers=1,
+            trunk_hidden_dims=(4,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+            hard_type_routing=False,
+            abstain_threshold=1.0,
+        )
+    )
+    trainer = _LossScriptTrainer(model, (0.8, 0.9))
+    config = RefinementConfig(
+        maximum_rounds=2,
+        broad_refinement_rounds=0,
+        min_probability=0.0,
+        max_normalized_entropy=1.0,
+        minimum_segmentation_confidence=0.0,
+    )
+
+    result = IterativeRefiner(lambda: trainer, config).fit(
+        [_batch(3, "train", 0.0)],
+        [_batch(3, "validation", 0.0)],
+    )
+
+    assert [round_.committed for round_ in result.rounds] == [True, True]
+    assert result.selected_round == 1
+    for name, expected in trainer.model_states[0].items():
+        assert torch.equal(trainer.model.state_dict()[name], expected)
+
+
+def test_strict_artifact_refinement_never_recomputes_responsibilities(monkeypatch) -> None:
+    model = HEIRModel(
+        HEIRConfig(
+            morphology_dim=3,
+            num_cell_types=2,
+            expression_dim=2,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=3,
+            graph_layers=1,
+            trunk_hidden_dims=(4,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+            hard_type_routing=False,
+            abstain_threshold=1.0,
+        )
+    )
+    trainer = _RecordingTrainer(model)
+    trainer.molecular_e_step_mode = "strict_artifact"
+    responsibilities = torch.tensor(
+        [[0.80, 0.10], [0.05, 0.70], [0.00, 0.00]],
+        dtype=torch.float32,
+    )
+    batch = replace(
+        _batch(3, "bag0", 0.0),
+        molecular_responsibilities=responsibilities,
+        source_artifacts=("unused-frozen-e-step.npz",),
+        source_sha256=("0" * 64,),
+        source_roles=("frozen_e_step",),
+    )
+    monkeypatch.setattr(
+        iterative_module.MolecularEStepArtifact,
+        "load_npz",
+        lambda path: SimpleNamespace(
+            source_marginal_residual=0.0,
+            target_marginal_residual=0.01,
+        ),
+    )
+
+    class _NoLiveTeacherRefiner(IterativeRefiner):
+        def _teacher_probabilities(self, teacher, current_batch):
+            del teacher, current_batch
+            raise AssertionError("strict artifact mode consulted the live teacher")
+
+        def _teacher_transport(self, trainer_, teacher, current_batch, **kwargs):
+            del trainer_, teacher, current_batch, kwargs
+            raise AssertionError("strict artifact mode recomputed transport")
+
+    config = RefinementConfig(
+        maximum_rounds=2,
+        broad_refinement_rounds=0,
+        min_probability=0.0,
+        max_normalized_entropy=1.0,
+        minimum_segmentation_confidence=0.0,
+    )
+    _NoLiveTeacherRefiner(lambda: trainer, config).fit(
+        [batch],
+        [batch],
+        view_probabilities={"donor-a::sample-a::bag0": np.asarray([[1, 1, 1], [1, 1, 1]])},
+    )
+
+    assert len(trainer.calls) == 2
+    for call in trainer.calls:
+        torch.testing.assert_close(call[0].molecular_responsibilities, responsibilities)
 
 
 def test_degraded_round_rolls_back_model_prior_and_skips_ema(monkeypatch) -> None:
@@ -616,6 +841,8 @@ def test_refinement_defaults_require_two_broad_rounds_and_fixed_prior() -> None:
     config.validate()
     assert config.maximum_rounds == 4
     assert config.broad_refinement_rounds == 2
+    assert config.teacher_ema == 0.0
+    assert not config.require_view_agreement
     assert config.prior_old_weight == 1.0
     assert config.prior_new_weight == 0.0
 

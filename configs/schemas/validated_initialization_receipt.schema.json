@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "heir.validated_initialization.v1",
+  "title": "HEIR validated initialization receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "pass",
+    "checkpoint_sha256",
+    "feature_space_id",
+    "latent_space_id",
+    "type_ontology_sha256",
+    "training_donors",
+    "held_out_donors",
+    "capabilities",
+    "evidence_report",
+    "evidence_report_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "heir.validated_initialization.v1"},
+    "status": {"const": "complete"},
+    "pass": {"const": true},
+    "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+    "feature_space_id": {"type": "string", "minLength": 1},
+    "latent_space_id": {"type": "string", "minLength": 1},
+    "type_ontology_sha256": {"$ref": "#/$defs/sha256"},
+    "training_donors": {"$ref": "#/$defs/donors"},
+    "held_out_donors": {"$ref": "#/$defs/donors"},
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["broad_type", "image_to_latent"],
+      "properties": {
+        "broad_type": {"const": true},
+        "image_to_latent": {"const": true}
+      }
+    },
+    "evidence_report": {"type": "string", "minLength": 1},
+    "evidence_report_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "donors": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

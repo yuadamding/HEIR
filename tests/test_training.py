@@ -1,5 +1,7 @@
 """Training-loop regression tests for donor and sample-level semantics."""
 
+import hashlib
+import json
 import os
 from dataclasses import replace
 
@@ -9,12 +11,18 @@ import torch
 
 from heir.config import LossWeightConfig, OptimizationConfig
 from heir.data import HistologyBag
+from heir.losses import unbalanced_sinkhorn
 from heir.models import HEIRConfig, HEIRModel
 from heir.training import (
     HEIRTrainer,
     HEIRTrainingBatch,
+    MolecularEStepArtifact,
     TrainingStage,
     aggregate_to_spots,
+    array_content_sha256,
+    frozen_transport_telemetry,
+    ordered_identity_sha256,
+    recompute_initialization_validation,
     spatial_block_split_masks,
     subset_histology_bag,
 )
@@ -41,7 +49,12 @@ def _patch(cells: int, bag_id: str, shift: float) -> HEIRTrainingBatch:
     )
 
 
-def _trainer(allow_overlap: bool = True) -> HEIRTrainer:
+def _trainer(
+    allow_overlap: bool = True,
+    *,
+    molecular_e_step_mode: str = "live_student_negative_control",
+    hard_anchor_routing: bool = False,
+) -> HEIRTrainer:
     model = HEIRModel(
         HEIRConfig(
             morphology_dim=3,
@@ -69,6 +82,8 @@ def _trainer(allow_overlap: bool = True) -> HEIRTrainer:
         LossWeightConfig(),
         device="cpu",
         allow_split_overlap=allow_overlap,
+        molecular_e_step_mode=molecular_e_step_mode,
+        hard_anchor_routing=hard_anchor_routing,
     )
 
 
@@ -114,7 +129,7 @@ def test_bernoulli_uot_gate_clamps_endpoint_probabilities_in_float32() -> None:
 
 
 def test_anchor_constraints_mask_local_routing_and_uot_responsibilities() -> None:
-    trainer = _trainer()
+    trainer = _trainer(hard_anchor_routing=True)
     with torch.no_grad():
         trainer.model.unknown_head.weight.zero_()
         trainer.model.unknown_head.bias.fill_(-20.0)
@@ -223,6 +238,454 @@ def test_molecular_posterior_receives_base_weights_before_known_mass(
     torch.testing.assert_close(captured["weights"], torch.tensor([2.0, 3.0]))
 
 
+def test_strict_fixed_responsibilities_skip_live_transport_and_direct_uot(
+    monkeypatch,
+) -> None:
+    trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    batch = replace(
+        _patch(3, "strict-m-step", 0.0),
+        molecular_responsibilities=torch.tensor(
+            [[0.8, 0.1], [0.2, 0.7], [0.4, 0.4]],
+        ),
+    )
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("strict M-step must not run live transport")
+
+    monkeypatch.setattr(trainer, "transport_responsibilities", fail)
+    monkeypatch.setattr("heir.losses.composite.unbalanced_sinkhorn", fail)
+    output = trainer._forward_output(batch)
+    loss, terms = trainer._output_loss(output, batch)
+    loss.backward()
+
+    assert float(terms["uot"].detach()) == 0.0
+    assert "molecular_posterior/transport_unassigned" in terms
+    assert trainer.model.fine_type_head.weight.grad is not None
+    assert trainer.model.unknown_head.weight.grad is not None
+
+
+def test_frozen_dustbin_mass_supervises_transport_unassignment_without_known_mass() -> None:
+    trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    batch = replace(
+        _patch(3, "strict-all-dustbin", 0.0),
+        molecular_responsibilities=torch.zeros((3, 2)),
+    )
+    output = trainer._forward_output(batch)
+
+    loss, terms = trainer._output_loss(output, batch)
+    loss.backward()
+
+    assert float(terms["molecular_posterior/routing"].detach()) == 0.0
+    assert float(terms["molecular_posterior/type"].detach()) == 0.0
+    assert float(terms["molecular_posterior/latent"].detach()) == 0.0
+    assert float(terms["molecular_posterior/transport_unassigned"].detach()) > 0.0
+    assert trainer.model.unknown_head.weight.grad is not None
+
+
+def test_strict_personalized_loss_rejects_missing_frozen_estep() -> None:
+    trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    batch = _patch(3, "missing-e-step", 0.0)
+    with pytest.raises(ValueError, match="requires a frozen E-step artifact"):
+        trainer._forward_loss(batch)
+
+
+def test_strict_fit_rejects_biological_unknown_targets_on_transport_head() -> None:
+    trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    training = replace(
+        _patch(3, "train-biological-unknown", 0.0),
+        unknown_targets=torch.zeros(3),
+    )
+    validation = _patch(3, "validation-biological-unknown", 0.0)
+    with pytest.raises(ValueError, match="transport-unassigned head"):
+        trainer.fit([training], [validation])
+
+
+def test_strict_fit_uses_only_hash_bound_frozen_responsibilities(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    teacher = tmp_path / "teacher.pt"
+    receipt = tmp_path / "receipt.json"
+    torch.manual_seed(7)
+    initializer = HEIRModel(
+        HEIRConfig(
+            morphology_dim=3,
+            num_cell_types=2,
+            expression_dim=2,
+            latent_dim=2,
+            graph_hidden_dim=4,
+            graph_output_dim=3,
+            graph_layers=1,
+            graph_mode="off",
+            trunk_hidden_dims=(5,),
+            decoder_hidden_dims=(4,),
+            dropout=0.0,
+        )
+    ).eval()
+    with torch.no_grad():
+        trunk = initializer.trunk[0]
+        trunk.weight.zero_()
+        trunk.weight[:3, :3].copy_(torch.eye(3))
+        trunk.bias.zero_()
+        initializer.trunk[1].weight.fill_(1.0)
+        initializer.trunk[1].bias.zero_()
+        initializer.fine_type_head.weight.copy_(
+            torch.tensor([[-5.0, 5.0, 0.0, 0.0, 0.0], [5.0, -5.0, 0.0, 0.0, 0.0]])
+        )
+        initializer.fine_type_head.bias.zero_()
+
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    plan = tmp_path / "plan.json"
+    evidence_artifact = tmp_path / "evidence.npz"
+    label_source = tmp_path / "labels.npz"
+    latent_source = tmp_path / "latent.npz"
+    evidence_ids = np.asarray(["e0", "e1", "e2", "e3"])
+    evidence_donors = np.asarray(["target-donor"] * 4)
+    evidence_labels = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    evidence_morphology = np.asarray(
+        [[-2.0, 2.0, 0.0]] * 2 + [[2.0, -2.0, 0.0]] * 2,
+        dtype=np.float32,
+    )
+    evidence_latent = np.asarray(
+        [[-1.0, 0.0]] * 2 + [[1.0, 0.0]] * 2,
+        dtype=np.float32,
+    )
+    with torch.no_grad():
+        embedding, _, _ = initializer.encode_frozen_morphology(
+            torch.from_numpy(evidence_morphology)
+        )
+        direction = embedding[2] - embedding[0]
+        latent_weight = 2.0 * direction / direction.square().sum()
+        initializer.prototype_query_head.weight.zero_()
+        initializer.prototype_query_head.bias.zero_()
+        initializer.prototype_query_head.weight[0].copy_(latent_weight)
+        initializer.prototype_query_head.bias[0].copy_(
+            -1.0 - torch.dot(latent_weight, embedding[0])
+        )
+    checkpoint_payload = initializer.checkpoint()
+    checkpoint_payload["metadata"] = {
+        "type_names": ["A", "B"],
+        "training_donors": ["development-donor"],
+        "feature_space_id": "feature-test-v1",
+        "latent_space_id": "latent-test-v1",
+        "excluded_from_primary_claims": False,
+        "exclusion_reasons": [],
+    }
+    torch.save(checkpoint_payload, teacher)
+    np.savez_compressed(
+        label_source,
+        schema=np.asarray("heir.independent_initialization_labels.v1"),
+        nucleus_ids=evidence_ids,
+        donor_ids=evidence_donors,
+        type_labels=evidence_labels,
+        type_names=np.asarray(["A", "B"]),
+        independent_of_checkpoint=np.asarray(True),
+    )
+    np.savez_compressed(
+        latent_source,
+        schema=np.asarray("heir.registered_image_latent_targets.v1"),
+        nucleus_ids=evidence_ids,
+        target_latent=evidence_latent,
+        latent_space_id=np.asarray("latent-test-v1"),
+        independent_of_checkpoint=np.asarray(True),
+    )
+    np.savez_compressed(
+        evidence_artifact,
+        morphology=evidence_morphology,
+        edge_index=np.empty((2, 0), dtype=np.int64),
+        nucleus_ids=evidence_ids,
+        donor_ids=evidence_donors,
+        type_labels=evidence_labels,
+        type_names=np.asarray(["A", "B"]),
+        target_latent=evidence_latent,
+        feature_space_id=np.asarray("feature-test-v1"),
+        latent_space_id=np.asarray("latent-test-v1"),
+        label_source_sha256=np.asarray(digest(label_source)),
+        latent_target_source_sha256=np.asarray(digest(latent_source)),
+        labels_independent_of_checkpoint=np.asarray(True),
+        latent_targets_independent_of_checkpoint=np.asarray(True),
+    )
+    seeds = [17, 41, 89]
+    thresholds = {
+        "minimum_macro_f1": 0.65,
+        "minimum_image_shuffle_macro_f1_delta": 0.05,
+        "minimum_latent_cosine": 0.0,
+        "minimum_image_shuffle_latent_cosine_delta": 0.01,
+        "maximum_latent_rmse": 1.0,
+        "maximum_ece": 0.10,
+        "maximum_brier": 0.25,
+        "minimum_predicted_class_occupancy_fraction": 0.75,
+        "minimum_per_type_support": 2,
+    }
+    plan.write_text(
+        json.dumps(
+            {
+                "schema": "heir.initialization_validation_plan.v1",
+                "status": "ready",
+                "checkpoint": {"path": str(teacher), "sha256": digest(teacher)},
+                "evaluation_artifact": {
+                    "path": str(evidence_artifact),
+                    "sha256": digest(evidence_artifact),
+                },
+                "label_source": {"path": str(label_source), "sha256": digest(label_source)},
+                "latent_target_source": {
+                    "path": str(latent_source),
+                    "sha256": digest(latent_source),
+                },
+                "held_out_donors": ["target-donor"],
+                "seeds": seeds,
+                "thresholds": thresholds,
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay = recompute_initialization_validation(
+        checkpoint=checkpoint_payload,
+        morphology=evidence_morphology,
+        edge_index=np.empty((2, 0), dtype=np.int64),
+        edge_weight=None,
+        labels=evidence_labels,
+        target_latent=evidence_latent,
+        donor_ids=evidence_donors,
+        seeds=seeds,
+    )
+    metrics = replay["metrics"]
+    evidence_report = tmp_path / "evidence_report.json"
+    evidence_report.write_text(
+        json.dumps(
+            {
+                "schema": "heir.initialization_validation_evidence.v1",
+                "status": "complete",
+                "pass": True,
+                "checkpoint": {"path": str(teacher), "sha256": digest(teacher)},
+                "plan": {"path": str(plan), "sha256": digest(plan)},
+                "evidence_artifact": {
+                    "path": str(evidence_artifact),
+                    "sha256": digest(evidence_artifact),
+                },
+                "label_source": {
+                    "path": str(label_source),
+                    "sha256": digest(label_source),
+                },
+                "latent_target_source": {
+                    "path": str(latent_source),
+                    "sha256": digest(latent_source),
+                },
+                "feature_space_id": "feature-test-v1",
+                "latent_space_id": "latent-test-v1",
+                "type_ontology_sha256": ordered_identity_sha256(("A", "B")),
+                "training_donors": ["development-donor"],
+                "held_out_donors": ["target-donor"],
+                "capabilities": {"broad_type": True, "image_to_latent": True},
+                "thresholds": thresholds,
+                "metrics": metrics,
+                "donor_metrics": replay["donor_metrics"],
+                "shuffle_controls": replay["shuffle_controls"],
+                "checks": {
+                    "macro_f1": True,
+                    "image_shuffle_macro_f1_delta": True,
+                    "latent_cosine": True,
+                    "image_shuffle_latent_cosine_delta": True,
+                    "latent_rmse": True,
+                    "ece": True,
+                    "brier": True,
+                    "predicted_class_occupancy": True,
+                    "per_type_support": True,
+                },
+                "execution": {"device": "cpu-float32", "seeds": seeds},
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema": "heir.validated_initialization.v1",
+                "status": "complete",
+                "pass": True,
+                "checkpoint_sha256": digest(teacher),
+                "feature_space_id": "feature-test-v1",
+                "latent_space_id": "latent-test-v1",
+                "type_ontology_sha256": ordered_identity_sha256(("A", "B")),
+                "training_donors": ["development-donor"],
+                "held_out_donors": ["target-donor"],
+                "capabilities": {"broad_type": True, "image_to_latent": True},
+                "evidence_report": str(evidence_report),
+                "evidence_report_sha256": digest(evidence_report),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def frozen_batch(name: str, reference_payload: bytes) -> HEIRTrainingBatch:
+        base = replace(
+            _patch(3, name, 0.0),
+            donor_id="target-donor",
+            type_names=("A", "B"),
+            gene_names=("g0", "g1"),
+            prototype_ids=("p0", "p1"),
+            latent_space_id="latent-test-v1",
+            feature_space_id="feature-test-v1",
+        )
+        histology = tmp_path / (name + "-histology.npz")
+        prototypes = tmp_path / (name + "-prototypes.npz")
+        reference = tmp_path / (name + "-reference.npz")
+        histology.write_bytes((name + "-histology").encode())
+        prototypes.write_bytes((name + "-prototypes").encode())
+        reference.write_bytes(reference_payload)
+        source_mass = np.ones(3, dtype=np.float32)
+        with torch.inference_mode():
+            _, type_probabilities, image_latent = initializer.encode_frozen_morphology(
+                base.morphology,
+                base.edge_index,
+                base.edge_weight,
+            )
+            variance = base.prototype_variances.clamp_min(
+                initializer.config.prototype_variance_floor
+            )
+            gaussian_cost = 0.5 * (
+                (image_latent.unsqueeze(1) - base.prototype_means.unsqueeze(0)).square()
+                / variance.unsqueeze(0)
+                + variance.unsqueeze(0).log()
+            ).mean(dim=2)
+            type_cost = (
+                -type_probabilities.index_select(1, base.prototype_types).clamp_min(1.0e-8).log()
+            )
+            known_cost = gaussian_cost + type_cost
+            transport = unbalanced_sinkhorn(
+                known_cost,
+                source_mass=torch.from_numpy(source_mass),
+                target_mass=base.prototype_weights,
+                epsilon=0.5,
+                marginal_relaxation=1.0,
+                iterations=500,
+                convergence_tolerance=1.0e-4,
+                unknown_mass=0.05,
+                unknown_cost=1.0,
+                add_unknown=True,
+            )
+        assert bool(transport.converged)
+        raw_plan = transport.plan.float().numpy()
+        plan = raw_plan / raw_plan.sum(axis=1, keepdims=True)
+        cost = (
+            torch.cat((known_cost, known_cost.new_full((len(known_cost), 1), 1.0)), dim=1)
+            .float()
+            .numpy()
+        )
+        desired_target = np.asarray([0.475, 0.475, 0.05], dtype=np.float64)
+        realized_target = (plan / 3.0).sum(axis=0, dtype=np.float64)
+        target_marginal_residual = float(np.abs(realized_target - desired_target).sum())
+        source_marginal_residual = float(np.max(np.abs(plan.sum(axis=1) - 1.0)))
+        telemetry = frozen_transport_telemetry(
+            raw_transport_plan=raw_plan,
+            transport_cost=cost,
+            source_mass=source_mass,
+            target_weights=base.prototype_weights.numpy(),
+            fixed_unknown_mass=0.05,
+            epsilon=0.5,
+            marginal_relaxation=1.0,
+        )
+        artifact = MolecularEStepArtifact(
+            transport_plan=plan,
+            raw_transport_plan=raw_plan,
+            transport_cost=cost,
+            source_mass=source_mass,
+            nucleus_ids=base.nucleus_ids,
+            prototype_ids=base.prototype_ids,
+            source_artifacts=(str(histology), str(prototypes), str(reference)),
+            source_sha256=(digest(histology), digest(prototypes), digest(reference)),
+            source_roles=("histology", "prototype_bank", "rna_reference"),
+            teacher_checkpoint=str(teacher),
+            teacher_checkpoint_sha256=digest(teacher),
+            initialization_receipt=str(receipt),
+            initialization_receipt_sha256=digest(receipt),
+            teacher_role="independent_crossmodal_bridge",
+            teacher_training_donors=("development-donor",),
+            target_donor="target-donor",
+            feature_space_id=base.feature_space_id,
+            latent_space_id=base.latent_space_id,
+            type_ontology_sha256=ordered_identity_sha256(base.type_names),
+            morphology_sha256=array_content_sha256(base.morphology.numpy()),
+            prototype_means_sha256=array_content_sha256(base.prototype_means.numpy()),
+            prototype_variances_sha256=array_content_sha256(base.prototype_variances.numpy()),
+            prototype_types_sha256=array_content_sha256(base.prototype_types.numpy()),
+            prototype_weights_sha256=array_content_sha256(base.prototype_weights.numpy()),
+            image_latent_sha256=array_content_sha256(image_latent.float().numpy()),
+            type_probabilities_sha256=array_content_sha256(type_probabilities.float().numpy()),
+            transport_cost_sha256=array_content_sha256(cost),
+            source_mass_sha256=array_content_sha256(source_mass),
+            artifact_threshold=0.5,
+            type_cost_weight=1.0,
+            unknown_cost=1.0,
+            fixed_unknown_mass=0.05,
+            uot_epsilon=0.5,
+            uot_marginal_relaxation=1.0,
+            uot_iterations=500,
+            uot_iterations_run=transport.iterations_run,
+            uot_convergence_tolerance=1.0e-4,
+            uot_maximum_marginal_residual=2.0,
+            converged=True,
+            source_marginal_residual=source_marginal_residual,
+            target_marginal_residual=target_marginal_residual,
+            solver_source_marginal_error=telemetry["solver_source_marginal_error"],
+            solver_target_marginal_error=telemetry["solver_target_marginal_error"],
+            source_dual_residual=float(transport.source_dual_residual.item()),
+            target_dual_residual=float(transport.target_dual_residual.item()),
+            transport_objective=telemetry["transport_objective"],
+        )
+        artifact_path = tmp_path / (name + "-e-step.npz")
+        artifact.save_npz(artifact_path)
+        return replace(
+            base,
+            molecular_responsibilities=torch.from_numpy(artifact.responsibilities),
+            weak_target_scope_id="sha256:" + digest(reference),
+            weak_target_granularity="complete_rna_specimen",
+            source_artifacts=(str(artifact_path),),
+            source_sha256=(digest(artifact_path),),
+            source_roles=("frozen_e_step",),
+            molecular_training_donors=("development-donor",),
+        )
+
+    training = frozen_batch("training", b"training specimen RNA")
+    validation = frozen_batch("validation", b"validation specimen RNA")
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("strict fit must not execute live transport")
+
+    monkeypatch.setattr(trainer, "transport_responsibilities", fail)
+    monkeypatch.setattr("heir.losses.composite.unbalanced_sinkhorn", fail)
+    result = trainer.fit([training], [validation])
+
+    assert result.best_epoch == 0
+
+
+def test_strict_split_rejects_reused_specimen_weak_targets() -> None:
+    train = replace(
+        _patch(3, "train-scope", 0.0),
+        weak_target_scope_id="sha256:" + "a" * 64,
+        weak_target_granularity="complete_rna_specimen",
+    )
+    validation = replace(
+        _patch(3, "validation-scope", 0.0),
+        weak_target_scope_id=train.weak_target_scope_id,
+        weak_target_granularity="complete_rna_specimen",
+    )
+
+    with pytest.raises(ValueError, match="reuse complete-specimen molecular targets"):
+        HEIRTrainer._validate_weak_target_split([train], [validation])
+
+
+def test_batch_rejects_unverifiable_weak_target_scope_identifier() -> None:
+    batch = replace(_patch(3, "bad-scope", 0.0), weak_target_scope_id="same-specimen")
+    with pytest.raises(ValueError, match="sha256"):
+        batch.validate(TrainingStage.PERSONALIZED)
+
+
 def test_uot_responsibilities_preserve_dustbin_row_mass() -> None:
     trainer = _trainer()
     trainer.uot_unknown_prior_strength = 0.01
@@ -267,6 +730,27 @@ def test_sample_losses_are_computed_once_after_graph_patch_merge() -> None:
     assert observed["total"] == pytest.approx(float(expected["total"]), rel=1e-6)
     assert merged_batch.morphology.shape[0] == 8
     assert merged_batch.edge_index.shape == (2, 0)
+
+
+def test_patch_merge_preserves_aligned_source_roles() -> None:
+    left = replace(
+        _patch(2, "left-provenance", 0.0),
+        source_artifacts=("/tmp/shared-reference.npz", "/tmp/left-estep.npz"),
+        source_sha256=("1" * 64, "2" * 64),
+        source_roles=("sample_assay", "frozen_e_step"),
+    )
+    right = replace(
+        _patch(2, "right-provenance", 0.0),
+        source_artifacts=("/tmp/shared-reference.npz", "/tmp/right-estep.npz"),
+        source_sha256=("1" * 64, "3" * 64),
+        source_roles=("sample_assay", "frozen_e_step"),
+    )
+
+    merged = HEIRTrainer._merge_sample_batches((left, right))
+
+    assert len(merged.source_artifacts) == len(merged.source_sha256) == len(merged.source_roles)
+    assert merged.source_roles.count("sample_assay") == 1
+    assert merged.source_roles.count("frozen_e_step") == 2
 
 
 def test_non_synthetic_fit_requires_explicit_donor_and_block() -> None:

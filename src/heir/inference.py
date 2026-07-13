@@ -5,7 +5,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Dict, Mapping, Optional, Sequence, Union
+from typing import ClassVar, Dict, Mapping, MutableMapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -867,6 +867,8 @@ def predict_cells(
     mc_chunk_size: Optional[int] = None,
     use_model_abstain: bool = False,
     allow_prototype_sample_mismatch: bool = False,
+    diagnostics: Optional[MutableMapping[str, object]] = None,
+    use_graph: Optional[bool] = None,
 ) -> PredictionBundle:
     """Predict one graph bag and derive latent/gene credible intervals.
 
@@ -1004,7 +1006,10 @@ def predict_cells(
             prototype_types=prototype_types,
             prototype_weights=prototype_weights,
             sample_latent=False,
+            use_graph=use_graph,
         )
+    if diagnostics is not None:
+        diagnostics["residual_gate"] = model.residual_gate_diagnostics(deterministic)
     latent_draws = []
     expression_draws = []
     # Graph context is deterministic at inference. Reuse it while sampling the

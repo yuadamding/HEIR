@@ -6,7 +6,7 @@ import os
 import random
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -70,6 +70,74 @@ def sha256_file(path: PathLike, chunk_bytes: int = 8 * 1024 * 1024) -> str:
                 break
             digest.update(block)
     return digest.hexdigest()
+
+
+def reject_output_input_collisions(
+    output_paths: Sequence[PathLike],
+    input_paths: Sequence[PathLike],
+    *,
+    label: str,
+) -> None:
+    """Reject output aliases of each other or of any bound input artifact.
+
+    Resolving paths catches lexical and symbolic-link aliases.  ``samefile``
+    additionally catches existing hard links, which must not provide an
+    alternate spelling that permits an input artifact to be overwritten.
+    Archive-member specifications protect their archive container, and bound
+    input directories protect every descendant path.
+    """
+
+    outputs = [Path(value).expanduser().resolve() for value in output_paths]
+    inputs = []
+    for value in input_paths:
+        raw = os.fspath(value)
+        container = raw.partition("::")[0]
+        inputs.append(Path(container).expanduser().resolve())
+
+    def aliases(first: Path, second: Path) -> bool:
+        if first == second:
+            return True
+        try:
+            return first.samefile(second)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise ValueError(
+                "%s could not verify output/input path independence: %s and %s"
+                % (label, first, second)
+            ) from error
+
+    for index, output in enumerate(outputs):
+        if any(aliases(output, other) for other in outputs[:index]):
+            raise ValueError("%s output paths collide with each other" % label)
+
+    def aliases_directory_member(output: Path, source: Path) -> bool:
+        if not source.is_dir():
+            return False
+        if source in output.parents:
+            return True
+        if not output.exists():
+            return False
+        try:
+            return any(item.is_file() and aliases(output, item) for item in source.rglob("*"))
+        except OSError as error:
+            raise ValueError(
+                "%s could not verify output/input directory independence: %s and %s"
+                % (label, output, source)
+            ) from error
+
+    collisions = []
+    for output in outputs:
+        if any(
+            aliases(output, source) or aliases_directory_member(output, source)
+            for source in inputs
+        ):
+            collisions.append(output)
+    if collisions:
+        raise ValueError(
+            "%s output would overwrite a bound input: %s"
+            % (label, ", ".join(str(path) for path in sorted(set(collisions), key=str)))
+        )
 
 
 def atomic_json_dump(payload: Dict[str, Any], path: PathLike) -> None:

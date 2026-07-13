@@ -301,6 +301,7 @@ class NativeScanviManifest:
     decoder_sha256: str
     annotation_status: str
     specimen_prototype_sha256: Mapping[str, str]
+    training_donors: Tuple[str, ...] = ()
     specimen_prototype_type_names: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     specimen_residual_geometry: Mapping[str, NativeResidualGeometry] = field(default_factory=dict)
     decoder_gene_names: Tuple[str, ...] = ()
@@ -817,6 +818,7 @@ def _load_native_scanvi_manifest(
         decoder_sha256=decoder_sha256,
         annotation_status=annotation_status,
         specimen_prototype_sha256=prototype_hashes,
+        training_donors=tuple(str(value) for value in sample_ids),
         specimen_prototype_type_names=prototype_type_names,
         specimen_residual_geometry=residual_geometries,
         decoder_gene_names=decoder_gene_names,
@@ -857,7 +859,10 @@ def _validate_refined_checkpoint_metadata(
     """Bind the refined model metadata to the native decoder and source prototype."""
 
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    if not isinstance(payload, Mapping) or payload.get("schema") != "heir.model.v3":
+    if not isinstance(payload, Mapping) or payload.get("schema") not in {
+        "heir.model.v3",
+        "heir.model.v4",
+    }:
         raise ValueError("refined checkpoint has an unsupported schema")
     metadata = payload.get("metadata")
     if not isinstance(metadata, Mapping) or metadata.get("schema") != "heir.refined_model.v1":
@@ -872,9 +877,26 @@ def _validate_refined_checkpoint_metadata(
     for name, value in expected.items():
         if metadata.get(name) != value:
             raise ValueError("refined checkpoint %s lineage differs for %s" % (name, section_id))
-    if metadata.get("training_donors") != [section_id] or metadata.get(
-        "refinement_training_donors"
+    if metadata.get("refinement_training_donors") != [section_id] or metadata.get(
+        "refinement_validation_donors"
     ) != [section_id]:
+        raise ValueError("refined checkpoint direct donor identity differs for %s" % section_id)
+    if native_scanvi.training_donors:
+        if metadata.get("direct_training_donors") != [section_id] or metadata.get(
+            "validation_donors"
+        ) != [section_id]:
+            raise ValueError(
+                "refined checkpoint parent direct donor identity differs for %s" % section_id
+            )
+        expected_exposures = sorted(set(native_scanvi.training_donors) | {section_id})
+        if metadata.get("training_donors") != expected_exposures:
+            raise ValueError(
+                "refined checkpoint all-exposure donor lineage differs for %s" % section_id
+            )
+    elif metadata.get("training_donors") != [section_id]:
+        # Synthetic unit fixtures predating all-exposure manifests do not carry
+        # the native donor set.  Real parsed manifests always take the strict
+        # branch above.
         raise ValueError("refined checkpoint donor identity differs for %s" % section_id)
     geometry = native_scanvi.specimen_residual_geometry.get(section_id)
     if geometry is None:

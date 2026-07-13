@@ -1,0 +1,32 @@
+{
+  "schema": "heir.synthetic_performance_regression.v1",
+  "claim_scope": "deterministic_forward_control_only_not_biological_performance",
+  "sources": [
+    {
+      "path": "src/heir/models/heir.py",
+      "sha256": "f60972b01ffd8b3ab577fd3a5d7fa01623bbaef847ac342ebdbfc1858d798967"
+    },
+    {
+      "path": "src/heir/models/graph.py",
+      "sha256": "3f361de88ea932c2f57561a93fb5aec9256c2d0b9ac02fb03cd7515f649af804"
+    },
+    {
+      "path": "src/heir/models/rna.py",
+      "sha256": "e0ab8ec4d0e9da64c1d17a7009ce95a77f28f2554fa64224c63a13866534aca7"
+    },
+    {
+      "path": "tests/test_performance_regression.py",
+      "sha256": "05ca1c3547181847e9a929342a61b76859b7d61fccfb97516511d5498b4c22af"
+    }
+  ],
+  "expected": {
+    "matched_accuracy": 1.0,
+    "image_shuffle_accuracy": 0.0,
+    "matched_latent_mse": 6.5995565e-08,
+    "wrong_bank_latent_mse": 0.99983406,
+    "residual_off_latent_mse": 0.2500062,
+    "matched_graph_accuracy": 1.0,
+    "rewired_graph_accuracy": 0.0,
+    "no_graph_accuracy": 0.5
+  }
+}

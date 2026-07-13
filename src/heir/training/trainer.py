@@ -1,9 +1,12 @@
 """Finite, auditable training loop for generic or personalized HEIR stages."""
 
+import hashlib
 import math
 from dataclasses import dataclass, fields, replace
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import functional as F
@@ -20,6 +23,7 @@ from ..models.heir import HEIRModel, HEIROutput
 from ..models.rna import RNAVAE
 from ..utils import resolve_device, set_seed
 from .batch import HEIRTrainingBatch
+from .contracts import MolecularEStepArtifact
 from .stages import TrainingStage
 
 
@@ -73,6 +77,14 @@ class HEIRTrainer:
     """Train one coherent graph bag at a time to preserve neighborhoods."""
 
     @staticmethod
+    def _source_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @staticmethod
     def _bernoulli_uot_costs(
         prototype_cost: Tensor,
         unknown_probability: Tensor,
@@ -92,6 +104,13 @@ class HEIRTrainer:
 
     def _anchor_constraints(self, batch: HEIRTrainingBatch) -> Optional[Tensor]:
         """Translate accepted fine/parent anchors into prototype routing masks."""
+
+        # Pseudo-anchors supervise the type heads through confidence-weighted
+        # losses, but must not exclude contradictory molecular prototypes.
+        # Hard routing is reserved for independently reviewed labels and is an
+        # explicit trainer option rather than the refinement default.
+        if not self.hard_anchor_routing:
+            return None
 
         cells = len(batch.morphology)
         types = self.model.config.num_cell_types
@@ -236,6 +255,8 @@ class HEIRTrainer:
         seed: int = 17,
         device: str = "auto",
         allow_split_overlap: bool = False,
+        molecular_e_step_mode: str = "strict_artifact",
+        hard_anchor_routing: bool = False,
     ) -> None:
         if stage not in {
             TrainingStage.GENERIC_SPATIAL_PRETRAINING,
@@ -258,6 +279,13 @@ class HEIRTrainer:
         if uot_unknown_mass_mode not in {"fixed", "targets_or_fixed", "model_estimate"}:
             raise ValueError(
                 "uot_unknown_mass_mode must be fixed, targets_or_fixed, or model_estimate"
+            )
+        if molecular_e_step_mode not in {
+            "strict_artifact",
+            "live_student_negative_control",
+        }:
+            raise ValueError(
+                "molecular_e_step_mode must be strict_artifact or live_student_negative_control"
             )
         self.model = model
         self.stage = stage
@@ -289,6 +317,8 @@ class HEIRTrainer:
         self.seed = seed
         self.device = resolve_device(device)
         self.allow_split_overlap = allow_split_overlap
+        self.molecular_e_step_mode = molecular_e_step_mode
+        self.hard_anchor_routing = hard_anchor_routing
 
     def _forward_output(self, batch: HEIRTrainingBatch) -> HEIROutput:
         return self.model(
@@ -303,6 +333,102 @@ class HEIRTrainer:
             cell_type_constraints=self._anchor_constraints(batch),
         )
 
+    def _validate_frozen_e_step_batch(self, batch: HEIRTrainingBatch) -> None:
+        """Revalidate the immutable E-step and its copied batch payload."""
+
+        if batch.molecular_responsibilities is None:
+            raise ValueError(
+                "strict molecular M-step requires responsibilities for every train/validation bag"
+            )
+        indices = [
+            index for index, role in enumerate(batch.source_roles) if role == "frozen_e_step"
+        ]
+        if len(indices) != 1:
+            raise ValueError(
+                "strict molecular M-step requires exactly one hash-bound frozen_e_step source"
+            )
+        index = indices[0]
+        path = Path(batch.source_artifacts[index]).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError("frozen molecular E-step artifact is unavailable: %s" % path)
+        digest = self._source_sha256(path)
+        if digest != batch.source_sha256[index]:
+            raise ValueError("frozen molecular E-step artifact hash no longer matches the batch")
+        artifact = MolecularEStepArtifact.load_npz(path)
+        upstream_hashes = {}
+        for source, recorded, role in zip(
+            artifact.source_artifacts,
+            artifact.source_sha256,
+            artifact.source_roles,
+        ):
+            upstream = Path(source).expanduser().resolve()
+            if not upstream.is_file():
+                raise ValueError("frozen E-step upstream source is unavailable: %s" % upstream)
+            actual = self._source_sha256(upstream)
+            if actual != recorded:
+                raise ValueError("frozen E-step upstream source hash no longer matches")
+            upstream_hashes[role] = actual
+        artifact.validate_binding(
+            nucleus_ids=batch.nucleus_ids,
+            prototype_ids=batch.prototype_ids,
+            source_sha256_by_role=upstream_hashes,
+            target_donor=batch.donor_id,
+            feature_space_id=batch.feature_space_id,
+            latent_space_id=batch.latent_space_id,
+            type_names=batch.type_names,
+            morphology=batch.morphology.detach().cpu().numpy(),
+            edge_index=batch.edge_index.detach().cpu().numpy(),
+            edge_weight=(
+                None if batch.edge_weight is None else batch.edge_weight.detach().cpu().numpy()
+            ),
+            prototype_means=batch.prototype_means.detach().cpu().numpy(),
+            prototype_variances=batch.prototype_variances.detach().cpu().numpy(),
+            prototype_types=batch.prototype_types.detach().cpu().numpy(),
+            prototype_weights=batch.prototype_weights.detach().cpu().numpy(),
+            cell_weights=(
+                np.ones(len(batch.morphology), dtype=np.float32)
+                if batch.cell_weights is None
+                else batch.cell_weights.detach().cpu().numpy()
+            ),
+            artifact_threshold=artifact.artifact_threshold,
+        )
+        expected_weak_scope = "sha256:%s" % upstream_hashes["rna_reference"]
+        if batch.weak_target_scope_id != expected_weak_scope:
+            raise ValueError("weak_target_scope_id is not bound to the frozen E-step RNA reference")
+        if not math.isclose(
+            artifact.fixed_unknown_mass,
+            self.uot_unknown_mass,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ValueError("frozen E-step unknown mass differs from the trainer contract")
+        expected = torch.from_numpy(artifact.responsibilities).to(
+            batch.molecular_responsibilities.device
+        )
+        if not torch.equal(batch.molecular_responsibilities, expected):
+            raise ValueError("batch molecular responsibilities differ from the frozen E-step")
+        if not set(artifact.teacher_training_donors).issubset(set(batch.molecular_training_donors)):
+            raise ValueError("batch omits frozen E-step teacher training-donor provenance")
+
+    @staticmethod
+    def _validate_weak_target_split(
+        training_batches: Sequence[HEIRTrainingBatch],
+        validation_batches: Sequence[HEIRTrainingBatch],
+    ) -> None:
+        """Prevent complete-specimen RNA targets from selecting their own model."""
+
+        all_batches = tuple(training_batches) + tuple(validation_batches)
+        if any(batch.weak_target_scope_id == "unspecified" for batch in all_batches):
+            raise ValueError("strict molecular training requires weak_target_scope_id")
+        training_scopes = {batch.weak_target_scope_id for batch in training_batches}
+        validation_scopes = {batch.weak_target_scope_id for batch in validation_batches}
+        overlap = sorted(training_scopes & validation_scopes)
+        if overlap:
+            raise ValueError(
+                "train/validation reuse complete-specimen molecular targets: %s"
+                % ", ".join(overlap[:3])
+            )
+
     @staticmethod
     def _molecular_posterior_loss(
         output: HEIROutput,
@@ -310,7 +436,12 @@ class HEIRTrainer:
         responsibilities: Tensor,
         cell_weights: Tensor,
     ) -> Tuple[Tensor, Dict[str, Tensor]]:
-        """Detached UOT E-step targets for molecular routing, type, and latent mean."""
+        """Optimize the complete-data objective against a frozen molecular E-step.
+
+        The known prototype sub-plan supervises routing, type, and latent state.
+        The dustbin fraction separately supervises *transport unassignment*; it
+        is deliberately not interpreted as a biological unknown/OOD label.
+        """
 
         if responsibilities.shape != output.conditional_prototype_probabilities.shape:
             raise ValueError("molecular responsibilities and prototype routing must align")
@@ -318,6 +449,14 @@ class HEIRTrainer:
         row_mass = responsibilities.sum(dim=1)
         valid = row_mass > 1.0e-8
         conditional = responsibilities / row_mass.unsqueeze(1).clamp_min(1.0e-8)
+        transport_unassigned_target = (1.0 - row_mass).clamp(0.0, 1.0)
+        transport_unassigned_per_cell = F.binary_cross_entropy(
+            output.unknown_probability.clamp(1.0e-8, 1.0 - 1.0e-8),
+            transport_unassigned_target,
+            reduction="none",
+        )
+        cell_mass = cell_weights.sum().clamp_min(1.0e-8)
+        transport_unassigned = (transport_unassigned_per_cell * cell_weights).sum() / cell_mass
         # The real-plan fraction is the molecular E-step's known-state mass.
         # Dustbin-dominated cells therefore contribute proportionally less to
         # every complete-data M-step term.
@@ -325,10 +464,11 @@ class HEIRTrainer:
         mass = effective.sum().clamp_min(1.0e-8)
         if not bool(valid.any()):
             zero = output.latent_mu.sum() * 0.0
-            return zero, {
+            return transport_unassigned, {
                 "molecular_posterior/routing": zero,
                 "molecular_posterior/type": zero,
                 "molecular_posterior/latent": zero,
+                "molecular_posterior/transport_unassigned": transport_unassigned,
             }
 
         routing_per_cell = -(
@@ -360,11 +500,12 @@ class HEIRTrainer:
         ).mean(dim=2)
         latent_per_cell = (conditional * latent_nll).sum(dim=1)
         latent_loss = (latent_per_cell * effective).sum() / mass
-        total = routing + type_loss + latent_loss
+        total = routing + type_loss + latent_loss + transport_unassigned
         return total, {
             "molecular_posterior/routing": routing,
             "molecular_posterior/type": type_loss,
             "molecular_posterior/latent": latent_loss,
+            "molecular_posterior/transport_unassigned": transport_unassigned,
         }
 
     @staticmethod
@@ -395,21 +536,38 @@ class HEIRTrainer:
         cycle_latent = None
         if self.rna_encoder is not None:
             cycle_latent, _ = self.rna_encoder.encode(output.expression)
-        uot_cost, uot_unknown_cost = self._bernoulli_uot_costs(
-            output.prototype_cost,
-            output.unknown_probability,
-        )
         base_cell_weights = (
             output.unknown_probability.new_ones(len(output.unknown_probability))
             if batch.cell_weights is None
             else batch.cell_weights
         )
-        estimated_unknown_mass = self._estimated_uot_unknown_mass(batch, output)
         precomputed_uot: Optional[UnbalancedSinkhornResult] = None
         if batch.molecular_responsibilities is None:
+            if (
+                self.stage in {TrainingStage.PERSONALIZED, TrainingStage.REFINEMENT}
+                and self.molecular_e_step_mode != "live_student_negative_control"
+            ):
+                raise ValueError(
+                    "strict molecular M-step requires a frozen E-step artifact; "
+                    "live student transport is available only as an explicit negative control"
+                )
+            uot_cost, uot_unknown_cost = self._bernoulli_uot_costs(
+                output.prototype_cost,
+                output.unknown_probability,
+            )
+            estimated_unknown_mass: Optional[Tensor] = self._estimated_uot_unknown_mass(
+                batch, output
+            )
             responsibilities, precomputed_uot = self.transport_responsibilities(batch, output)
         else:
+            # A strict M-step consumes the detached artifact and does not
+            # evaluate a second live-student UOT objective.  This is the actual
+            # E/M boundary: neither the current type/latent output nor the live
+            # unknown head can modify the target being optimized.
             responsibilities = batch.molecular_responsibilities.detach()
+            uot_cost = None
+            uot_unknown_cost = None
+            estimated_unknown_mass = None
         biological_cell_weights = self._uot_known_cell_weights(
             base_cell_weights,
             responsibilities,
@@ -433,6 +591,7 @@ class HEIRTrainer:
             uot_unknown_cost=uot_unknown_cost,
             uot_unknown_mass=estimated_unknown_mass,
             precomputed_uot=precomputed_uot,
+            compute_uot=batch.molecular_responsibilities is None,
             target_pseudobulk=batch.target_pseudobulk,
             program_matrix=batch.program_matrix,
             target_program_scores=batch.target_program_scores,
@@ -441,8 +600,8 @@ class HEIRTrainer:
             residual_precision=batch.prototype_variances.reciprocal(),
             residual_assignments=responsibilities,
             cycle_latent=cycle_latent,
-            edge_index=batch.edge_index,
-            edge_weight=batch.edge_weight,
+            edge_index=(None if self.model.config.graph_mode == "off" else batch.edge_index),
+            edge_weight=(None if self.model.config.graph_mode == "off" else batch.edge_weight),
             anchor_labels=batch.anchor_labels,
             anchor_weights=batch.anchor_weights,
             parent_anchor_labels=getattr(batch, "parent_anchor_labels", None),
@@ -539,6 +698,8 @@ class HEIRTrainer:
                 or batch.feature_space_id != first.feature_space_id
                 or batch.expression_space_id != first.expression_space_id
                 or batch.scgpt_space_id != first.scgpt_space_id
+                or batch.weak_target_scope_id != first.weak_target_scope_id
+                or batch.weak_target_granularity != first.weak_target_granularity
                 or batch.type_names != first.type_names
                 or batch.gene_names != first.gene_names
                 or batch.prototype_ids != first.prototype_ids
@@ -676,10 +837,14 @@ class HEIRTrainer:
                 / spot_mass.sum().clamp_min(1.0e-8)
             )
 
-        source_pairs = {
-            (path, digest)
+        source_triples = {
+            (path, digest, role)
             for batch in batches
-            for path, digest in zip(batch.source_artifacts, batch.source_sha256)
+            for path, digest, role in zip(
+                batch.source_artifacts,
+                batch.source_sha256,
+                batch.source_roles,
+            )
         }
         nucleus_ids = tuple(value for batch in batches for value in batch.nucleus_ids)
         if spot_assignment is not None and len(set(nucleus_ids)) != len(nucleus_ids):
@@ -723,8 +888,9 @@ class HEIRTrainer:
             spot_ids=(() if spot_assignment is None else tuple(ordered_spots)),
             bag_id="__sample_aggregate__",
             nucleus_ids=nucleus_ids,
-            source_artifacts=tuple(path for path, _ in sorted(source_pairs)),
-            source_sha256=tuple(digest for _, digest in sorted(source_pairs)),
+            source_artifacts=tuple(path for path, _, _ in sorted(source_triples)),
+            source_sha256=tuple(digest for _, digest, _ in sorted(source_triples)),
+            source_roles=tuple(role for _, _, role in sorted(source_triples)),
         )
 
     def _epoch(
@@ -794,6 +960,26 @@ class HEIRTrainer:
     ) -> HEIRTrainingResult:
         if not training_batches or not validation_batches:
             raise ValueError("training and weak-validation batches cannot be empty")
+        if self.stage in {TrainingStage.PERSONALIZED, TrainingStage.REFINEMENT}:
+            if self.molecular_e_step_mode == "strict_artifact":
+                if any(
+                    batch.unknown_targets is not None
+                    for batch in tuple(training_batches) + tuple(validation_batches)
+                ):
+                    raise ValueError(
+                        "strict molecular training cannot map biological unknown targets "
+                        "onto the transport-unassigned head"
+                    )
+                self._validate_weak_target_split(training_batches, validation_batches)
+                for batch in tuple(training_batches) + tuple(validation_batches):
+                    self._validate_frozen_e_step_batch(batch)
+            elif any(
+                "frozen_e_step" in batch.source_roles
+                for batch in tuple(training_batches) + tuple(validation_batches)
+            ):
+                raise ValueError(
+                    "live-student E-step negative control cannot consume frozen E-step artifacts"
+                )
         if not self.allow_split_overlap:
             missing = [
                 "%s/%s/%s" % (batch.donor_id, batch.sample_id, batch.bag_id)

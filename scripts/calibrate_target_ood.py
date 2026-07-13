@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Calibrate a B1-trained OOD threshold from target H&E features only.
+"""Record target H&E OOD-score telemetry without changing the detector.
 
 The Mahalanobis location and precision, feature-space identity, training donors,
-and training-source hashes are copied unchanged from the development detector.
-Only the scalar rejection threshold is calibrated on a target ``HistologyBag``.
-No target expression artifact is accepted by this command.
+training-source hashes, and the development-calibrated rejection threshold are
+copied unchanged.  A target-score quantile is descriptive telemetry only; it
+never becomes a training target or prediction threshold. No target expression
+artifact is accepted by this command.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from heir.data import HistologyBag
 from heir.uncertainty import MahalanobisOOD
 
 CALIBRATION_CONTRACT = "heir.target_histology_ood_calibration"
-CALIBRATION_VERSION = 1
+CALIBRATION_VERSION = 2
 
 
 def _sha256(path: Path) -> str:
@@ -144,11 +145,14 @@ def calibrate(
         raise ValueError("HistologyBag and base OOD detector use different feature spaces")
     if base.mean is None or base.precision is None:
         raise ValueError("base OOD detector has no fitted Mahalanobis parameters")
+    if base.threshold is None:
+        raise ValueError("base OOD detector has no development-calibrated threshold")
     if bag.features.shape[1] != base.mean.shape[0]:
         raise ValueError("HistologyBag width differs from the base OOD detector")
 
     scores = _score_in_batches(base, bag.features, score_batch_size)
-    threshold = float(np.quantile(scores.astype(np.float64), quantile))
+    target_quantile_value = float(np.quantile(scores.astype(np.float64), quantile))
+    threshold = float(base.threshold)
     score_stats = {
         "count": int(scores.size),
         "minimum": float(scores.min()),
@@ -156,15 +160,15 @@ def calibrate(
         "mean": float(scores.astype(np.float64).mean()),
         "standard_deviation": float(scores.astype(np.float64).std()),
         "median": float(np.quantile(scores.astype(np.float64), 0.5)),
-        "calibration_quantile": float(quantile),
-        "calibration_quantile_value": threshold,
+        "descriptive_target_quantile": float(quantile),
+        "descriptive_target_quantile_value": target_quantile_value,
     }
 
     calibrated = MahalanobisOOD(
         mean=np.array(base.mean, dtype=np.float64, copy=True),
         precision=np.array(base.precision, dtype=np.float64, copy=True),
         threshold=threshold,
-        quantile=float(quantile),
+        quantile=float(base.quantile),
         training_donors=tuple(base.training_donors),
         source_sha256=tuple(base.source_sha256),
         feature_space_id=base.feature_space_id,
@@ -188,6 +192,9 @@ def calibrate(
         "base_ood_sha256": np.asarray(base_sha256, dtype=np.dtype("U")),
         "histology_sha256": np.asarray(histology_sha256, dtype=np.dtype("U")),
         "sample_id": np.asarray(sample_id, dtype=np.dtype("U")),
+        "threshold_source": np.asarray("development_detector", dtype=np.dtype("U")),
+        "target_score_quantile": np.asarray(quantile, dtype=np.float64),
+        "target_score_quantile_value": np.asarray(target_quantile_value, dtype=np.float64),
         "target_expression_accessed": np.asarray(False, dtype=np.bool_),
         "score_count": np.asarray(score_stats["count"], dtype=np.int64),
         "score_minimum": np.asarray(score_stats["minimum"], dtype=np.float64),
@@ -199,11 +206,13 @@ def calibrate(
     _atomic_deterministic_npz(output_path, payload)
     output_sha256 = _sha256(output_path)
     provenance: Mapping[str, object] = {
-        "schema": CALIBRATION_CONTRACT + ".v1",
+        "schema": CALIBRATION_CONTRACT + ".v2",
         "sample_id": sample_id,
         "target_expression_accessed": False,
-        "calibration_input_modality": "target_histology_features_only",
-        "quantile": float(quantile),
+        "calibration_input_modality": "development_threshold_plus_target_histology_telemetry",
+        "threshold_source": "development_detector",
+        "descriptive_target_quantile": float(quantile),
+        "descriptive_target_quantile_value": target_quantile_value,
         "threshold": threshold,
         "score_stats": score_stats,
         "copied_training_provenance": {

@@ -39,7 +39,19 @@ from .data import (
     read_visium_counts,
     verify_checksums,
 )
-from .evaluation import cell_type_metrics, composition_metrics, expression_metrics
+from .evaluation import (
+    COVERAGE_BENCHMARK_PLAN_SCHEMA,
+    COVERAGE_ENDPOINT_INPUT_CONTRACT,
+    COVERAGE_ENDPOINT_INPUT_VERSION,
+    CoverageAggregation,
+    build_truth_gene_mask,
+    cell_type_metrics,
+    composition_metrics,
+    evaluate_methods_on_truth_gene_mask,
+    expression_metrics,
+    fixed_coverage_selective_aggregation,
+    full_coverage_type_mean_aggregation,
+)
 from .expression import EXPRESSION_MAX, EXPRESSION_SPACE_ID, EXPRESSION_TARGET_SUM
 from .image import (
     PixelMicronTransform,
@@ -70,9 +82,22 @@ from .segmentation import (
     read_spaceranger_geojson,
     run_spaceranger_segment,
 )
-from .training import HEIRTrainer, HEIRTrainingBatch, TrainingStage
+from .training import (
+    HEIRTrainer,
+    HEIRTrainingBatch,
+    MolecularEStepArtifact,
+    TrainingStage,
+    ValidatedInitializationReceipt,
+)
 from .uncertainty import MahalanobisOOD
-from .utils import atomic_json_dump, resolve_device, set_seed
+from .utils import (
+    atomic_json_dump,
+    resolve_device,
+    set_seed,
+)
+from .utils import (
+    reject_output_input_collisions as reject_path_collisions,
+)
 
 
 def _json(payload: object) -> None:
@@ -247,6 +272,156 @@ def _artifact_sha256(path: str) -> str:
         digest.update(relative)
         digest.update(bytes.fromhex(_sha256(str(item))))
     return digest.hexdigest()
+
+
+def _freeze_file_records(paths: Sequence[str], label: str) -> List[Dict[str, str]]:
+    """Hash exact file inputs before they are parsed or used for fitting."""
+
+    records = []
+    seen = set()
+    for raw in paths:
+        path = Path(raw).expanduser().resolve()
+        if path in seen:
+            raise ValueError("%s repeats input path %s" % (label, path))
+        if not path.is_file():
+            raise FileNotFoundError("%s input is unavailable: %s" % (label, path))
+        seen.add(path)
+        records.append({"path": str(path), "sha256": _sha256(str(path))})
+    return records
+
+
+def _freeze_transitive_batch_source_records(
+    batches: Sequence[HEIRTrainingBatch], label: str
+) -> List[Dict[str, str]]:
+    """Freeze every hash-bound source reachable from loaded training batches.
+
+    In addition to each batch's direct ``source_artifacts``, strict frozen
+    E-steps bring their teacher, initialization receipt, original morphology/RNA
+    sources, evidence report, prespecified plan, and independent evidence
+    artifacts into the fitting trust boundary.  Freezing only the batch NPZ
+    leaves all of those files mutable after validation.
+    """
+
+    expected_by_path: Dict[str, str] = {}
+
+    def canonical_path(raw: str, *, base: Optional[Path] = None) -> str:
+        base_path, separator, member = str(raw).partition("::")
+        path = Path(base_path).expanduser()
+        if not path.is_absolute() and base is not None:
+            path = base / path
+        resolved = str(path.resolve())
+        return resolved if not separator else "%s::%s" % (resolved, member)
+
+    def add(raw: str, expected: str, *, source_label: str, base: Optional[Path] = None) -> str:
+        path = canonical_path(raw, base=base)
+        previous = expected_by_path.get(path)
+        if previous is not None and previous != expected:
+            raise ValueError("%s gives conflicting hashes for %s" % (label, path))
+        try:
+            actual = _artifact_sha256(path)
+        except (OSError, EOFError, ValueError, tarfile.TarError) as error:
+            raise ValueError("%s %s is unavailable: %s" % (label, source_label, path)) from error
+        if actual != expected:
+            raise ValueError("%s %s hash no longer matches: %s" % (label, source_label, path))
+        expected_by_path[path] = expected
+        return path
+
+    frozen_e_steps: List[Path] = []
+    for batch in batches:
+        for raw, expected, role in zip(
+            batch.source_artifacts, batch.source_sha256, batch.source_roles
+        ):
+            path = add(raw, expected, source_label="batch source")
+            if role == "frozen_e_step":
+                if "::" in path:
+                    raise ValueError("%s frozen E-step must be a standalone NPZ" % label)
+                frozen_e_steps.append(Path(path))
+
+    for e_step_path in frozen_e_steps:
+        artifact = MolecularEStepArtifact.load_npz(e_step_path)
+        for raw, expected, role in zip(
+            artifact.source_artifacts, artifact.source_sha256, artifact.source_roles
+        ):
+            add(raw, expected, source_label="E-step %s source" % role)
+        add(
+            artifact.teacher_checkpoint,
+            artifact.teacher_checkpoint_sha256,
+            source_label="E-step teacher",
+        )
+        receipt_path = Path(
+            add(
+                artifact.initialization_receipt,
+                artifact.initialization_receipt_sha256,
+                source_label="E-step initialization receipt",
+            )
+        )
+        receipt = ValidatedInitializationReceipt.load_json(receipt_path)
+        evidence_path = Path(
+            add(
+                receipt.evidence_report,
+                receipt.evidence_report_sha256,
+                source_label="initialization evidence report",
+                base=receipt_path.parent,
+            )
+        )
+        try:
+            with evidence_path.open("r", encoding="utf-8") as handle:
+                evidence = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("%s initialization evidence report is malformed" % label) from error
+        if not isinstance(evidence, Mapping):
+            raise ValueError("%s initialization evidence report is malformed" % label)
+        for key in (
+            "checkpoint",
+            "plan",
+            "evidence_artifact",
+            "label_source",
+            "latent_target_source",
+        ):
+            record = evidence.get(key)
+            if (
+                not isinstance(record, Mapping)
+                or set(record) != {"path", "sha256"}
+                or not isinstance(record.get("path"), str)
+                or not isinstance(record.get("sha256"), str)
+            ):
+                raise ValueError("%s initialization %s binding is malformed" % (label, key))
+            add(
+                str(record["path"]),
+                str(record["sha256"]),
+                source_label="initialization %s" % key,
+                base=evidence_path.parent,
+            )
+    return [{"path": path, "sha256": digest} for path, digest in sorted(expected_by_path.items())]
+
+
+def _assert_file_records_unchanged(records: Sequence[Mapping[str, str]], label: str) -> None:
+    """Reject time-of-check/time-of-use mutation of a fitted input."""
+
+    for record in records:
+        path = str(record["path"])
+        try:
+            actual = _artifact_sha256(path)
+        except (OSError, EOFError, ValueError, tarfile.TarError) as error:
+            raise ValueError("%s changed after it was loaded: %s" % (label, path)) from error
+        if actual != record["sha256"]:
+            raise ValueError("%s changed after it was loaded: %s" % (label, path))
+
+
+def _reject_output_input_collisions(
+    output_paths: Sequence[Path],
+    input_records: Sequence[Mapping[str, str]],
+    *,
+    transitive_input_paths: Sequence[str] = (),
+    label: str,
+) -> None:
+    """Prevent an output from overwriting any direct or transitively bound input."""
+
+    reject_path_collisions(
+        output_paths,
+        [record["path"] for record in input_records] + list(transitive_input_paths),
+        label=label,
+    )
 
 
 def _atomic_torch_save(payload: object, path: Path) -> None:
@@ -1400,13 +1575,6 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
             or np.any(unknown_targets > 1)
         ):
             raise ValueError("unknown_targets must be finite and lie in [0, 1]")
-    elif ood_mask is not None:
-        # A calibrated pathology OOD mask is a target-H&E-only supervision
-        # signal for the model's explicit unknown head.  This keeps the weak
-        # UOT dustbin and per-nucleus p_unknown aligned without accepting any
-        # target-expression input.  An explicit development-only target
-        # artifact still takes precedence above.
-        unknown_targets = ood_mask.astype(np.float32)
     domain_labels = (
         None
         if args.domain_label is None
@@ -1486,6 +1654,8 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
     program_matrix = None
     target_program_scores = None
     molecular_training_donors = set(prototypes.latent_training_donors)
+    molecular_responsibilities = None
+    molecular_e_step = None
     sources = [args.histology, args.prototypes, args.reference]
     source_roles = ["sample_assay", "sample_assay", "sample_assay"]
     if args.manifest:
@@ -1499,6 +1669,34 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
     if args.unknown_targets:
         sources.append(args.unknown_targets)
         source_roles.append("sample_assay")
+    if args.molecular_e_step:
+        molecular_e_step = MolecularEStepArtifact.load_npz(args.molecular_e_step)
+        molecular_e_step.validate_binding(
+            nucleus_ids=tuple(str(value) for value in bag.nucleus_ids.tolist()),
+            prototype_ids=tuple(str(value) for value in prototypes.prototype_ids.tolist()),
+            source_sha256_by_role={
+                "histology": _sha256(args.histology),
+                "prototype_bank": _sha256(args.prototypes),
+                "rna_reference": _sha256(args.reference),
+            },
+            target_donor=donor_id,
+            feature_space_id=bag.feature_space_id or "unspecified",
+            latent_space_id=latent_space_id,
+            type_names=type_names,
+            morphology=bag.features,
+            edge_index=bag.edge_index,
+            edge_weight=bag.edge_weight,
+            prototype_means=prototypes.means,
+            prototype_variances=prototypes.variances,
+            prototype_types=prototype_types,
+            prototype_weights=np.asarray(prototypes.weights, dtype=np.float32),
+            cell_weights=cell_weights,
+            artifact_threshold=float(args.artifact_threshold),
+        )
+        molecular_responsibilities = molecular_e_step.responsibilities
+        molecular_training_donors.update(molecular_e_step.teacher_training_donors)
+        sources.append(args.molecular_e_step)
+        source_roles.append("frozen_e_step")
     if args.spatial_pretraining_truth:
         sources.append(args.spatial_pretraining_truth)
         source_roles.append("sample_assay")
@@ -1558,6 +1756,11 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
         target_composition=torch.from_numpy(composition),
         target_pseudobulk=torch.from_numpy(pseudobulk),
         cell_weights=torch.from_numpy(cell_weights),
+        molecular_responsibilities=(
+            None
+            if molecular_responsibilities is None
+            else torch.from_numpy(molecular_responsibilities)
+        ),
         marker_centroids=torch.from_numpy(marker_centroids),
         marker_mask=torch.from_numpy(marker_mask),
         program_matrix=(None if program_matrix is None else torch.from_numpy(program_matrix)),
@@ -1589,6 +1792,8 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
         feature_space_id=bag.feature_space_id or "unspecified",
         expression_space_id=EXPRESSION_SPACE_ID,
         scgpt_space_id=scgpt_space_id,
+        weak_target_scope_id="sha256:%s" % _sha256(args.reference),
+        weak_target_granularity="complete_rna_specimen",
         nucleus_ids=tuple(str(value) for value in bag.nucleus_ids.tolist()),
         type_names=type_names,
         gene_names=tuple(str(value) for value in reference.gene_ids.tolist()),
@@ -1908,12 +2113,17 @@ def _checkpoint_training_donors(
     values: object = None
     if isinstance(metadata, Mapping):
         values = metadata.get("training_donors")
-        if values is None and isinstance(metadata.get("training_batches"), list):
+        if values is None:
+            batch_rows = []
+            for key in ("training_batches", "validation_batches"):
+                raw_rows = metadata.get(key)
+                if isinstance(raw_rows, list):
+                    batch_rows.extend(raw_rows)
             values = [
                 row.get("donor_id")
-                for row in metadata["training_batches"]
+                for row in batch_rows
                 if isinstance(row, Mapping) and row.get("donor_id")
-            ]
+            ] or None
     if values is None:
         if unsafe_allow_missing:
             return ()
@@ -1926,12 +2136,226 @@ def _checkpoint_training_donors(
     return donors
 
 
+def _validate_refinement_parent_validation_scope(
+    *,
+    validation_donors: Sequence[str],
+    checkpoint_donors: Sequence[str],
+    parent_validation_donors: Sequence[str],
+    strict_fixed_artifact: bool,
+    allow_split_overlap: bool,
+) -> None:
+    """Resolve parent-lineage overlap coherently for refinement.
+
+    Strict continuation must reuse the exact parent validation artifacts, so
+    their donors necessarily appear in the parent lineage. Live-E-step transfer
+    controls do not have that continuity guarantee and retain the overlap gate.
+    """
+
+    validation = {str(value) for value in validation_donors}
+    if strict_fixed_artifact:
+        if {str(value) for value in parent_validation_donors} != validation:
+            raise ValueError(
+                "strict refinement validation donors differ from the exact parent validation set"
+            )
+        return
+    overlap = sorted(validation & {str(value) for value in checkpoint_donors})
+    if overlap and not allow_split_overlap:
+        raise ValueError(
+            "refinement checkpoint was trained on validation donors: %s" % ", ".join(overlap)
+        )
+
+
+def _upstream_exclusion_reasons(metadata: object, prefix: str) -> List[str]:
+    """Propagate an upstream checkpoint's claim exclusions without laundering."""
+
+    if not isinstance(metadata, Mapping):
+        return []
+    excluded = metadata.get("excluded_from_primary_claims", False)
+    raw = metadata.get("exclusion_reasons", [])
+    if not isinstance(excluded, bool):
+        raise ValueError("%s checkpoint exclusion flag is malformed" % prefix)
+    if not isinstance(raw, list) or any(
+        not isinstance(value, str) or not value.strip() or value != value.strip() for value in raw
+    ):
+        raise ValueError("%s checkpoint exclusion reasons are malformed" % prefix)
+    reasons = list(raw)
+    if len(set(reasons)) != len(reasons) or excluded != bool(reasons):
+        raise ValueError("%s checkpoint exclusion metadata is inconsistent" % prefix)
+    return ["%s:%s" % (prefix, reason) for reason in reasons]
+
+
+def _canonical_parent_exclusion_reasons(
+    metadata: Mapping[str, object], *, artifact: str = "parent checkpoint"
+) -> Tuple[str, ...]:
+    """Validate and return a parent checkpoint's exact claim exclusions.
+
+    Refinement may continue an already excluded negative/sensitivity control,
+    but it must preserve that state.  Malformed flags or reasons cannot be
+    normalized into a new apparently eligible checkpoint.
+    """
+
+    excluded = metadata.get("excluded_from_primary_claims", False)
+    if not isinstance(excluded, bool):
+        raise ValueError("%s primary-claim exclusion flag is malformed" % artifact)
+    raw_reasons = metadata.get("exclusion_reasons", [])
+    if not isinstance(raw_reasons, list) or any(
+        not isinstance(value, str) or not value.strip() or value != value.strip()
+        for value in raw_reasons
+    ):
+        raise ValueError("%s primary-claim exclusion reasons are malformed" % artifact)
+    reasons = tuple(raw_reasons)
+    if len(set(reasons)) != len(reasons):
+        raise ValueError("%s primary-claim exclusion reasons are malformed" % artifact)
+    if excluded != bool(reasons):
+        raise ValueError("%s primary-claim exclusion flag contradicts its reasons" % artifact)
+    return reasons
+
+
+def _structural_model_config(config: HEIRConfig) -> Dict[str, Any]:
+    """Return fields that must agree for an initialization checkpoint.
+
+    Compare tensor topology and behavior that the training CLI exposes.  The
+    learned graph gate is restored from ``state_dict``, and historical v3
+    residual gate semantics are retained from the explicitly supplied
+    checkpoint because the CLI has no implicit migration switch for them.
+    """
+
+    fields = (
+        "morphology_dim",
+        "num_cell_types",
+        "expression_dim",
+        "latent_dim",
+        "graph_hidden_dim",
+        "graph_output_dim",
+        "graph_layers",
+        "graph_mode",
+        "trunk_hidden_dims",
+        "decoder_hidden_dims",
+        "dropout",
+        "normalize_messages",
+        "graph_residual",
+        "fine_to_parent",
+        "num_parent_types",
+        "hard_type_routing",
+        "abstain_threshold",
+        "nonnegative_expression",
+        "num_domains",
+        "legacy_independent_prototype_query",
+        "legacy_unrestricted_residual",
+        "residual_rank",
+        "residual_max_norm",
+        "scgpt_embedding_dim",
+    )
+    values = config.to_dict()
+    return {name: values[name] for name in fields}
+
+
 def command_train(args: argparse.Namespace) -> int:
     set_seed(args.seed)
+    stage = TrainingStage(args.stage)
+    molecular_e_step_mode = (
+        "live_student_negative_control"
+        if args.live_student_e_step_negative_control
+        else "strict_artifact"
+    )
+    training_batch_artifacts = _freeze_file_records(args.train_batch, "training batch")
+    validation_batch_artifacts = _freeze_file_records(args.validation_batch, "validation batch")
+    training_upstream_artifacts = _freeze_file_records(
+        [
+            value
+            for value in (
+                args.rna_vae_checkpoint,
+                args.initial_heir_checkpoint,
+                args.initialization_receipt,
+                args.residual_geometry,
+                args.ontology,
+            )
+            if value is not None
+        ],
+        "training upstream input",
+    )
+    destination = Path(args.output).expanduser().resolve()
+    checkpoint_path = destination / "heir.pt"
+    history_path = destination / "history.json"
+    _reject_output_input_collisions(
+        (checkpoint_path, history_path),
+        [
+            *training_batch_artifacts,
+            *validation_batch_artifacts,
+            *training_upstream_artifacts,
+        ],
+        label="training",
+    )
     training_batches = _load_training_batches(args.train_batch)
     validation_batches = _load_training_batches(args.validation_batch)
     all_batches = training_batches + validation_batches
+    training_transitive_artifacts = _freeze_transitive_batch_source_records(
+        training_batches, "training transitive batch input"
+    )
+    validation_transitive_artifacts = _freeze_transitive_batch_source_records(
+        validation_batches, "validation transitive batch input"
+    )
+    _reject_output_input_collisions(
+        (checkpoint_path, history_path),
+        [
+            *training_batch_artifacts,
+            *validation_batch_artifacts,
+            *training_upstream_artifacts,
+            *training_transitive_artifacts,
+            *validation_transitive_artifacts,
+        ],
+        label="training",
+    )
     type_names, gene_names = _batch_ontology(all_batches)
+    if stage == TrainingStage.PERSONALIZED:
+        if args.uninitialized_morphology_negative_control and args.initial_heir_checkpoint:
+            raise ValueError(
+                "--uninitialized-morphology-negative-control cannot load an initial HEIR checkpoint"
+            )
+        if not args.initial_heir_checkpoint and not args.uninitialized_morphology_negative_control:
+            raise ValueError(
+                "personalized training requires --initial-heir-checkpoint and a validated "
+                "--initialization-receipt; use --uninitialized-morphology-negative-control "
+                "only for an excluded negative control"
+            )
+        if args.initial_heir_checkpoint and not args.initialization_receipt:
+            raise ValueError(
+                "personalized training requires a validated --initialization-receipt bound "
+                "to the initial HEIR checkpoint"
+            )
+        if args.initialization_receipt and not args.initial_heir_checkpoint:
+            raise ValueError("--initialization-receipt requires --initial-heir-checkpoint")
+        if (
+            molecular_e_step_mode == "strict_artifact"
+            and not args.uninitialized_morphology_negative_control
+            and args.residual_geometry is None
+        ):
+            raise ValueError(
+                "primary strict personalized training requires frozen --residual-geometry"
+            )
+    elif args.initialization_receipt or args.uninitialized_morphology_negative_control:
+        raise ValueError(
+            "initialization receipt/negative-control flags apply only to personalized training"
+        )
+    train_weak_scopes = {
+        batch.weak_target_scope_id
+        for batch in training_batches
+        if batch.weak_target_scope_id != "unspecified"
+    }
+    validation_weak_scopes = {
+        batch.weak_target_scope_id
+        for batch in validation_batches
+        if batch.weak_target_scope_id != "unspecified"
+    }
+    if stage == TrainingStage.PERSONALIZED and molecular_e_step_mode == "strict_artifact":
+        if any(batch.weak_target_scope_id == "unspecified" for batch in all_batches):
+            raise ValueError("strict personalized training requires weak_target_scope_id")
+        overlap = sorted(train_weak_scopes & validation_weak_scopes)
+        if overlap:
+            raise ValueError(
+                "personalized train/validation reuse complete-specimen molecular targets: %s"
+                % ", ".join(overlap[:3])
+            )
     latent_space_ids = {batch.latent_space_id for batch in all_batches}
     if len(latent_space_ids) != 1:
         raise ValueError("training batches use different latent-space identities")
@@ -2034,6 +2458,7 @@ def command_train(args: argparse.Namespace) -> int:
     fine_to_parent, parent_names = _load_hierarchy(args.ontology, type_names)
     rna_vae = None
     rna_encoder = None
+    rna_metadata: object = None
     rna_checkpoint_sha256 = None
     rna_training_donors: Tuple[str, ...] = ()
     if args.rna_vae_checkpoint:
@@ -2103,6 +2528,7 @@ def command_train(args: argparse.Namespace) -> int:
         graph_hidden_dim=args.graph_hidden_dim,
         graph_output_dim=args.graph_output_dim,
         graph_layers=args.graph_layers,
+        graph_mode=args.graph_mode,
         trunk_hidden_dims=_parse_widths(args.trunk_hidden_dims, "trunk-hidden-dims"),
         decoder_hidden_dims=decoder_widths,
         dropout=decoder_dropout,
@@ -2117,10 +2543,13 @@ def command_train(args: argparse.Namespace) -> int:
     )
     initial_checkpoint_sha256 = None
     initial_training_donors: Tuple[str, ...] = ()
+    initialization_receipt = None
+    initialization_receipt_sha256 = None
+    initial_metadata: object = None
     if args.initial_heir_checkpoint:
         raw_initial_checkpoint = _load_checkpoint(args.initial_heir_checkpoint)
         model = HEIRModel.from_checkpoint(raw_initial_checkpoint)
-        if model.config.to_dict() != model_config.to_dict():
+        if _structural_model_config(model.config) != _structural_model_config(model_config):
             raise ValueError("initial HEIR checkpoint architecture differs from inferred config")
         initial_metadata = raw_initial_checkpoint.get("metadata")
         if not isinstance(initial_metadata, Mapping):
@@ -2149,12 +2578,32 @@ def command_train(args: argparse.Namespace) -> int:
             "initial HEIR checkpoint",
             args.unsafe_allow_molecular_validation_overlap,
         )
-        overlap = sorted(validation_donors & set(initial_training_donors))
+        target_donors = {batch.donor_id or batch.sample_id for batch in all_batches}
+        overlap = sorted(target_donors & set(initial_training_donors))
         if overlap and not args.unsafe_allow_molecular_validation_overlap:
             raise ValueError(
-                "initial HEIR checkpoint was trained on validation donors: %s" % ", ".join(overlap)
+                "initial HEIR checkpoint was trained on personalized target donors: %s"
+                % ", ".join(overlap)
             )
         initial_checkpoint_sha256 = _sha256(args.initial_heir_checkpoint)
+        assert args.initialization_receipt is not None or stage != TrainingStage.PERSONALIZED
+        if args.initialization_receipt is not None:
+            initialization_receipt = ValidatedInitializationReceipt.load_json(
+                args.initialization_receipt
+            )
+            initialization_receipt.validate_binding(
+                checkpoint_sha256=initial_checkpoint_sha256,
+                feature_space_id=feature_space_id,
+                latent_space_id=latent_space_id,
+                type_names=type_names,
+                target_donors=sorted({batch.donor_id or batch.sample_id for batch in all_batches}),
+                receipt_path=args.initialization_receipt,
+            )
+            if set(initialization_receipt.training_donors) != set(initial_training_donors):
+                raise ValueError(
+                    "initialization receipt training donors differ from checkpoint provenance"
+                )
+            initialization_receipt_sha256 = _sha256(args.initialization_receipt)
     else:
         model = HEIRModel(model_config)
     if rna_vae is not None:
@@ -2163,6 +2612,7 @@ def command_train(args: argparse.Namespace) -> int:
     residual_geometry_provenance_status = None
     residual_geometry_source_reference_sha256 = None
     residual_geometry_latent_transform_sha256 = None
+    residual_geometry_training_donors: Tuple[str, ...] = ()
     if args.residual_geometry is not None:
         geometry_path = Path(args.residual_geometry).expanduser().resolve()
         geometry = RNAResidualGeometry.from_npz(geometry_path)
@@ -2193,6 +2643,7 @@ def command_train(args: argparse.Namespace) -> int:
         residual_geometry_sha256 = _sha256(str(geometry_path))
         residual_geometry_source_reference_sha256 = geometry.source_reference_sha256
         residual_geometry_latent_transform_sha256 = geometry.latent_transform_sha256
+        residual_geometry_training_donors = tuple(geometry.training_donors)
     optimization = OptimizationConfig(
         epochs=args.epochs,
         learning_rate=args.learning_rate,
@@ -2211,7 +2662,24 @@ def command_train(args: argparse.Namespace) -> int:
             else args.mixed_precision
         ),
     )
-    stage = TrainingStage(args.stage)
+    if stage == TrainingStage.PERSONALIZED and molecular_e_step_mode == "strict_artifact":
+        for batch in all_batches:
+            frozen_indices = [
+                index for index, role in enumerate(batch.source_roles) if role == "frozen_e_step"
+            ]
+            if len(frozen_indices) != 1 or batch.molecular_responsibilities is None:
+                raise ValueError(
+                    "strict personalized training requires one frozen molecular E-step "
+                    "artifact for every train/validation bag"
+                )
+            artifact = MolecularEStepArtifact.load_npz(batch.source_artifacts[frozen_indices[0]])
+            if (
+                initialization_receipt_sha256 is not None
+                and artifact.initialization_receipt_sha256 != initialization_receipt_sha256
+            ):
+                raise ValueError(
+                    "molecular E-step artifact is bound to a different initialization receipt"
+                )
     trainer = HEIRTrainer(
         model,
         stage,
@@ -2223,11 +2691,65 @@ def command_train(args: argparse.Namespace) -> int:
         allow_split_overlap=args.allow_split_overlap,
         uot_unknown_mass=args.uot_unknown_mass,
         uot_unknown_mass_mode=args.uot_unknown_mass_mode,
+        molecular_e_step_mode=molecular_e_step_mode,
     )
     result = trainer.fit(training_batches, validation_batches)
-    destination = Path(args.output).expanduser().resolve()
+    _assert_file_records_unchanged(training_batch_artifacts, "training batch")
+    _assert_file_records_unchanged(validation_batch_artifacts, "validation batch")
+    _assert_file_records_unchanged(training_upstream_artifacts, "training upstream input")
+    _assert_file_records_unchanged(training_transitive_artifacts, "training transitive batch input")
+    _assert_file_records_unchanged(
+        validation_transitive_artifacts, "validation transitive batch input"
+    )
     destination.mkdir(parents=True, exist_ok=True)
     checkpoint = model.checkpoint()
+    exclusion_reasons = [
+        *_upstream_exclusion_reasons(initial_metadata, "initial_heir"),
+        *_upstream_exclusion_reasons(rna_metadata, "rna_decoder"),
+    ]
+    for enabled, reason in (
+        (
+            args.uninitialized_morphology_negative_control,
+            "uninitialized_morphology_negative_control",
+        ),
+        (
+            molecular_e_step_mode == "live_student_negative_control",
+            "live_student_e_step_negative_control",
+        ),
+        (
+            args.unsafe_allow_molecular_validation_overlap,
+            "unsafe_molecular_validation_overlap",
+        ),
+        (args.allow_split_overlap, "train_validation_source_overlap_allowed"),
+        (args.unsafe_allow_latent_space_mismatch, "unsafe_latent_space_mismatch"),
+        (args.unsafe_allow_feature_space_mismatch, "unsafe_feature_space_mismatch"),
+        (
+            args.unsafe_allow_expression_space_mismatch,
+            "unsafe_expression_space_mismatch",
+        ),
+        (
+            args.unsafe_allow_legacy_residual_geometry_provenance,
+            "unsafe_legacy_residual_geometry_provenance",
+        ),
+        (args.allow_random_decoder, "random_decoder_smoke_control"),
+        (args.finetune_rna_decoder, "finetuned_rna_decoder"),
+        (args.finetune_residual_basis, "finetuned_residual_basis"),
+        (args.uot_unknown_mass_mode == "model_estimate", "model_estimated_unknown_mass"),
+        (args.graph_mode != "off", "experimental_graph_context"),
+    ):
+        if enabled:
+            exclusion_reasons.append(reason)
+    exclusion_reasons = sorted(set(exclusion_reasons))
+    direct_training_donors = {batch.donor_id or batch.sample_id for batch in training_batches}
+    direct_validation_donors = {batch.donor_id or batch.sample_id for batch in validation_batches}
+    lineage_training_donors = sorted(
+        direct_training_donors
+        | direct_validation_donors
+        | set(initial_training_donors)
+        | set(rna_training_donors)
+        | set(molecular_batch_donors)
+        | set(residual_geometry_training_donors)
+    )
     checkpoint["metadata"] = {
         "schema": "heir.trained_model.v1",
         "type_names": list(type_names),
@@ -2240,9 +2762,9 @@ def command_train(args: argparse.Namespace) -> int:
         "feature_space_id": feature_space_id,
         "expression_space_id": expression_space_id,
         "scgpt_space_id": scgpt_space_id,
-        "training_donors": sorted(
-            {batch.donor_id or batch.sample_id for batch in training_batches}
-        ),
+        "training_donors": lineage_training_donors,
+        "direct_training_donors": sorted(direct_training_donors),
+        "validation_donors": sorted(direct_validation_donors),
         "seed": args.seed,
         "best_epoch": result.best_epoch,
         "best_validation_loss": result.best_validation_loss,
@@ -2260,6 +2782,22 @@ def command_train(args: argparse.Namespace) -> int:
         ),
         "initial_heir_sha256": initial_checkpoint_sha256,
         "initial_heir_training_donors": list(initial_training_donors),
+        "initialization_receipt": (
+            None
+            if args.initialization_receipt is None
+            else str(Path(args.initialization_receipt).expanduser().resolve())
+        ),
+        "initialization_receipt_sha256": initialization_receipt_sha256,
+        "initialization_validation_status": (
+            "uninitialized_negative_control"
+            if args.uninitialized_morphology_negative_control
+            else "validated"
+            if initialization_receipt is not None
+            else "not_applicable"
+        ),
+        "molecular_e_step_mode": molecular_e_step_mode,
+        "excluded_from_primary_claims": bool(exclusion_reasons),
+        "exclusion_reasons": exclusion_reasons,
         "residual_geometry": (
             None
             if args.residual_geometry is None
@@ -2269,7 +2807,9 @@ def command_train(args: argparse.Namespace) -> int:
         "residual_geometry_provenance_status": residual_geometry_provenance_status,
         "residual_geometry_source_reference_sha256": (residual_geometry_source_reference_sha256),
         "residual_geometry_latent_transform_sha256": (residual_geometry_latent_transform_sha256),
+        "residual_geometry_training_donors": list(residual_geometry_training_donors),
         "residual_basis_trainable": bool(args.finetune_residual_basis),
+        "training_batch_artifacts": training_batch_artifacts,
         "training_batches": [
             {
                 "sample_id": batch.sample_id,
@@ -2277,6 +2817,8 @@ def command_train(args: argparse.Namespace) -> int:
                 "donor_id": batch.donor_id,
                 "block_id": batch.block_id,
                 "analysis_role": batch.analysis_role,
+                "weak_target_scope_id": batch.weak_target_scope_id,
+                "weak_target_granularity": batch.weak_target_granularity,
                 "source_artifacts": list(batch.source_artifacts),
                 "source_sha256": list(batch.source_sha256),
                 "source_roles": list(batch.source_roles),
@@ -2290,15 +2832,26 @@ def command_train(args: argparse.Namespace) -> int:
                 "donor_id": batch.donor_id,
                 "block_id": batch.block_id,
                 "analysis_role": batch.analysis_role,
+                "weak_target_scope_id": batch.weak_target_scope_id,
+                "weak_target_granularity": batch.weak_target_granularity,
                 "source_artifacts": list(batch.source_artifacts),
                 "source_sha256": list(batch.source_sha256),
                 "source_roles": list(batch.source_roles),
             }
             for batch in validation_batches
         ],
+        "validation_batch_artifacts": validation_batch_artifacts,
+        "training_upstream_artifacts": training_upstream_artifacts,
+        "training_transitive_batch_artifacts": training_transitive_artifacts,
+        "validation_transitive_batch_artifacts": validation_transitive_artifacts,
     }
-    checkpoint_path = destination / "heir.pt"
-    history_path = destination / "history.json"
+    _assert_file_records_unchanged(training_batch_artifacts, "training batch")
+    _assert_file_records_unchanged(validation_batch_artifacts, "validation batch")
+    _assert_file_records_unchanged(training_upstream_artifacts, "training upstream input")
+    _assert_file_records_unchanged(training_transitive_artifacts, "training transitive batch input")
+    _assert_file_records_unchanged(
+        validation_transitive_artifacts, "validation transitive batch input"
+    )
     _atomic_torch_save(checkpoint, checkpoint_path)
     atomic_json_dump(
         {
@@ -2370,7 +2923,6 @@ def _refinement_view_metadata(
 
     expected_metadata: Mapping[str, object] = {
         "batch_contract": batch.CONTRACT,
-        "batch_contract_version": batch.CONTRACT_VERSION,
         "batch_source_sha256": list(batch.source_sha256),
         "batch_source_roles": list(batch.source_roles),
         "sample_id": batch.sample_id,
@@ -2382,6 +2934,8 @@ def _refinement_view_metadata(
         "type_names": list(batch.type_names),
         "type_ontology_sha256": _ordered_identity_sha256(batch.type_names),
     }
+    if metadata.get("batch_contract_version") not in {5, batch.CONTRACT_VERSION}:
+        raise ValueError("view artifact batch_contract_version differs from the refinement batch")
     for field, expected in expected_metadata.items():
         if metadata.get(field) != expected:
             raise ValueError("view artifact %s differs from the refinement batch" % field)
@@ -2509,9 +3063,56 @@ def _load_refinement_views(
 
 
 def command_refine(args: argparse.Namespace) -> int:
-    """Run constrained broad-to-fine generalized EM with an EMA teacher."""
+    """Run strict fixed-target refinement or an excluded live-E-step control."""
 
     set_seed(args.seed)
+    parent_checkpoint_artifact = _freeze_file_records(
+        [args.checkpoint], "refinement parent checkpoint"
+    )[0]
+    refinement_training_batch_artifacts = _freeze_file_records(
+        args.train_batch, "refinement training batch"
+    )
+    refinement_validation_batch_artifacts = _freeze_file_records(
+        args.validation_batch, "refinement validation batch"
+    )
+    rna_checkpoint_artifacts = _freeze_file_records(
+        [] if args.rna_vae_checkpoint is None else [args.rna_vae_checkpoint],
+        "refinement RNA checkpoint",
+    )
+    view_keys = []
+    view_paths = []
+    for specification in args.view_predictions or []:
+        if "=" not in specification:
+            raise ValueError("view prediction must be KEY=PATH")
+        key, raw_path = specification.split("=", 1)
+        if not key.strip() or not raw_path.strip():
+            raise ValueError("view prediction must be KEY=PATH")
+        view_keys.append(key)
+        view_paths.append(raw_path)
+    view_input_artifacts = _freeze_file_records(view_paths, "refinement view")
+    destination = Path(args.output).expanduser().resolve()
+    checkpoint_path = destination / "heir_refined.pt"
+    audit_path = destination / "refinement.json"
+    planned_round_outputs = (
+        [
+            destination / ("round_%d" % round_id) / "heir_refined.pt"
+            for round_id in range(1, args.maximum_rounds + 1)
+        ]
+        if args.save_round_checkpoints and args.maximum_rounds > 0
+        else []
+    )
+    refinement_input_records = [
+        parent_checkpoint_artifact,
+        *refinement_training_batch_artifacts,
+        *refinement_validation_batch_artifacts,
+        *rna_checkpoint_artifacts,
+        *view_input_artifacts,
+    ]
+    _reject_output_input_collisions(
+        [checkpoint_path, audit_path, *planned_round_outputs],
+        refinement_input_records,
+        label="refinement",
+    )
     raw_checkpoint = _load_checkpoint(args.checkpoint)
     model = HEIRModel.from_checkpoint(raw_checkpoint)
     if args.maximum_rounds <= 0:
@@ -2524,9 +3125,126 @@ def command_refine(args: argparse.Namespace) -> int:
     metadata = raw_checkpoint.get("metadata")
     if not isinstance(metadata, Mapping):
         raise ValueError("HEIR checkpoint lacks ontology/provenance metadata")
+    parent_exclusion_reasons = _canonical_parent_exclusion_reasons(metadata)
+    if not args.live_student_e_step_negative_control:
+        for role, current, preferred, fallback in (
+            (
+                "training",
+                refinement_training_batch_artifacts,
+                "refinement_training_batch_artifacts",
+                "training_batch_artifacts",
+            ),
+            (
+                "validation",
+                refinement_validation_batch_artifacts,
+                "refinement_validation_batch_artifacts",
+                "validation_batch_artifacts",
+            ),
+        ):
+            raw_expected = metadata.get(preferred, metadata.get(fallback))
+            if not isinstance(raw_expected, list) or not raw_expected:
+                raise ValueError(
+                    "strict refinement parent lacks exact %s-batch artifact provenance" % role
+                )
+            expected_digests = []
+            for record in raw_expected:
+                if (
+                    not isinstance(record, Mapping)
+                    or not isinstance(record.get("sha256"), str)
+                    or len(str(record["sha256"])) != 64
+                ):
+                    raise ValueError(
+                        "strict refinement parent %s-batch provenance is malformed" % role
+                    )
+                expected_digests.append(str(record["sha256"]))
+            current_digests = [record["sha256"] for record in current]
+            if sorted(expected_digests) != sorted(current_digests):
+                raise ValueError(
+                    "strict refinement %s batches differ from the parent checkpoint" % role
+                )
+        if args.prior_old_weight != 1.0:
+            raise ValueError(
+                "strict fixed-E-step refinement requires --prior-old-weight 1.0; "
+                "prior updates require a new round-specific E-step artifact"
+            )
+        initialization_status = metadata.get("initialization_validation_status")
+        isolated_uninitialized_control = bool(
+            initialization_status == "uninitialized_negative_control"
+            and bool(parent_exclusion_reasons)
+        )
+        if initialization_status != "validated" and not isolated_uninitialized_control:
+            raise ValueError(
+                "strict refinement requires validated morphology initialization or an "
+                "explicitly excluded uninitialized control checkpoint"
+            )
     training_batches = _load_training_batches(args.train_batch)
     validation_batches = _load_training_batches(args.validation_batch)
     all_batches = training_batches + validation_batches
+    refinement_training_transitive_artifacts = _freeze_transitive_batch_source_records(
+        training_batches, "refinement training transitive batch input"
+    )
+    refinement_validation_transitive_artifacts = _freeze_transitive_batch_source_records(
+        validation_batches, "refinement validation transitive batch input"
+    )
+    refinement_input_records.extend(
+        [
+            *refinement_training_transitive_artifacts,
+            *refinement_validation_transitive_artifacts,
+        ]
+    )
+    planned_prototype_outputs = []
+    planned_prototype_keys = set()
+    for batch in training_batches:
+        key = "%s::%s" % (batch.donor_id, batch.sample_id)
+        if key in planned_prototype_keys:
+            continue
+        planned_prototype_keys.add(key)
+        safe_key = key.replace("/", "_").replace("::", "__")
+        planned_prototype_outputs.append(destination / "prototypes" / (safe_key + ".npz"))
+    _reject_output_input_collisions(
+        [
+            checkpoint_path,
+            audit_path,
+            *planned_round_outputs,
+            *planned_prototype_outputs,
+        ],
+        refinement_input_records,
+        label="refinement",
+    )
+    if not args.live_student_e_step_negative_control:
+        train_weak_scopes = {batch.weak_target_scope_id for batch in training_batches}
+        validation_weak_scopes = {batch.weak_target_scope_id for batch in validation_batches}
+        if "unspecified" in train_weak_scopes | validation_weak_scopes:
+            raise ValueError("strict refinement requires weak_target_scope_id")
+        scope_overlap = sorted(train_weak_scopes & validation_weak_scopes)
+        if scope_overlap:
+            raise ValueError(
+                "refinement train/validation reuse complete-specimen molecular targets: %s"
+                % ", ".join(scope_overlap[:3])
+            )
+        raw_expected_receipt = metadata.get("initialization_receipt_sha256")
+        expected_receipt_sha256 = (
+            str(raw_expected_receipt) if raw_expected_receipt is not None else ""
+        )
+        if initialization_status == "validated" and len(expected_receipt_sha256) != 64:
+            raise ValueError("parent checkpoint lacks initialization receipt provenance")
+        for batch in all_batches:
+            indices = [
+                index for index, role in enumerate(batch.source_roles) if role == "frozen_e_step"
+            ]
+            if len(indices) != 1 or batch.molecular_responsibilities is None:
+                raise ValueError(
+                    "strict refinement requires one frozen molecular E-step artifact for "
+                    "every train/validation bag"
+                )
+            artifact = MolecularEStepArtifact.load_npz(batch.source_artifacts[indices[0]])
+            if (
+                expected_receipt_sha256
+                and artifact.initialization_receipt_sha256 != expected_receipt_sha256
+            ):
+                raise ValueError(
+                    "refinement E-step artifact is bound to a different initialization receipt"
+                )
     type_names, gene_names = _batch_ontology(all_batches)
     if tuple(str(value) for value in metadata.get("type_names", ())) != type_names:
         raise ValueError("checkpoint and refinement batches use different cell types")
@@ -2559,7 +3277,7 @@ def command_refine(args: argparse.Namespace) -> int:
     )
     if expected_dimensions != model_dimensions:
         raise ValueError("checkpoint architecture differs from refinement batches")
-    validation_donors = {batch.donor_id for batch in validation_batches}
+    validation_donors = {batch.donor_id or batch.sample_id for batch in validation_batches}
     molecular_batch_donors = {
         donor for batch in all_batches for donor in batch.molecular_training_donors
     }
@@ -2589,13 +3307,17 @@ def command_refine(args: argparse.Namespace) -> int:
                 % ", ".join(overlap[:3])
             )
     checkpoint_donors = set(_checkpoint_training_donors(metadata, "HEIR checkpoint", False))
-    overlap = sorted(validation_donors & checkpoint_donors)
-    if overlap and not args.allow_split_overlap:
-        raise ValueError(
-            "refinement checkpoint was trained on validation donors: %s" % ", ".join(overlap)
-        )
+    _validate_refinement_parent_validation_scope(
+        validation_donors=validation_donors,
+        checkpoint_donors=checkpoint_donors,
+        parent_validation_donors=metadata.get("validation_donors", ()),
+        strict_fixed_artifact=not args.live_student_e_step_negative_control,
+        allow_split_overlap=args.allow_split_overlap,
+    )
 
     rna_encoder = None
+    rna_metadata: object = None
+    rna_donors: set[str] = set()
     if args.rna_vae_checkpoint:
         rna_checkpoint = _load_checkpoint(args.rna_vae_checkpoint)
         rna_model = RNAVAE.from_checkpoint(rna_checkpoint)
@@ -2645,7 +3367,9 @@ def command_refine(args: argparse.Namespace) -> int:
         teacher_ema=args.teacher_ema,
         prior_old_weight=args.prior_old_weight,
         minimum_segmentation_confidence=args.minimum_segmentation_confidence,
-        require_view_agreement=not args.allow_no_view_agreement,
+        require_view_agreement=(
+            args.require_scale_view_agreement and not args.allow_no_view_agreement
+        ),
         maximum_prior_total_variation=args.maximum_prior_total_variation,
         max_anchors_per_class=args.max_anchors_per_class,
         stable_rounds_required=args.stable_rounds_required,
@@ -2675,6 +3399,11 @@ def command_refine(args: argparse.Namespace) -> int:
             allow_split_overlap=args.allow_split_overlap,
             uot_unknown_mass=args.uot_unknown_mass,
             uot_unknown_mass_mode=args.uot_unknown_mass_mode,
+            molecular_e_step_mode=(
+                "live_student_negative_control"
+                if args.live_student_e_step_negative_control
+                else "strict_artifact"
+            ),
         )
 
     result = IterativeRefiner(
@@ -2686,7 +3415,21 @@ def command_refine(args: argparse.Namespace) -> int:
         validation_batches,
         view_probabilities=views or None,
     )
-    destination = Path(args.output).expanduser().resolve()
+    _assert_file_records_unchanged([parent_checkpoint_artifact], "refinement parent checkpoint")
+    _assert_file_records_unchanged(refinement_training_batch_artifacts, "refinement training batch")
+    _assert_file_records_unchanged(
+        refinement_validation_batch_artifacts, "refinement validation batch"
+    )
+    _assert_file_records_unchanged(rna_checkpoint_artifacts, "refinement RNA checkpoint")
+    _assert_file_records_unchanged(view_input_artifacts, "refinement view")
+    _assert_file_records_unchanged(
+        refinement_training_transitive_artifacts,
+        "refinement training transitive batch input",
+    )
+    _assert_file_records_unchanged(
+        refinement_validation_transitive_artifacts,
+        "refinement validation transitive batch input",
+    )
     destination.mkdir(parents=True, exist_ok=True)
     round_rows = []
     for item in result.rounds:
@@ -2698,27 +3441,57 @@ def command_refine(args: argparse.Namespace) -> int:
     refinement_training_donors = sorted(
         {batch.donor_id for batch in training_batches if batch.donor_id}
     )
-    all_training_donors = sorted(
-        set(str(value) for value in metadata.get("training_donors", ()))
-        | set(refinement_training_donors)
+    refinement_validation_donors = sorted(
+        {batch.donor_id for batch in validation_batches if batch.donor_id}
     )
-    view_artifacts = []
-    for specification in args.view_predictions or []:
-        key, raw_path = specification.split("=", 1)
-        view_artifacts.append(
-            {
-                "key": key,
-                "path": str(Path(raw_path).expanduser().resolve()),
-                "sha256": _sha256(raw_path),
-            }
-        )
+    all_training_donors = sorted(
+        checkpoint_donors
+        | set(refinement_training_donors)
+        | set(refinement_validation_donors)
+        | set(molecular_batch_donors)
+        | rna_donors
+    )
+    view_artifacts = [
+        {"key": key, **record} for key, record in zip(view_keys, view_input_artifacts)
+    ]
+    exclusion_reasons = list(parent_exclusion_reasons)
+    exclusion_reasons.extend(_upstream_exclusion_reasons(rna_metadata, "refinement_rna_decoder"))
+    for enabled, reason in (
+        (
+            args.live_student_e_step_negative_control,
+            "live_student_e_step_negative_control",
+        ),
+        (
+            args.unsafe_allow_molecular_validation_overlap,
+            "unsafe_molecular_validation_overlap",
+        ),
+        (args.allow_split_overlap, "train_validation_source_overlap_allowed"),
+        (args.teacher_ema != 0.0, "nonzero_round_teacher_ema_sensitivity"),
+        (args.prior_old_weight != 1.0, "updated_measured_prior_sensitivity"),
+        (
+            args.require_scale_view_agreement and not args.allow_no_view_agreement,
+            "same_checkpoint_view_hard_gate_sensitivity",
+        ),
+        (args.round_selection_mode == "weak", "weak_target_round_selection"),
+        (args.uot_unknown_mass_mode == "model_estimate", "model_estimated_unknown_mass"),
+    ):
+        if enabled:
+            exclusion_reasons.append(reason)
+    exclusion_reasons = sorted(set(exclusion_reasons))
     refined_metadata.update(
         {
             "schema": "heir.refined_model.v1",
             "uot_unknown_mass": float(args.uot_unknown_mass),
             "uot_unknown_mass_mode": str(args.uot_unknown_mass_mode),
-            "parent_checkpoint": str(Path(args.checkpoint).expanduser().resolve()),
-            "parent_checkpoint_sha256": _sha256(args.checkpoint),
+            "molecular_e_step_mode": (
+                "live_student_negative_control"
+                if args.live_student_e_step_negative_control
+                else "strict_artifact"
+            ),
+            "excluded_from_primary_claims": bool(exclusion_reasons),
+            "exclusion_reasons": exclusion_reasons,
+            "parent_checkpoint": parent_checkpoint_artifact["path"],
+            "parent_checkpoint_sha256": parent_checkpoint_artifact["sha256"],
             "refinement_round": result.selected_round,
             "refinement_rounds_executed": len(result.rounds),
             "refinement_round_zero_validation_loss": result.round_zero_validation_loss,
@@ -2726,12 +3499,19 @@ def command_refine(args: argparse.Namespace) -> int:
             "refinement_rounds": round_rows,
             "training_donors": all_training_donors,
             "refinement_training_donors": refinement_training_donors,
+            "refinement_validation_donors": refinement_validation_donors,
+            "refinement_training_batch_artifacts": refinement_training_batch_artifacts,
+            "refinement_training_transitive_batch_artifacts": (
+                refinement_training_transitive_artifacts
+            ),
             "refinement_training_batches": [
                 {
                     "sample_id": batch.sample_id,
                     "bag_id": batch.bag_id,
                     "donor_id": batch.donor_id,
                     "block_id": batch.block_id,
+                    "weak_target_scope_id": batch.weak_target_scope_id,
+                    "weak_target_granularity": batch.weak_target_granularity,
                     "source_sha256": list(batch.source_sha256),
                     "source_roles": list(batch.source_roles),
                 }
@@ -2743,25 +3523,43 @@ def command_refine(args: argparse.Namespace) -> int:
                     "bag_id": batch.bag_id,
                     "donor_id": batch.donor_id,
                     "block_id": batch.block_id,
+                    "weak_target_scope_id": batch.weak_target_scope_id,
+                    "weak_target_granularity": batch.weak_target_granularity,
                     "source_sha256": list(batch.source_sha256),
                     "source_roles": list(batch.source_roles),
                 }
                 for batch in validation_batches
             ],
+            "refinement_validation_batch_artifacts": (refinement_validation_batch_artifacts),
+            "refinement_validation_transitive_batch_artifacts": (
+                refinement_validation_transitive_artifacts
+            ),
             "refinement_view_artifacts": view_artifacts,
             "refinement_rna_vae_checkpoint": (
-                None
-                if args.rna_vae_checkpoint is None
-                else str(Path(args.rna_vae_checkpoint).expanduser().resolve())
+                None if not rna_checkpoint_artifacts else rna_checkpoint_artifacts[0]["path"]
             ),
             "refinement_rna_vae_sha256": (
-                None if args.rna_vae_checkpoint is None else _sha256(args.rna_vae_checkpoint)
+                None if not rna_checkpoint_artifacts else rna_checkpoint_artifacts[0]["sha256"]
             ),
         }
     )
     refined_checkpoint = model.checkpoint()
     refined_checkpoint["metadata"] = refined_metadata
-    checkpoint_path = destination / "heir_refined.pt"
+    _assert_file_records_unchanged([parent_checkpoint_artifact], "refinement parent checkpoint")
+    _assert_file_records_unchanged(refinement_training_batch_artifacts, "refinement training batch")
+    _assert_file_records_unchanged(
+        refinement_validation_batch_artifacts, "refinement validation batch"
+    )
+    _assert_file_records_unchanged(rna_checkpoint_artifacts, "refinement RNA checkpoint")
+    _assert_file_records_unchanged(view_input_artifacts, "refinement view")
+    _assert_file_records_unchanged(
+        refinement_training_transitive_artifacts,
+        "refinement training transitive batch input",
+    )
+    _assert_file_records_unchanged(
+        refinement_validation_transitive_artifacts,
+        "refinement validation transitive batch input",
+    )
     _atomic_torch_save(refined_checkpoint, checkpoint_path)
     round_checkpoint_outputs: Dict[str, str] = {}
     if args.save_round_checkpoints:
@@ -2822,7 +3620,6 @@ def command_refine(args: argparse.Namespace) -> int:
         prototype_path = prototype_directory / (safe_key + ".npz")
         refined_prototypes.save_npz(prototype_path)
         prototype_outputs[key] = str(prototype_path)
-    audit_path = destination / "refinement.json"
     atomic_json_dump(
         {
             "rounds": round_rows,
@@ -2975,23 +3772,42 @@ def command_predict(args: argparse.Namespace) -> int:
         raise ValueError("artifact-threshold must lie in [0, 1]")
     if not 0.0 <= args.probability_threshold <= 1.0:
         raise ValueError("probability-threshold must lie in [0, 1]")
-    if args.telemetry_output:
-        telemetry_destination = Path(args.telemetry_output).expanduser().resolve()
-        reserved_paths = {
-            Path(value).expanduser().resolve()
-            for value in (
-                args.output,
-                args.checkpoint,
-                args.histology,
-                args.prototypes,
-                args.genes,
-                args.program_artifact,
-                args.ood_artifact,
-            )
-            if value
-        }
-        if telemetry_destination in reserved_paths:
-            raise ValueError("--telemetry-output must not overwrite a prediction input/output")
+    prediction_inputs = [
+        ("checkpoint", args.checkpoint),
+        ("histology", args.histology),
+        ("prototypes", args.prototypes),
+        ("genes", args.genes),
+        *([] if args.program_artifact is None else [("program", args.program_artifact)]),
+        *([] if args.ood_artifact is None else [("ood", args.ood_artifact)]),
+    ]
+    prediction_destination = Path(args.output).expanduser().resolve()
+    telemetry_destination = (
+        None
+        if args.telemetry_output is None
+        else Path(args.telemetry_output).expanduser().resolve()
+    )
+    prediction_outputs = [
+        prediction_destination,
+        *(() if telemetry_destination is None else (telemetry_destination,)),
+    ]
+    reject_path_collisions(
+        prediction_outputs,
+        [value for _, value in prediction_inputs],
+        label="prediction",
+    )
+    prediction_input_records = _freeze_file_records(
+        [value for _, value in prediction_inputs],
+        "prediction input",
+    )
+    prediction_input_sha256 = {
+        role: record["sha256"]
+        for (role, _), record in zip(prediction_inputs, prediction_input_records)
+    }
+    _reject_output_input_collisions(
+        prediction_outputs,
+        prediction_input_records,
+        label="prediction",
+    )
     checkpoint = _load_checkpoint(args.checkpoint)
     model = HEIRModel.from_checkpoint(checkpoint)
     if args.prototype_only:
@@ -3028,7 +3844,7 @@ def command_predict(args: argparse.Namespace) -> int:
 
     bag = HistologyBag.load_npz(args.histology)
     prototypes = PrototypeSet.load_npz(args.prototypes)
-    original_prototype_sha256 = _sha256(args.prototypes)
+    original_prototype_sha256 = prediction_input_sha256["prototypes"]
     inference_prototypes = prototypes
     prototype_filter: Optional[Dict[str, object]] = None
     missing_bag_provenance = [
@@ -3121,6 +3937,8 @@ def command_predict(args: argparse.Namespace) -> int:
     set_seed(args.seed)
     if args.image_feature_shuffle and args.graph_node_shuffle:
         raise ValueError("image-feature and graph-node shuffle controls must be run separately")
+    if args.graph_node_shuffle and model.config.graph_mode == "off":
+        raise ValueError("graph-node shuffle requires a checkpoint with graph_mode=distance_only")
     control_transform: Optional[Mapping[str, object]] = None
     inference_features = np.asarray(bag.features)
     if args.image_feature_shuffle:
@@ -3152,6 +3970,7 @@ def command_predict(args: argparse.Namespace) -> int:
         torch.cuda.reset_peak_memory_stats(inference_device)
         torch.cuda.synchronize(inference_device)
     inference_started = time.perf_counter()
+    inference_diagnostics: Optional[Dict[str, object]] = {} if args.telemetry_output else None
     prediction = predict_cells(
         model,
         inference_features,
@@ -3172,17 +3991,17 @@ def command_predict(args: argparse.Namespace) -> int:
         sample_id=resolved_sample_id,
         donor_id=args.donor_id,
         slide_id=bag.slide_id,
-        checkpoint_sha256=_sha256(args.checkpoint),
+        checkpoint_sha256=prediction_input_sha256["checkpoint"],
         prototype_sha256=original_prototype_sha256,
-        histology_sha256=_sha256(args.histology),
+        histology_sha256=prediction_input_sha256["histology"],
         latent_space_id=checkpoint_latent_space_id,
         model_version=str(metadata.get("schema", __version__)),
         parent_type_names=parent_type_names,
         program_matrix=None if programs is None else programs.loadings,
         program_names=None if programs is None else programs.names,
-        program_sha256="" if programs is None else _sha256(args.program_artifact),
+        program_sha256="" if programs is None else prediction_input_sha256["program"],
         program_training_donors=(None if programs is None else programs.training_donors),
-        ood_sha256="" if ood_detector is None else _sha256(args.ood_artifact),
+        ood_sha256="" if ood_detector is None else prediction_input_sha256["ood"],
         ood_training_donors=(None if ood_detector is None else ood_detector.training_donors),
         inference_seed=args.seed,
         artifact_threshold=args.artifact_threshold,
@@ -3191,13 +4010,31 @@ def command_predict(args: argparse.Namespace) -> int:
         mc_chunk_size=args.mc_chunk_size,
         use_model_abstain=args.use_model_abstain,
         allow_prototype_sample_mismatch=args.wrong_donor_control,
+        diagnostics=inference_diagnostics,
+        use_graph=False if args.no_graph else None,
     )
     if inference_device.type == "cuda":
         torch.cuda.synchronize(inference_device)
     inference_wall_seconds = time.perf_counter() - inference_started
-    prediction.to_npz(args.output)
+    residual_diagnostics = (
+        None if inference_diagnostics is None else inference_diagnostics.get("residual_gate")
+    )
+    if isinstance(residual_diagnostics, dict):
+        residual_diagnostics["donor_id"] = args.donor_id
+        by_index = residual_diagnostics.get("by_type_index")
+        if isinstance(by_index, Mapping):
+            residual_diagnostics["by_type"] = {
+                type_names[int(index)]: value for index, value in by_index.items()
+            }
+    _reject_output_input_collisions(
+        prediction_outputs,
+        prediction_input_records,
+        label="prediction",
+    )
+    _assert_file_records_unchanged(prediction_input_records, "prediction input")
+    prediction.to_npz(prediction_destination)
     report = {
-        "output": str(Path(args.output).expanduser().resolve()),
+        "output": str(prediction_destination),
         "cells": len(prediction.nucleus_ids),
         "genes": len(prediction.gene_names),
         "abstained": int(prediction.abstain.sum()),
@@ -3214,10 +4051,11 @@ def command_predict(args: argparse.Namespace) -> int:
         },
     }
     if args.telemetry_output:
+        prediction_sha256 = _sha256(str(prediction_destination))
         telemetry = {
             "schema": "heir.inference_telemetry.v1",
-            "prediction_path": str(Path(args.output).expanduser().resolve()),
-            "prediction_sha256": _sha256(args.output),
+            "prediction_path": str(prediction_destination),
+            "prediction_sha256": prediction_sha256,
             "wall_seconds": inference_wall_seconds,
             "peak_cuda_memory_bytes": (
                 int(torch.cuda.max_memory_allocated(inference_device))
@@ -3235,6 +4073,7 @@ def command_predict(args: argparse.Namespace) -> int:
             "genes": len(prediction.gene_names),
             "latent_samples": args.latent_samples,
             "mc_chunk_size": args.mc_chunk_size,
+            "residual_diagnostics": residual_diagnostics,
             "negative_control": {
                 "prototype_only": bool(args.prototype_only),
                 "image_feature_shuffle": bool(args.image_feature_shuffle),
@@ -3247,8 +4086,21 @@ def command_predict(args: argparse.Namespace) -> int:
                 "transform": control_transform,
             },
         }
-        atomic_json_dump(telemetry, args.telemetry_output)
-        report["telemetry_output"] = str(Path(args.telemetry_output).expanduser().resolve())
+        assert telemetry_destination is not None
+        _reject_output_input_collisions(
+            prediction_outputs,
+            prediction_input_records,
+            label="prediction",
+        )
+        _assert_file_records_unchanged(
+            [
+                *prediction_input_records,
+                {"path": str(prediction_destination), "sha256": prediction_sha256},
+            ],
+            "prediction telemetry input",
+        )
+        atomic_json_dump(telemetry, telemetry_destination)
+        report["telemetry_output"] = str(telemetry_destination)
     _json(report)
     return 0
 
@@ -3339,6 +4191,7 @@ def command_demo(args: argparse.Namespace) -> int:
         seed=args.seed,
         device=args.device,
         allow_split_overlap=True,
+        molecular_e_step_mode="live_student_negative_control",
     )
     result = trainer.fit([batch], [batch])
     destination = Path(args.output).expanduser().resolve()
@@ -3363,8 +4216,12 @@ def command_demo(args: argparse.Namespace) -> int:
 
 
 def command_evaluate(args: argparse.Namespace) -> int:
-    prediction = PredictionBundle.from_npz(args.predictions)
-    with np.load(args.truth, allow_pickle=False) as truth:
+    input_records = _freeze_file_records([args.predictions, args.truth], "cell evaluation input")
+    output_path = None if not args.output else Path(args.output).expanduser().resolve()
+    if output_path is not None:
+        _reject_output_input_collisions([output_path], input_records, label="cell evaluation")
+    prediction = PredictionBundle.from_npz(input_records[0]["path"])
+    with np.load(input_records[1]["path"], allow_pickle=False) as truth:
         if "nucleus_ids" not in truth:
             raise ValueError("truth NPZ requires nucleus_ids for row integrity")
         truth_ids = np.asarray(truth["nucleus_ids"], dtype=np.dtype("U"))
@@ -3422,8 +4279,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
             result["expression"] = expression_result
     if not result:
         raise ValueError("truth NPZ needs true_labels and/or observed_expression")
-    if args.output:
-        atomic_json_dump(result, args.output)
+    _assert_file_records_unchanged(input_records, "cell evaluation input")
+    if output_path is not None:
+        atomic_json_dump(result, output_path)
     _json(result)
     return 0
 
@@ -3464,12 +4322,20 @@ def _aggregate_spatial_values(
 def command_evaluate_spatial(args: argparse.Namespace) -> int:
     """Evaluate locked spot expression without exposing it to training."""
 
-    prediction = PredictionBundle.from_npz(args.predictions)
-    with np.load(args.truth, allow_pickle=False) as truth:
+    input_records = _freeze_file_records([args.predictions, args.truth], "spatial evaluation input")
+    output_path = None if not args.output else Path(args.output).expanduser().resolve()
+    aggregates_path = (
+        None if not args.aggregates_output else Path(args.aggregates_output).expanduser().resolve()
+    )
+    output_paths = [path for path in (output_path, aggregates_path) if path is not None]
+    if output_paths:
+        _reject_output_input_collisions(output_paths, input_records, label="spatial evaluation")
+    prediction = PredictionBundle.from_npz(input_records[0]["path"])
+    with np.load(input_records[1]["path"], allow_pickle=False) as truth:
         if "__contract__" in truth or "__version__" in truth:
             # Enforce locked role, version, identities, and provenance before
             # scoring artifacts created by prepare-spatial-truth.
-            SpatialTruthArtifact.from_npz(args.truth)
+            SpatialTruthArtifact.from_npz(input_records[1]["path"])
         required = {
             "observed_expression",
             "gene_names",
@@ -3600,11 +4466,11 @@ def command_evaluate_spatial(args: argparse.Namespace) -> int:
             "predicted_mean_by_type": spot_probabilities[evaluable].mean(axis=0).tolist(),
             "predicted_type_names": prediction.type_names.tolist(),
         }
-    if args.aggregates_output:
-        destination = Path(args.aggregates_output).expanduser().resolve()
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    _assert_file_records_unchanged(input_records, "spatial evaluation input")
+    if aggregates_path is not None:
+        aggregates_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
-            destination,
+            aggregates_path,
             spot_ids=spot_ids[evaluable],
             gene_names=truth_genes,
             predicted_expression=spot_expression[evaluable],
@@ -3612,10 +4478,677 @@ def command_evaluate_spatial(args: argparse.Namespace) -> int:
             predicted_composition=aligned_spot_probabilities[evaluable],
             spot_mass=mass[evaluable],
         )
-        result["aggregates_output"] = str(destination)
-    if args.output:
-        atomic_json_dump(result, args.output)
+        result["aggregates_output"] = str(aggregates_path)
+    if output_path is not None:
+        atomic_json_dump(result, output_path)
     _json(result)
+    return 0
+
+
+def _npz_scalar(archive: np.lib.npyio.NpzFile, name: str) -> object:
+    if name not in archive:
+        raise ValueError("coverage endpoint input is missing: %s" % name)
+    value = np.asarray(archive[name])
+    if value.size != 1:
+        raise ValueError("coverage endpoint input %s must be scalar" % name)
+    return value.reshape(-1)[0]
+
+
+def _coverage_sha256(value: object, label: str) -> str:
+    digest = str(value)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("%s must be a lowercase SHA-256 digest" % label)
+    return digest
+
+
+def _load_coverage_method(
+    *,
+    predictions_path: Path,
+    endpoint_input_path: Path,
+    expected_prediction_sha256: Optional[str] = None,
+    expected_endpoint_input_sha256: Optional[str] = None,
+) -> Dict[str, object]:
+    """Load and aggregate one method without reading spatial truth values."""
+
+    prediction_sha256 = _sha256(str(predictions_path))
+    if expected_prediction_sha256 is not None and prediction_sha256 != _coverage_sha256(
+        expected_prediction_sha256,
+        "prespecified prediction SHA-256",
+    ):
+        raise ValueError("prediction artifact differs from its prespecified SHA-256")
+    prediction = PredictionBundle.from_npz(predictions_path)
+    if _sha256(str(predictions_path)) != prediction_sha256:
+        raise ValueError("prediction artifact changed while coverage evaluation was loading it")
+
+    endpoint_input_sha256 = _sha256(str(endpoint_input_path))
+    if expected_endpoint_input_sha256 is not None and endpoint_input_sha256 != _coverage_sha256(
+        expected_endpoint_input_sha256,
+        "prespecified endpoint-input SHA-256",
+    ):
+        raise ValueError("coverage endpoint input differs from its prespecified SHA-256")
+    with np.load(endpoint_input_path, allow_pickle=False) as endpoint_archive:
+        contract = str(_npz_scalar(endpoint_archive, "__contract__"))
+        version = int(_npz_scalar(endpoint_archive, "__version__"))
+        if contract != COVERAGE_ENDPOINT_INPUT_CONTRACT:
+            raise ValueError("endpoint input is not a HEIR coverage endpoint artifact")
+        if version != COVERAGE_ENDPOINT_INPUT_VERSION:
+            raise ValueError("unsupported coverage endpoint input version")
+        endpoint = str(_npz_scalar(endpoint_archive, "endpoint"))
+        required = {
+            "nucleus_ids",
+            "gene_names",
+            "spot_ids",
+            "nucleus_spot_index",
+            "evaluation_spot_mask",
+            "cell_rna_mass",
+        }
+        if endpoint == "full_coverage_type_mean_fallback":
+            required.update(
+                {
+                    "frozen_type_index",
+                    "type_names",
+                    "frozen_type_mean_log_expression",
+                }
+            )
+        elif endpoint == "fixed_coverage_selective":
+            required.update({"uncertainty", "target_coverage"})
+        else:
+            raise ValueError("unsupported coverage endpoint")
+        missing = sorted(required - set(endpoint_archive.files))
+        if missing:
+            raise ValueError("coverage endpoint input is missing: %s" % ", ".join(missing))
+        endpoint_values = {name: np.array(endpoint_archive[name], copy=True) for name in required}
+    if _sha256(str(endpoint_input_path)) != endpoint_input_sha256:
+        raise ValueError("coverage endpoint input changed while it was being loaded")
+
+    endpoint_nucleus_ids = np.asarray(endpoint_values["nucleus_ids"], dtype=np.dtype("U"))
+    endpoint_genes = np.asarray(endpoint_values["gene_names"], dtype=np.dtype("U"))
+    endpoint_spot_ids = np.asarray(endpoint_values["spot_ids"], dtype=np.dtype("U"))
+    endpoint_spot_index = np.asarray(endpoint_values["nucleus_spot_index"])
+    evaluation_spot_mask = np.asarray(endpoint_values["evaluation_spot_mask"])
+    if not np.array_equal(endpoint_nucleus_ids, prediction.nucleus_ids.astype(str)):
+        raise ValueError("endpoint nucleus_ids must exactly match prediction row order")
+    for name, values in (("gene_names", endpoint_genes), ("spot_ids", endpoint_spot_ids)):
+        if values.ndim != 1 or any(not value for value in values.tolist()):
+            raise ValueError("endpoint %s must be a non-empty identity vector" % name)
+        if len(set(values.tolist())) != len(values):
+            raise ValueError("endpoint %s must contain unique identities" % name)
+    if evaluation_spot_mask.dtype != np.bool_ or evaluation_spot_mask.shape != (
+        len(endpoint_spot_ids),
+    ):
+        raise ValueError("evaluation_spot_mask must be a spot-aligned boolean vector")
+    if int(evaluation_spot_mask.sum()) < 2:
+        raise ValueError("evaluation_spot_mask must select at least two spots")
+    if not np.issubdtype(endpoint_spot_index.dtype, np.integer) or endpoint_spot_index.shape != (
+        len(endpoint_nucleus_ids),
+    ):
+        raise ValueError("endpoint nucleus_spot_index must be cell-aligned integers")
+    endpoint_spot_index = endpoint_spot_index.astype(np.int64, copy=False)
+    if np.any(endpoint_spot_index < -1) or np.any(endpoint_spot_index >= len(endpoint_spot_ids)):
+        raise ValueError("endpoint nucleus_spot_index contains an unavailable spot")
+
+    predicted_genes = [str(value) for value in prediction.gene_names.tolist()]
+    if len(set(predicted_genes)) != len(predicted_genes):
+        raise ValueError("prediction contains duplicate gene names")
+    predicted_gene_lookup = {name: index for index, name in enumerate(predicted_genes)}
+    missing_genes = sorted(set(endpoint_genes.tolist()) - set(predicted_gene_lookup))
+    if missing_genes:
+        raise ValueError("prediction is missing endpoint genes: %s" % ", ".join(missing_genes))
+    gene_order = np.asarray(
+        [predicted_gene_lookup[str(name)] for name in endpoint_genes], dtype=np.int64
+    )
+    common_arguments = {
+        "cell_log_expression": prediction.internal_aggregate_expression_mean[:, gene_order],
+        "cell_ids": endpoint_nucleus_ids,
+        "spot_ids": endpoint_spot_ids,
+        "gene_names": endpoint_genes,
+        "spot_index": endpoint_spot_index,
+        "num_spots": len(endpoint_spot_ids),
+        "cell_rna_mass": np.asarray(endpoint_values["cell_rna_mass"], dtype=np.float64),
+    }
+    if endpoint == "full_coverage_type_mean_fallback":
+        aggregation = full_coverage_type_mean_aggregation(
+            **common_arguments,
+            abstain=np.asarray(prediction.abstain, dtype=bool),
+            frozen_type_index=np.asarray(endpoint_values["frozen_type_index"]),
+            frozen_type_mean_log_expression=np.asarray(
+                endpoint_values["frozen_type_mean_log_expression"], dtype=np.float64
+            ),
+            type_names=np.asarray(endpoint_values["type_names"], dtype=np.dtype("U")),
+        )
+    else:
+        target_coverage_raw = np.asarray(endpoint_values["target_coverage"])
+        if target_coverage_raw.size != 1:
+            raise ValueError("target_coverage must be scalar")
+        aggregation = fixed_coverage_selective_aggregation(
+            **common_arguments,
+            uncertainty=np.asarray(endpoint_values["uncertainty"], dtype=np.float64),
+            target_coverage=float(target_coverage_raw.reshape(-1)[0]),
+        )
+
+    return {
+        "aggregation": aggregation,
+        "contract": contract,
+        "version": version,
+        "endpoint": endpoint,
+        "endpoint_nucleus_ids": endpoint_nucleus_ids,
+        "endpoint_genes": endpoint_genes,
+        "endpoint_spot_ids": endpoint_spot_ids,
+        "endpoint_spot_index": endpoint_spot_index,
+        "evaluation_spot_mask": evaluation_spot_mask,
+        "cell_rna_mass": np.asarray(endpoint_values["cell_rna_mass"], dtype=np.float64),
+        "target_coverage": aggregation.requested_coverage,
+        "prediction_expression_space_id": prediction.expression_space_id,
+        "prediction_sha256": prediction_sha256,
+        "endpoint_input_sha256": endpoint_input_sha256,
+        "predictions_path": predictions_path,
+        "endpoint_input_path": endpoint_input_path,
+    }
+
+
+def _coverage_common_design(method: Mapping[str, object]) -> Dict[str, object]:
+    return {
+        name: method[name]
+        for name in (
+            "endpoint",
+            "endpoint_nucleus_ids",
+            "endpoint_genes",
+            "endpoint_spot_ids",
+            "endpoint_spot_index",
+            "evaluation_spot_mask",
+            "cell_rna_mass",
+            "target_coverage",
+            "prediction_expression_space_id",
+        )
+    }
+
+
+def _require_same_coverage_design(
+    common: Mapping[str, object],
+    candidate: Mapping[str, object],
+    method_name: str,
+) -> None:
+    for name in (
+        "endpoint_nucleus_ids",
+        "endpoint_genes",
+        "endpoint_spot_ids",
+        "endpoint_spot_index",
+        "evaluation_spot_mask",
+        "cell_rna_mass",
+    ):
+        if not np.array_equal(np.asarray(common[name]), np.asarray(candidate[name])):
+            raise ValueError("method %s differs on common coverage field %s" % (method_name, name))
+    for name in ("endpoint", "prediction_expression_space_id"):
+        if str(common[name]) != str(candidate[name]):
+            raise ValueError("method %s differs on common coverage field %s" % (method_name, name))
+    if not np.isclose(
+        float(common["target_coverage"]),
+        float(candidate["target_coverage"]),
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+        raise ValueError("method %s differs on common target coverage" % method_name)
+
+
+def _score_coverage_methods(
+    *,
+    truth_path: Path,
+    expected_truth_sha256: Optional[str],
+    common: Mapping[str, object],
+    aggregations: Mapping[str, object],
+    comparison_pairs: Optional[Sequence[Tuple[str, str]]],
+    require_locked_truth_contract: bool,
+) -> Tuple[Dict[str, object], str, np.ndarray]:
+    endpoint_nucleus_ids = np.asarray(common["endpoint_nucleus_ids"], dtype=np.dtype("U"))
+    endpoint_genes = np.asarray(common["endpoint_genes"], dtype=np.dtype("U"))
+    endpoint_spot_ids = np.asarray(common["endpoint_spot_ids"], dtype=np.dtype("U"))
+    endpoint_spot_index = np.asarray(common["endpoint_spot_index"], dtype=np.int64)
+    evaluation_spot_mask = np.asarray(common["evaluation_spot_mask"], dtype=bool)
+    truth_sha256 = _sha256(str(truth_path))
+    if expected_truth_sha256 is not None and truth_sha256 != _coverage_sha256(
+        expected_truth_sha256,
+        "prespecified truth SHA-256",
+    ):
+        raise ValueError("spatial truth differs from its prespecified SHA-256")
+
+    with np.load(truth_path, allow_pickle=False) as truth:
+        has_contract = "__contract__" in truth and "__version__" in truth
+        if require_locked_truth_contract and not has_contract:
+            raise ValueError(
+                "locked multi-method coverage evaluation requires a HEIR spatial-truth contract"
+            )
+        if has_contract:
+            SpatialTruthArtifact.from_npz(truth_path)
+        required_truth = {
+            "observed_expression",
+            "gene_names",
+            "spot_ids",
+            "nucleus_ids",
+            "nucleus_spot_index",
+            "expression_space_id",
+        }
+        missing_truth = sorted(required_truth - set(truth.files))
+        if missing_truth:
+            raise ValueError("spatial truth artifact is missing: %s" % ", ".join(missing_truth))
+        if "spot_assignment" in truth:
+            raise ValueError(
+                "prospective coverage evaluation requires a frozen nucleus_spot_index; "
+                "dense overlap assignments cannot be silently collapsed"
+            )
+        observed_expression = np.asarray(truth["observed_expression"], dtype=np.float64).copy()
+        truth_genes = np.asarray(truth["gene_names"], dtype=np.dtype("U")).copy()
+        truth_spot_ids = np.asarray(truth["spot_ids"], dtype=np.dtype("U")).copy()
+        truth_nucleus_ids = np.asarray(truth["nucleus_ids"], dtype=np.dtype("U")).copy()
+        truth_spot_index = np.asarray(truth["nucleus_spot_index"]).copy()
+        truth_expression_space_id = str(np.asarray(truth["expression_space_id"]).item())
+    if _sha256(str(truth_path)) != truth_sha256:
+        raise ValueError("spatial truth artifact changed while it was being loaded")
+
+    if truth_expression_space_id != str(common["prediction_expression_space_id"]):
+        raise ValueError("spatial truth and prediction use different expression spaces")
+    if not np.issubdtype(truth_spot_index.dtype, np.integer) or truth_spot_index.shape != (
+        len(endpoint_nucleus_ids),
+    ):
+        raise ValueError("truth nucleus_spot_index must be cell-aligned integers")
+    truth_spot_index = truth_spot_index.astype(np.int64, copy=False)
+    for name, endpoint_values_ordered, truth_values in (
+        ("nucleus_ids", endpoint_nucleus_ids, truth_nucleus_ids),
+        ("gene_names", endpoint_genes, truth_genes),
+        ("spot_ids", endpoint_spot_ids, truth_spot_ids),
+        ("nucleus_spot_index", endpoint_spot_index, truth_spot_index),
+    ):
+        if not np.array_equal(endpoint_values_ordered, truth_values):
+            raise ValueError("truth %s differs from the prespecified endpoint input" % name)
+    if observed_expression.shape != (len(endpoint_spot_ids), len(endpoint_genes)):
+        raise ValueError("observed_expression must have shape (endpoint spots, endpoint genes)")
+    truth_gene_mask = build_truth_gene_mask(
+        observed_expression,
+        endpoint_genes,
+        spot_ids=endpoint_spot_ids,
+        spot_mask=evaluation_spot_mask,
+    )
+    report = evaluate_methods_on_truth_gene_mask(
+        aggregations=aggregations,  # type: ignore[arg-type]
+        truth_expression=observed_expression,
+        gene_mask=truth_gene_mask,
+        spot_ids=endpoint_spot_ids,
+        comparison_pairs=comparison_pairs,
+    )
+    return report, truth_sha256, observed_expression
+
+
+def _coverage_source_sha256() -> Dict[str, str]:
+    package = Path(__file__).resolve().parent
+    paths = {
+        "heir.cli": Path(__file__).resolve(),
+        "heir.evaluation.coverage": package / "evaluation" / "coverage.py",
+        "heir.inference": package / "inference.py",
+        "heir.data.spatial_truth": package / "data" / "spatial_truth.py",
+    }
+    return {name: _sha256(str(path)) for name, path in paths.items()}
+
+
+def _write_single_coverage_aggregates(
+    *,
+    output: str,
+    common: Mapping[str, object],
+    aggregation: object,
+    observed_expression: np.ndarray,
+) -> Tuple[str, str]:
+    if not isinstance(aggregation, CoverageAggregation):
+        raise TypeError("coverage aggregation has an invalid type")
+    destination = Path(output).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        destination,
+        spot_ids=np.asarray(common["endpoint_spot_ids"]),
+        gene_names=np.asarray(common["endpoint_genes"]),
+        predicted_expression=aggregation.spot_expression,
+        observed_expression=observed_expression,
+        spot_mass=aggregation.spot_mass,
+        evaluation_spot_mask=np.asarray(common["evaluation_spot_mask"]),
+        coverage_aggregation_sha256=np.asarray(aggregation.metadata["coverage_aggregation_sha256"]),
+    )
+    return str(destination), _sha256(str(destination))
+
+
+def _coverage_plan_path(plan_path: Path, value: object, label: str) -> Path:
+    raw = str(value)
+    if not raw:
+        raise ValueError("coverage benchmark plan %s cannot be empty" % label)
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = plan_path.parent / path
+    return path.resolve()
+
+
+def _load_coverage_plan(args: argparse.Namespace) -> Tuple[Path, str, Mapping[str, object]]:
+    if not args.plan_sha256:
+        raise ValueError("--plan-sha256 is required for a locked coverage benchmark plan")
+    plan_path = Path(args.plan).expanduser().resolve()
+    plan_sha256 = _sha256(str(plan_path))
+    if plan_sha256 != _coverage_sha256(args.plan_sha256, "--plan-sha256"):
+        raise ValueError("coverage benchmark plan differs from its prespecified SHA-256")
+    with plan_path.open("r", encoding="utf-8") as handle:
+        plan = json.load(handle)
+    if _sha256(str(plan_path)) != plan_sha256:
+        raise ValueError("coverage benchmark plan changed while it was being loaded")
+    if not isinstance(plan, Mapping):
+        raise ValueError("coverage benchmark plan must be a JSON object")
+    required = {"schema", "truth", "truth_sha256", "methods", "comparison_pairs"}
+    if set(plan) != required:
+        raise ValueError(
+            "coverage benchmark plan must contain exactly: %s" % ", ".join(sorted(required))
+        )
+    if plan.get("schema") != COVERAGE_BENCHMARK_PLAN_SCHEMA:
+        raise ValueError("unsupported coverage benchmark plan schema")
+    _coverage_sha256(plan["truth_sha256"], "coverage plan truth_sha256")
+    return plan_path, plan_sha256, plan
+
+
+def _command_evaluate_spatial_coverage_plan(args: argparse.Namespace) -> int:
+    legacy = {
+        "--predictions": args.predictions,
+        "--truth": args.truth,
+        "--endpoint-input": args.endpoint_input,
+        "--endpoint-input-sha256": args.endpoint_input_sha256,
+        "--method-name": args.method_name,
+        "--aggregates-output": args.aggregates_output,
+    }
+    conflicting = [name for name, value in legacy.items() if value is not None]
+    if conflicting:
+        raise ValueError("--plan cannot be combined with %s" % ", ".join(conflicting))
+    output_path = Path(args.output).expanduser().resolve()
+    requested_plan_path = Path(args.plan).expanduser().resolve()
+    reject_path_collisions(
+        (output_path,),
+        (requested_plan_path,),
+        label="coverage benchmark",
+    )
+    plan_path, plan_sha256, plan = _load_coverage_plan(args)
+    raw_methods = plan["methods"]
+    if not isinstance(raw_methods, list) or len(raw_methods) < 2:
+        raise ValueError("coverage benchmark plan requires at least two methods")
+    method_specs = []
+    method_names = set()
+    method_keys = {
+        "name",
+        "predictions",
+        "predictions_sha256",
+        "endpoint_input",
+        "endpoint_input_sha256",
+    }
+    for index, raw_method in enumerate(raw_methods):
+        if not isinstance(raw_method, Mapping) or set(raw_method) != method_keys:
+            raise ValueError("coverage plan method %d has invalid fields" % index)
+        name = str(raw_method["name"])
+        if not name or name in method_names:
+            raise ValueError("coverage plan method names must be non-empty and unique")
+        method_names.add(name)
+        method_specs.append(
+            (
+                name,
+                raw_method,
+                _coverage_plan_path(
+                    plan_path,
+                    raw_method["predictions"],
+                    "method predictions",
+                ),
+                _coverage_plan_path(
+                    plan_path,
+                    raw_method["endpoint_input"],
+                    "method endpoint_input",
+                ),
+            )
+        )
+    truth_path = _coverage_plan_path(plan_path, plan["truth"], "truth")
+    reject_path_collisions(
+        (output_path,),
+        (
+            plan_path,
+            truth_path,
+            *(
+                path
+                for _, _, predictions, endpoint in method_specs
+                for path in (predictions, endpoint)
+            ),
+        ),
+        label="coverage benchmark",
+    )
+    methods: Dict[str, Mapping[str, object]] = {}
+    aggregations: Dict[str, object] = {}
+    common: Optional[Dict[str, object]] = None
+    frozen_artifacts = []
+    method_artifact_identities = set()
+    for name, raw_method, predictions_path, endpoint_input_path in method_specs:
+        loaded = _load_coverage_method(
+            predictions_path=predictions_path,
+            endpoint_input_path=endpoint_input_path,
+            expected_prediction_sha256=str(raw_method["predictions_sha256"]),
+            expected_endpoint_input_sha256=str(raw_method["endpoint_input_sha256"]),
+        )
+        artifact_identity = (
+            str(loaded["prediction_sha256"]),
+            str(loaded["endpoint_input_sha256"]),
+        )
+        if artifact_identity in method_artifact_identities:
+            raise ValueError(
+                "coverage plan methods must not alias the same prediction and endpoint artifacts"
+            )
+        method_artifact_identities.add(artifact_identity)
+        candidate_common = _coverage_common_design(loaded)
+        if common is None:
+            common = candidate_common
+        else:
+            _require_same_coverage_design(common, candidate_common, name)
+        methods[name] = loaded
+        aggregations[name] = loaded["aggregation"]
+        frozen_artifacts.extend(
+            [
+                (predictions_path, str(loaded["prediction_sha256"])),
+                (endpoint_input_path, str(loaded["endpoint_input_sha256"])),
+            ]
+        )
+    if common is None:
+        raise RuntimeError("coverage benchmark plan did not load a common design")
+
+    raw_pairs = plan["comparison_pairs"]
+    if not isinstance(raw_pairs, list) or not raw_pairs:
+        raise ValueError("coverage benchmark plan requires comparison_pairs")
+    pairs: List[Tuple[str, str]] = []
+    seen_pairs = set()
+    participating = set()
+    for raw_pair in raw_pairs:
+        if not isinstance(raw_pair, list) or len(raw_pair) != 2:
+            raise ValueError("each coverage comparison pair must be a two-name JSON list")
+        pair = (str(raw_pair[0]), str(raw_pair[1]))
+        if pair[0] == pair[1] or pair[0] not in methods or pair[1] not in methods:
+            raise ValueError("coverage comparison pair contains an unknown or repeated method")
+        unordered = frozenset(pair)
+        if unordered in seen_pairs:
+            raise ValueError("coverage comparison pairs cannot repeat in either direction")
+        seen_pairs.add(unordered)
+        participating.update(pair)
+        pairs.append(pair)
+    if participating != set(methods):
+        raise ValueError("every coverage plan method must participate in a comparison pair")
+
+    report, truth_sha256, _ = _score_coverage_methods(
+        truth_path=truth_path,
+        expected_truth_sha256=str(plan["truth_sha256"]),
+        common=common,
+        aggregations=aggregations,
+        comparison_pairs=pairs,
+        require_locked_truth_contract=True,
+    )
+    report["claim_scope"].update(
+        {
+            "evaluation_design": "locked_multi_method_plan",
+            "eligible_for_paired_method_comparisons": True,
+            "methods_and_comparisons_preregistered": False,
+            "methods_and_comparisons_locked_by_external_hash_before_truth_load": True,
+            "preregistration_status": "not_established_without_external_timestamped_registry",
+        }
+    )
+    report["provenance"] = {
+        "plan_schema": COVERAGE_BENCHMARK_PLAN_SCHEMA,
+        "plan_path": str(plan_path),
+        "plan_sha256": plan_sha256,
+        "truth_path": str(truth_path),
+        "truth_sha256": truth_sha256,
+        "truth_contract_validated": True,
+        "truth_hash_asserted_by_plan": True,
+        "method_artifacts": {
+            name: {
+                "prediction_path": str(method["predictions_path"]),
+                "prediction_sha256": method["prediction_sha256"],
+                "endpoint_input_path": str(method["endpoint_input_path"]),
+                "endpoint_input_sha256": method["endpoint_input_sha256"],
+                "endpoint_input_contract": method["contract"],
+                "endpoint_input_version": method["version"],
+            }
+            for name, method in methods.items()
+        },
+        "aggregation_constructed_before_truth_values_loaded": True,
+        "comparison_design_hash_asserted_before_truth_values_loaded": True,
+        "source_sha256": _coverage_source_sha256(),
+        "heir_version": __version__,
+    }
+    _assert_file_records_unchanged(
+        [
+            {"path": str(plan_path), "sha256": plan_sha256},
+            {"path": str(truth_path), "sha256": truth_sha256},
+            *({"path": str(path), "sha256": digest} for path, digest in frozen_artifacts),
+        ],
+        "coverage benchmark input",
+    )
+    reject_path_collisions(
+        (output_path,),
+        (
+            plan_path,
+            truth_path,
+            *(path for path, _ in frozen_artifacts),
+        ),
+        label="coverage benchmark",
+    )
+    atomic_json_dump(report, output_path)
+    _json(report)
+    return 0
+
+
+def command_evaluate_spatial_coverage(args: argparse.Namespace) -> int:
+    """Run a prospective, provenance-bound spatial coverage endpoint."""
+
+    if args.plan:
+        return _command_evaluate_spatial_coverage_plan(args)
+    if args.plan_sha256:
+        raise ValueError("--plan-sha256 requires --plan")
+    missing = [
+        name
+        for name, value in (
+            ("--predictions", args.predictions),
+            ("--truth", args.truth),
+            ("--endpoint-input", args.endpoint_input),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError("single-method coverage evaluation requires %s" % ", ".join(missing))
+    predictions_path = Path(args.predictions).expanduser().resolve()
+    endpoint_input_path = Path(args.endpoint_input).expanduser().resolve()
+    truth_path = Path(args.truth).expanduser().resolve()
+    output_path = Path(args.output).expanduser().resolve()
+    output_paths = [output_path]
+    if args.aggregates_output:
+        output_paths.append(Path(args.aggregates_output).expanduser().resolve())
+    reject_path_collisions(
+        output_paths,
+        (predictions_path, endpoint_input_path, truth_path),
+        label="coverage evaluation",
+    )
+    method_name = str(args.method_name or "HEIR")
+    if not method_name:
+        raise ValueError("--method-name cannot be empty")
+    loaded = _load_coverage_method(
+        predictions_path=predictions_path,
+        endpoint_input_path=endpoint_input_path,
+        expected_endpoint_input_sha256=args.endpoint_input_sha256,
+    )
+    common = _coverage_common_design(loaded)
+    report, truth_sha256, observed_expression = _score_coverage_methods(
+        truth_path=truth_path,
+        expected_truth_sha256=None,
+        common=common,
+        aggregations={method_name: loaded["aggregation"]},
+        comparison_pairs=(),
+        require_locked_truth_contract=False,
+    )
+    if _sha256(str(predictions_path)) != loaded["prediction_sha256"]:
+        raise ValueError("prediction artifact changed during coverage evaluation")
+    if _sha256(str(endpoint_input_path)) != loaded["endpoint_input_sha256"]:
+        raise ValueError("coverage endpoint input changed during evaluation")
+    report["claim_scope"].update(
+        {
+            "evaluation_design": "single_method_runtime_invocation",
+            "eligible_for_paired_method_comparisons": False,
+            "methods_and_comparisons_preregistered": False,
+            "reason": (
+                "single-method CLI mode does not lock all methods and comparison pairs in one "
+                "externally hash-asserted plan"
+            ),
+        }
+    )
+    report["provenance"] = {
+        "prediction_sha256": loaded["prediction_sha256"],
+        "truth_sha256": truth_sha256,
+        "endpoint_input_sha256": loaded["endpoint_input_sha256"],
+        "endpoint_input_contract": loaded["contract"],
+        "endpoint_input_version": loaded["version"],
+        "aggregation_constructed_before_truth_values_loaded": True,
+        "endpoint_input_hash_asserted_before_load": bool(args.endpoint_input_sha256),
+        "comparison_design_hash_asserted_before_truth_values_loaded": False,
+        "source_sha256": _coverage_source_sha256(),
+        "heir_version": __version__,
+    }
+    coverage_input_records = [
+        {"path": str(predictions_path), "sha256": str(loaded["prediction_sha256"])},
+        {"path": str(endpoint_input_path), "sha256": str(loaded["endpoint_input_sha256"])},
+        {"path": str(truth_path), "sha256": truth_sha256},
+    ]
+    aggregates_record = None
+    if args.aggregates_output:
+        reject_path_collisions(
+            output_paths,
+            (predictions_path, endpoint_input_path, truth_path),
+            label="coverage evaluation",
+        )
+        _assert_file_records_unchanged(
+            coverage_input_records,
+            "coverage aggregate input",
+        )
+        aggregates_path, aggregates_sha256 = _write_single_coverage_aggregates(
+            output=args.aggregates_output,
+            common=common,
+            aggregation=loaded["aggregation"],
+            observed_expression=observed_expression,
+        )
+        report["aggregates_output"] = aggregates_path
+        report["aggregates_output_sha256"] = aggregates_sha256
+        aggregates_record = {"path": aggregates_path, "sha256": aggregates_sha256}
+    _assert_file_records_unchanged(
+        [
+            *coverage_input_records,
+            *(() if aggregates_record is None else (aggregates_record,)),
+        ],
+        "coverage report input",
+    )
+    reject_path_collisions(
+        output_paths,
+        (predictions_path, endpoint_input_path, truth_path),
+        label="coverage evaluation",
+    )
+    atomic_json_dump(report, output_path)
+    _json(report)
     return 0
 
 
@@ -3878,7 +5411,21 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--scgpt-artifact")
     assemble.add_argument("--program-artifact")
     assemble.add_argument("--ood-artifact")
-    assemble.add_argument("--unknown-targets")
+    assemble.add_argument(
+        "--molecular-e-step",
+        help=(
+            "hash-bound heir.molecular_e_step v3 artifact from an independently "
+            "frozen morphology/cross-modal teacher"
+        ),
+    )
+    assemble.add_argument(
+        "--unknown-targets",
+        help=(
+            "legacy independent biological unknown-state targets; pathology OOD masks "
+            "are retained separately, and strict frozen-E-step training rejects this "
+            "artifact until a distinct biological-unknown output head is implemented"
+        ),
+    )
     assemble.add_argument("--domain-label", type=int)
     assemble.add_argument("--spatial-pretraining-truth")
     assemble.add_argument("--sample-id")
@@ -3928,6 +5475,15 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--graph-hidden-dim", type=int, default=128)
     train.add_argument("--graph-output-dim", type=int, default=128)
     train.add_argument("--graph-layers", type=int, default=2)
+    train.add_argument(
+        "--graph-mode",
+        choices=("off", "distance_only"),
+        default="off",
+        help=(
+            "graph path (default off until held-out graph controls pass; distance_only "
+            "is an explicit experimental ablation)"
+        ),
+    )
     train.add_argument("--trunk-hidden-dims", default="256,128")
     train.add_argument("--decoder-hidden-dims", default="128,256")
     train.add_argument("--dropout", type=float, default=0.1)
@@ -3971,6 +5527,29 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--allow-negative-expression", action="store_true")
     train.add_argument("--rna-vae-checkpoint")
     train.add_argument("--initial-heir-checkpoint")
+    train.add_argument(
+        "--initialization-receipt",
+        help=(
+            "passing heir.validated_initialization.v1 receipt bound to the initial "
+            "morphology/cross-modal checkpoint"
+        ),
+    )
+    train.add_argument(
+        "--uninitialized-morphology-negative-control",
+        action="store_true",
+        help=(
+            "explicitly run random morphology heads as an excluded negative control; "
+            "never valid for primary personalized claims"
+        ),
+    )
+    train.add_argument(
+        "--live-student-e-step-negative-control",
+        action="store_true",
+        help=(
+            "derive molecular transport from the live student; retained only for "
+            "historical sensitivity controls and excluded from primary claims"
+        ),
+    )
     train.add_argument("--allow-random-decoder", action="store_true")
     train.add_argument("--finetune-rna-decoder", action="store_true")
     train.add_argument(
@@ -3989,7 +5568,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     refine = subparsers.add_parser(
         "refine",
-        help="run constrained broad-to-fine generalized EM with an EMA teacher",
+        help="run strict fixed-target refinement or an excluded live-E-step control",
     )
     refine.add_argument("--checkpoint", required=True)
     refine.add_argument("--train-batch", action="append", required=True)
@@ -4010,18 +5589,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--maximum-rounds",
         type=int,
         default=4,
-        help="maximum candidates; default leaves two parent-gated and two fine rounds",
+        help="maximum candidates; default leaves two parent-head and two fine-head rounds",
     )
     refine.add_argument(
         "--broad-refinement-rounds",
         type=int,
         default=2,
-        help="parent-gated rounds; use 0 for fine-only or at least 2 for anchor trust",
+        help=(
+            "strict fixed-target parent-head rounds; the excluded live-E-step control "
+            "uses parent-gated transport"
+        ),
     )
     refine.add_argument("--epochs-per-round", type=int, default=25)
     refine.add_argument("--min-probability", type=float, default=0.90)
     refine.add_argument("--max-normalized-entropy", type=float, default=0.20)
-    refine.add_argument("--teacher-ema", type=float, default=0.99)
+    refine.add_argument(
+        "--teacher-ema",
+        type=float,
+        default=0.0,
+        help=(
+            "round-teacher decay (default 0 copies the accepted best-epoch student; "
+            "nonzero values are sensitivity analyses)"
+        ),
+    )
     refine.add_argument(
         "--prior-old-weight",
         type=float,
@@ -4068,7 +5658,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="programmatic spatial-selection tolerance (CLI fixed/weak modes only)",
     )
-    refine.add_argument("--allow-no-view-agreement", action="store_true")
+    refine.add_argument(
+        "--require-scale-view-agreement",
+        action="store_true",
+        help=(
+            "opt-in same-checkpoint scale consistency gate; diagnostic only by default "
+            "because these views are not independent evidence"
+        ),
+    )
+    refine.add_argument(
+        "--allow-no-view-agreement",
+        action="store_true",
+        help="deprecated compatibility alias; scale-view agreement is already off by default",
+    )
+    refine.add_argument(
+        "--live-student-e-step-negative-control",
+        action="store_true",
+        help=(
+            "recompute transport from the HEIR teacher/student lineage; excluded from "
+            "primary claims"
+        ),
+    )
     refine.add_argument("--learning-rate", type=float, default=1.0e-4)
     refine.add_argument("--adapter-learning-rate", type=float, default=1.0e-5)
     refine.add_argument("--weight-decay", type=float, default=1.0e-4)
@@ -4179,6 +5789,30 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_spatial.add_argument("--output")
     evaluate_spatial.add_argument("--aggregates-output")
     evaluate_spatial.set_defaults(func=command_evaluate_spatial)
+
+    evaluate_spatial_coverage = subparsers.add_parser(
+        "evaluate-spatial-coverage",
+        help="run a prospective RNA-mass and coverage-aware spatial endpoint",
+    )
+    evaluate_spatial_coverage.add_argument(
+        "--plan",
+        help="locked multi-method heir.coverage_benchmark_plan.v1 JSON",
+    )
+    evaluate_spatial_coverage.add_argument(
+        "--plan-sha256",
+        help="required external SHA-256 assertion when --plan is used",
+    )
+    evaluate_spatial_coverage.add_argument("--predictions")
+    evaluate_spatial_coverage.add_argument("--truth")
+    evaluate_spatial_coverage.add_argument("--endpoint-input")
+    evaluate_spatial_coverage.add_argument(
+        "--endpoint-input-sha256",
+        help="optional externally supplied SHA-256 assertion for the frozen endpoint input",
+    )
+    evaluate_spatial_coverage.add_argument("--method-name")
+    evaluate_spatial_coverage.add_argument("--output", required=True)
+    evaluate_spatial_coverage.add_argument("--aggregates-output")
+    evaluate_spatial_coverage.set_defaults(func=command_evaluate_spatial_coverage)
     return parser
 
 

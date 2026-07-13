@@ -8,7 +8,7 @@ The current development refiner addresses the code-level audit findings:
 
 - UOT cost is evaluated on the same latent mean decoded into expression and
   uses image plus prototype diagonal covariance.
-- New v3 checkpoints may use a learned local query to form candidate prototype
+- New v4 checkpoints may use a learned local query to form candidate prototype
   probabilities, but the UOT cost is recomputed on the final decoded latent.
   Legacy v1/v2 query and unrestricted-residual behaviors remain loadable only for
   exact checkpoint compatibility.
@@ -21,24 +21,30 @@ The current development refiner addresses the code-level audit findings:
   target.
 - UOT uses a numerical convergence tolerance with a bounded iteration budget;
   a nonconverged molecular E-step is rejected rather than silently reused.
-- The EMA teacher's UOT plan is detached and normalized by complete row mass,
-  including the dustbin. The resulting known-state subprobabilities supervise
-  molecular routing, cell type, latent mean, marker, program, and frozen-teacher
-  objectives in the M-step while preserving unassigned mass.
-- Trusted fine or parent anchors mask both local prototype routing and UOT.
+- Primary refinement consumes a hash-bound E-step artifact produced by an
+  independently frozen morphology/cross-modal teacher. The live student type,
+  query, and unknown heads never create their own M-step targets, and the direct
+  live UOT optimizer term is disabled. The historical self-E-step is retained
+  only as an excluded negative control.
+- In the strict path, repeated reads of one fixed artifact cannot mint
+  pseudo-anchors. In the excluded live-E-step sensitivity, trusted fine or parent
+  pseudo-anchors contribute confidence-weighted classification losses but do not
+  hard-mask prototype routing or UOT.
 - Anchors are provisional for one round, trusted after two agreeing rounds,
   challenged by contradictory evidence, relabelled after two contradictory
   rounds, and revoked by technical/model rejection.
 - Round 0 is evaluated and snapshotted before the first candidate. A first or
   later candidate beyond the configured validation-loss tolerance restores the
-  best student, EMA teacher, prototype prior,
+  best student, round teacher, prototype prior,
   training batches, and anchor lifecycle immediately; the failed student never
-  updates the EMA.
-- The default schedule uses two parent-gated rounds (enough to establish trusted
-  parent anchors) and then two fine rounds (enough to establish trusted fine
-  anchors). Broad rounds train only the parent head and cannot update
-  fine-prototype priors or terminate refinement
-  before the fine phase.
+  updates the round teacher. Every candidate is compared with the immutable
+  round-0 safety ceiling, and output selection keeps the lowest-loss safe state
+  with automatic round-0 fallback.
+- The default strict schedule uses two fixed-target parent-head rounds and then
+  two fixed-target fine rounds. Broad rounds train only the parent head and cannot
+  update fine-prototype priors or terminate refinement before the fine phase.
+  Parent-gated transport and longitudinal anchor lifecycle behavior apply only to
+  the excluded live-E-step sensitivity.
 - Measured prototype priors are fixed by default. Lower measured-prior weights
   are explicitly sensitivity analyses.
 - Biological aggregate losses are weighted by detached transported known-state
@@ -50,14 +56,19 @@ The current development refiner addresses the code-level audit findings:
   covariance, and nearest-neighbor state-separation scales are calibrated in
   the learned residual subspace. Single-state types fall back to projected
   covariance or empirical residual evidence. A detached maximum-type basis and
-  posterior-concentration gate replace the non-orthonormal weighted basis, and
-  the residual stays exactly zero until that internal concentration threshold
-  passes. This is a numerical safeguard, not the separate independent-label
+  continuous detached posterior-concentration gate replace the non-orthonormal
+  weighted basis. This is a numerical safeguard, not the separate independent-label
   broad-type development gate, which must pass before residual-on results are
   interpreted. Then
   a smooth unit-ball projection hard-bounds deterministic and sampled latent
   corrections. The coefficient log-variance head starts at `-6`. Legacy v1
   geometry and early v3 mixed-basis checkpoints require explicit migration.
+- The graph encoder and graph loss are off by default. The current
+  distance-weighted graph is an explicit ablation with a zero-initialized
+  learnable context gate; directional edge conditioning remains future work.
+- Pathology feature OOD remains separate from biological unknown-state
+  supervision. Target score quantiles are descriptive telemetry only and never
+  replace the development-calibrated OOD threshold.
 - Inference intervals sample prototype assignment, prototype covariance, and
   coefficient-space residual uncertainty. They are explicitly conditional on a
   measured known state and are suppressed for abstained cells. The v8 artifact
@@ -107,13 +118,81 @@ compact final manifest binds every input and output hash. Pre-existing outputs
 without receipts fail closed; `--adopt-existing` accepts them only after the
 frozen CLI recipe reproduces byte-identical artifacts.
 
+At execution start, the runner freezes the complete refinement source-tree and
+source-bound CLI identities. It revalidates both immediately before and after
+every subprocess, around every existing-output adoption, and before writing the
+final manifest. The manifest stores the initial execution identity separately
+from the final validation identity; a final-tree hash alone cannot set
+`original_execution_source_verified`. The long-running molecular trainer uses
+the same fail-closed pattern for every H5AD, `reference500.npz`, and gene-panel
+input: all are hashed before any read and rehashed before output families and
+the provenance manifest.
+
+The prospective molecular leave-one-donor-out path uses one completely separate
+R2 family per target. For each of `4066`, `4399`, and `4411`, run
+`train_snpatho_scanvi.py --held-out-sample TARGET` with distinct native-model,
+decoder, latent-root, and provenance outputs, then run
+`prepare_snpatho_refinement_inputs.py` against that fold's explicit scanVI root
+and provenance. Supply all three resulting preparation manifests to the runner:
+
+```bash
+conda run -n hne python scripts/run_snpatho_refinement_benchmark.py \
+  --molecular-generation r2 --sample all --execute --controls \
+  --molecular-fold-preparation-manifest 4066=/path/fold_4066/preparation_manifest.json \
+  --molecular-fold-preparation-manifest 4399=/path/fold_4399/preparation_manifest.json \
+  --molecular-fold-preparation-manifest 4411=/path/fold_4411/preparation_manifest.json \
+  --artifact-root /mnt/seagate/HEIR_runs/snpatho_true_loo_v1 \
+  --prohibit-adoption \
+  --manifest-output artifacts/snpatho/true_loo_v1/run_manifest.json
+```
+
+The runner refuses a shared latent space or decoder across folds. Held-out
+target labels are removed before query registration and replaced by predictions
+from the frozen training-donor scANVI classifier. Those classifier labels still
+originate from published annotations on the two training donors, not an
+independently reviewed ontology. No real three-fold CUDA artifacts were produced
+by this code change, and the current HEIR runner remains an explicitly excluded
+uninitialized/live-E-step engineering control until the independent initializer
+and frozen E-step exist.
+
+The independently fitted folds do not share a latent space, so a prototype bank
+from one fold cannot be evaluated through another fold's checkpoint. The
+true-LOO runner therefore omits cross-fold wrong-prototype-bank stages and marks
+their coverage unavailable rather than claiming them as completed. Score this
+run with the same three fold declarations; the scorer validates each target's
+native manifest, decoder, and latent identity and preserves the negative-control
+claim scope:
+
+```bash
+PYTHONPATH=src conda run -n hne python \
+  scripts/benchmark_snpatho_refinement_matrix.py \
+  --molecular-generation r2 \
+  --artifact-root /mnt/seagate/HEIR_runs/snpatho_true_loo_v1 \
+  --run-manifest artifacts/snpatho/true_loo_v1/run_manifest.json \
+  --molecular-fold-preparation-manifest 4066=/path/fold_4066/preparation_manifest.json \
+  --molecular-fold-preparation-manifest 4399=/path/fold_4399/preparation_manifest.json \
+  --molecular-fold-preparation-manifest 4411=/path/fold_4411/preparation_manifest.json \
+  --json-output artifacts/snpatho/true_loo_v1/report.json \
+  --tsv-output artifacts/snpatho/true_loo_v1/report.tsv \
+  --markdown-output artifacts/snpatho/true_loo_v1/report.md
+```
+
+Because the default score request includes `wrong_prototype_bank`, the report
+above is intentionally `matrix_status: blocked` with
+`requested_control_unavailable_cross_latent_space`, even when every available
+same-latent artifact scores successfully. This is an incomplete requested
+matrix, not a generic complete result. A deliberately reduced diagnostic matrix
+can list only available controls with repeated `--control` arguments, but it
+does not restore wrong-bank coverage.
+
 The runner freezes five endpoint seeds (17, 41, 89, 131, and 197), round 0 and
 round 4, and three control seeds (17, 41, and 89) for the fully nested
 round0/refined × residual-on/off design, image-record shuffle,
 degree-preserving graph-node shuffle, and no graph. The nested cases use the
 same `--prototype-only` inference ablation at each checkpoint, allowing separate
 round-zero residual, refined residual, routing-refinement, and total-refinement
-effects. Wrong-prototype-bank coverage requires both alternative sources for
+effects. In the shared-latent development matrix, wrong-prototype-bank coverage
+requires both alternative sources for
 every specimen: six directed target/source pairings at each control seed, or 18
 cases in total. The legacy CLI flag remains `heir predict --wrong-donor-control`;
 source prototypes are
