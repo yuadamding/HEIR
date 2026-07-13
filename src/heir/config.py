@@ -41,21 +41,27 @@ class OptimizationConfig:
 
 @dataclass(frozen=True)
 class LossWeightConfig:
-    cell_type: float = 1.0
+    # Minimal one-pass frozen-target profile. Additional weak losses are
+    # explicit sensitivities rather than simultaneous defaults.
+    cell_type: float = 0.0
     molecular_posterior: float = 1.0
-    marker: float = 0.2
-    uot: float = 1.0
-    program: float = 1.0
-    pseudobulk: float = 0.5
-    composition: float = 0.5
-    cycle: float = 0.25
-    residual: float = 0.1
-    domain: float = 0.1
-    latent_kl: float = 0.1
-    graph: float = 0.05
-    calibration: float = 0.05
-    hierarchy: float = 0.1
-    scgpt: float = 0.5
+    molecular_routing: float = 1.0
+    molecular_type: float = 0.0
+    molecular_latent: float = 1.0
+    transport_unassigned: float = 0.0
+    marker: float = 0.0
+    uot: float = 0.0
+    program: float = 0.0
+    pseudobulk: float = 0.0
+    composition: float = 0.0
+    cycle: float = 0.0
+    residual: float = 0.0
+    domain: float = 0.0
+    latent_kl: float = 0.0
+    graph: float = 0.0
+    calibration: float = 0.0
+    hierarchy: float = 0.0
+    scgpt: float = 0.0
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
@@ -65,8 +71,10 @@ class LossWeightConfig:
 
 @dataclass(frozen=True)
 class RefinementConfig:
+    # A direct curriculum invocation performs one fine-head phase by default.
+    # Multi-phase curricula are explicit development sensitivities, not EM.
     enabled: bool = True
-    maximum_rounds: int = 4
+    maximum_rounds: int = 1
     min_probability: float = 0.90
     max_normalized_entropy: float = 0.20
     # The accepted best-epoch student becomes the next round's teacher.  A
@@ -91,9 +99,9 @@ class RefinementConfig:
     # Deprecated compatibility field for v0.1 experiment files/checkpoints.
     # When supplied, it overrides both explicit tolerances.
     objective_stability_tolerance: Optional[float] = None
-    # Anchor lifecycle requires two agreeing rounds before an anchor becomes
-    # trusted, so a one-round broad phase cannot affect parent supervision.
-    broad_refinement_rounds: int = 2
+    # Parent-head fitting is opt-in. The default single phase fits the fine
+    # head against the immutable target artifact.
+    broad_refinement_rounds: int = 0
 
     def validate(self) -> None:
         if self.maximum_rounds < 0 or self.maximum_rounds > 5:
@@ -192,7 +200,9 @@ class ExperimentConfig:
     targets: Dict[str, Any] = field(default_factory=dict)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     losses: LossWeightConfig = field(default_factory=LossWeightConfig)
-    refinement: RefinementConfig = field(default_factory=RefinementConfig)
+    # Experiment loading keeps refinement off unless a plan opts into it. The
+    # explicit ``heir refine`` command enables a one-phase curriculum.
+    refinement: RefinementConfig = field(default_factory=lambda: RefinementConfig(enabled=False))
     uncertainty: UncertaintyConfig = field(default_factory=UncertaintyConfig)
     random_seeds: Tuple[int, ...] = (17, 41, 89)
     spatial_validation_only: bool = True

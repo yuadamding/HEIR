@@ -260,7 +260,13 @@ class HEIROutput:
 
     @property
     def unknown_signal(self) -> Tensor:
-        """Alias for explicit unassigned prototype probability."""
+        """Deprecated alias for molecular transport unassignment."""
+
+        return self.unknown_probability
+
+    @property
+    def transport_unassigned_probability(self) -> Tensor:
+        """Probability of frozen-transport unassignment, not biological unknown/OOD."""
 
         return self.unknown_probability
 
@@ -368,6 +374,12 @@ class HEIRModel(nn.Module):
             nonnegative_output=config.nonnegative_expression,
         )
         self.expression_decoder = RNADecoder(decoder_config)
+
+    @property
+    def transport_unassigned_head(self) -> nn.Linear:
+        """Canonical alias retaining ``unknown_head`` checkpoint keys."""
+
+        return self.unknown_head
 
     def _hierarchical_types(
         self,

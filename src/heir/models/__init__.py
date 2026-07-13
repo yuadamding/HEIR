@@ -1,11 +1,5 @@
 """Authoritative neural model components for HEIR."""
 
-from .distilled import (
-    DistilledConfig,
-    DistilledHEIR,
-    DistilledOutput,
-    uncertainty_weighted_distillation_loss,
-)
 from .graph import (
     GraphContext,
     GraphContextConfig,
@@ -15,13 +9,19 @@ from .graph import (
     validate_edge_weight,
 )
 from .heir import HEIR, HEIRConfig, HEIRModel, HEIROutput
+from .morphology_state import (
+    MORPHOLOGY_STATE_CHECKPOINT_SCHEMA,
+    MORPHOLOGY_STATE_REPORT_SCHEMA,
+    MorphologyStateGate,
+    MorphologyStateGateConfig,
+    MorphologyStateOutput,
+    donor_type_preserving_permutation,
+    evaluate_morphology_state_checkpoint,
+    fit_morphology_state_gate,
+)
 from .rna import RNAVAE, RNAConfig, RNADecoder, RNAEncoder, RNAVAEConfig, RNAVAEOutput
 
 __all__ = [
-    "DistilledConfig",
-    "DistilledHEIR",
-    "DistilledOutput",
-    "uncertainty_weighted_distillation_loss",
     "GraphContext",
     "GraphContextConfig",
     "GraphContextEncoder",
@@ -32,6 +32,14 @@ __all__ = [
     "HEIRConfig",
     "HEIRModel",
     "HEIROutput",
+    "MORPHOLOGY_STATE_CHECKPOINT_SCHEMA",
+    "MORPHOLOGY_STATE_REPORT_SCHEMA",
+    "MorphologyStateGate",
+    "MorphologyStateGateConfig",
+    "MorphologyStateOutput",
+    "donor_type_preserving_permutation",
+    "evaluate_morphology_state_checkpoint",
+    "fit_morphology_state_gate",
     "RNAConfig",
     "RNADecoder",
     "RNAEncoder",

@@ -53,9 +53,9 @@ def _bundle() -> PredictionBundle:
     )
 
 
-def test_prediction_bundle_v8_roundtrip_and_legacy_load(tmp_path):
+def test_prediction_bundle_v9_roundtrip_and_legacy_load(tmp_path):
     bundle = _bundle()
-    output = tmp_path / "prediction_v8.npz"
+    output = tmp_path / "prediction_v9.npz"
     bundle.to_npz(output)
     loaded = PredictionBundle.from_npz(output)
     assert loaded.sample_id == "sample1"
@@ -72,9 +72,17 @@ def test_prediction_bundle_v8_roundtrip_and_legacy_load(tmp_path):
     np.testing.assert_array_equal(loaded.expression_interval_available, [True, True])
     assert loaded.parent_type_names.tolist() == ["parent"]
     assert loaded.program_scores.shape == (2, 1)
+    np.testing.assert_array_equal(
+        loaded.transport_unassigned_probability,
+        loaded.unknown_probability,
+    )
     with np.load(output, allow_pickle=False) as archive:
         assert str(archive["__contract__"].item()) == PredictionBundle.CONTRACT
-        assert int(archive["__version__"].item()) == 8
+        assert int(archive["__version__"].item()) == 9
+        np.testing.assert_array_equal(
+            archive["transport_unassigned_probability"],
+            archive["unknown_probability"],
+        )
         legacy_payload = {
             name: np.array(archive[name], copy=True)
             for name in archive.files

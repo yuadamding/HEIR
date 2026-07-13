@@ -1,7 +1,7 @@
 """Confidence-gated, revocable pseudo-label anchors.
 
 Anchor selection is deliberately stateless.  :func:`update_anchor_lifecycle`
-adds the state transition policy used by iterative refinement: a new anchor is
+adds the state transition policy used by the opt-in curriculum: a new anchor is
 provisional, becomes trusted only after a second agreeing round, and can be
 challenged, relabelled, or revoked as the evidence changes.
 """

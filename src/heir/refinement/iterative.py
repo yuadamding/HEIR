@@ -1,4 +1,4 @@
-"""Controlled broad-to-fine refinement coordinator with auditable stopping."""
+"""Auditable fixed-target curriculum with an explicit live-E-step control."""
 
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -56,8 +56,15 @@ class RefinementResult:
     round_state_dicts: Tuple[Mapping[str, torch.Tensor], ...] = ()
 
 
-class IterativeRefiner:
-    """Generalized-EM wrapper; the RNA decoder and prototypes remain fixed."""
+class FixedTargetCurriculum:
+    """Fit one or more student phases against one immutable molecular target.
+
+    In ``strict_artifact`` mode every phase consumes the same frozen E-step
+    artifact.  Multiple phases are therefore a fixed-target curriculum, not
+    iterative or generalized EM.  The separately named
+    ``live_student_negative_control`` mode may recompute transport and remains
+    excluded from primary claims.
+    """
 
     def __init__(
         self,
@@ -270,7 +277,7 @@ class IterativeRefiner:
         Type and prototype probabilities used by the optional pseudo-anchor
         loss are deterministic marginals of the frozen responsibilities.  In
         particular, scale views and live image predictions cannot change the
-        molecular targets used in any M round.
+        molecular targets used in any fixed-target phase.
         """
 
         if batch.molecular_responsibilities is None:
@@ -687,8 +694,8 @@ class IterativeRefiner:
                     )
                 if strict_artifact_estep:
                     # Re-reading one immutable round-0 artifact is not
-                    # independent longitudinal confirmation. Fixed-target
-                    # refinement therefore cannot mint pseudo anchors.
+                    # independent longitudinal confirmation. A fixed-target
+                    # curriculum therefore cannot mint pseudo anchors.
                     selection = replace(
                         selection,
                         accepted=np.zeros_like(selection.accepted),
@@ -930,3 +937,10 @@ class IterativeRefiner:
             round_zero_spatial_score,
             tuple(candidate_states),
         )
+
+
+# Compatibility alias for checkpoints, integrations, and historical tests that
+# imported the pre-terminology class name.  New code should use
+# ``FixedTargetCurriculum`` so repeated M-step phases over one artifact are not
+# misrepresented as iterative EM.
+IterativeRefiner = FixedTargetCurriculum

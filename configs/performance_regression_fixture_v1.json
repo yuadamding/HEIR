@@ -4,7 +4,7 @@
   "sources": [
     {
       "path": "src/heir/models/heir.py",
-      "sha256": "f60972b01ffd8b3ab577fd3a5d7fa01623bbaef847ac342ebdbfc1858d798967"
+      "sha256": "194b3dbcee7f73b1ec5df8a2eb49bf6e816ae69d68ca0457fa6edc90a9012be5"
     },
     {
       "path": "src/heir/models/graph.py",
@@ -16,7 +16,7 @@
     },
     {
       "path": "tests/test_performance_regression.py",
-      "sha256": "05ca1c3547181847e9a929342a61b76859b7d61fccfb97516511d5498b4c22af"
+      "sha256": "10574ac122f45ba95ae370be5608e91161f815dd8d9616bf25e650965fcf9b8d"
     }
   ],
   "expected": {

@@ -7,9 +7,9 @@ import numpy as np
 import pytest
 import torch
 
-from heir.config import RefinementConfig
+from heir.config import ExperimentConfig, RefinementConfig
 from heir.models import HEIRConfig, HEIRModel
-from heir.refinement import IterativeRefiner
+from heir.refinement import FixedTargetCurriculum, IterativeRefiner
 from heir.refinement import iterative as iterative_module
 from heir.refinement.anchors import (
     AnchorStatus,
@@ -430,7 +430,11 @@ def test_broad_refinement_requires_a_hierarchical_model() -> None:
     with pytest.raises(ValueError, match="broad refinement requires a hierarchical model"):
         IterativeRefiner(
             lambda: trainer,
-            RefinementConfig(require_view_agreement=False),
+            RefinementConfig(
+                maximum_rounds=4,
+                broad_refinement_rounds=2,
+                require_view_agreement=False,
+            ),
         ).fit(
             [_batch(3, "bag0", 0.0)],
             [_batch(3, "validation", 0.0)],
@@ -836,15 +840,21 @@ def test_first_degraded_round_restores_complete_round_zero_snapshot(monkeypatch)
     )
 
 
-def test_refinement_defaults_require_two_broad_rounds_and_fixed_prior() -> None:
+def test_refinement_defaults_to_one_fixed_target_phase_and_fixed_prior() -> None:
     config = RefinementConfig()
     config.validate()
-    assert config.maximum_rounds == 4
-    assert config.broad_refinement_rounds == 2
+    assert config.enabled
+    assert config.maximum_rounds == 1
+    assert config.broad_refinement_rounds == 0
     assert config.teacher_ema == 0.0
     assert not config.require_view_agreement
     assert config.prior_old_weight == 1.0
     assert config.prior_new_weight == 0.0
+    assert IterativeRefiner is FixedTargetCurriculum
+
+    experiment = ExperimentConfig(name="default", manifest="manifest.tsv", output_dir="output")
+    experiment.validate()
+    assert not experiment.refinement.enabled
 
     with pytest.raises(ValueError, match="0 for fine-only refinement or at least 2"):
         RefinementConfig(broad_refinement_rounds=1).validate()

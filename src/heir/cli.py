@@ -76,7 +76,7 @@ from .prior import (
     fit_rna_residual_geometry,
 )
 from .prior.prototypes import build_sample_prototypes
-from .refinement import IterativeRefiner
+from .refinement import FixedTargetCurriculum
 from .segmentation import (
     export_spaceranger_artifacts,
     read_spaceranger_geojson,
@@ -566,7 +566,7 @@ def command_prepare_reference(args: argparse.Namespace) -> int:
     ):
         if not args.conversion_provenance:
             raise ValueError(
-                "--input derivatives require --conversion-provenance from export_seurat.R"
+                "--input derivatives require --conversion-provenance from the external converter"
             )
         with Path(args.conversion_provenance).expanduser().open("r", encoding="utf-8") as handle:
             conversion = json.load(handle)
@@ -594,8 +594,8 @@ def command_prepare_reference(args: argparse.Namespace) -> int:
             raise ValueError("conversion sidecar derivative hash differs from --input")
     if not input_path.lower().endswith(".h5ad"):
         raise ValueError(
-            "prepare-reference accepts H5AD; convert RDS with scripts/export_seurat.R "
-            "and pass the result via --input"
+            "prepare-reference accepts H5AD; externally converted inputs require a provenance "
+            "sidecar and must be passed via --input"
         )
     filters = h5ad_filters(record)
     reference = load_h5ad_reference(
@@ -1655,6 +1655,8 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
     target_program_scores = None
     molecular_training_donors = set(prototypes.latent_training_donors)
     molecular_responsibilities = None
+    molecular_raw_real_row_mass = None
+    molecular_raw_dustbin_row_mass = None
     molecular_e_step = None
     sources = [args.histology, args.prototypes, args.reference]
     source_roles = ["sample_assay", "sample_assay", "sample_assay"]
@@ -1693,7 +1695,11 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
             cell_weights=cell_weights,
             artifact_threshold=float(args.artifact_threshold),
         )
-        molecular_responsibilities = molecular_e_step.responsibilities
+        molecular_responsibilities = (
+            molecular_e_step.resolved_conditional_known_prototype_distribution
+        )
+        molecular_raw_real_row_mass = molecular_e_step.resolved_raw_real_row_mass
+        molecular_raw_dustbin_row_mass = molecular_e_step.resolved_raw_dustbin_row_mass
         molecular_training_donors.update(molecular_e_step.teacher_training_donors)
         sources.append(args.molecular_e_step)
         source_roles.append("frozen_e_step")
@@ -1760,6 +1766,16 @@ def command_assemble_batch(args: argparse.Namespace) -> int:
             None
             if molecular_responsibilities is None
             else torch.from_numpy(molecular_responsibilities)
+        ),
+        molecular_raw_real_row_mass=(
+            None
+            if molecular_raw_real_row_mass is None
+            else torch.from_numpy(molecular_raw_real_row_mass)
+        ),
+        molecular_raw_dustbin_row_mass=(
+            None
+            if molecular_raw_dustbin_row_mass is None
+            else torch.from_numpy(molecular_raw_dustbin_row_mass)
         ),
         marker_centroids=torch.from_numpy(marker_centroids),
         marker_mask=torch.from_numpy(marker_mask),
@@ -2752,6 +2768,11 @@ def command_train(args: argparse.Namespace) -> int:
     )
     checkpoint["metadata"] = {
         "schema": "heir.trained_model.v1",
+        "teacher_role": (
+            "generic_crossmodal_pretraining"
+            if stage == TrainingStage.GENERIC_SPATIAL_PRETRAINING
+            else "independent_crossmodal_bridge"
+        ),
         "type_names": list(type_names),
         "parent_type_names": list(parent_names),
         "gene_names": list(gene_names),
@@ -3063,7 +3084,7 @@ def _load_refinement_views(
 
 
 def command_refine(args: argparse.Namespace) -> int:
-    """Run strict fixed-target refinement or an excluded live-E-step control."""
+    """Run a fixed-target curriculum or an excluded live-E-step control."""
 
     set_seed(args.seed)
     parent_checkpoint_artifact = _freeze_file_records(
@@ -3361,6 +3382,7 @@ def command_refine(args: argparse.Namespace) -> int:
         ),
     )
     refinement_config = RefinementConfig(
+        enabled=True,
         maximum_rounds=args.maximum_rounds,
         min_probability=args.min_probability,
         max_normalized_entropy=args.max_normalized_entropy,
@@ -3406,7 +3428,7 @@ def command_refine(args: argparse.Namespace) -> int:
             ),
         )
 
-    result = IterativeRefiner(
+    result = FixedTargetCurriculum(
         trainer_factory,
         refinement_config,
         device=args.device,
@@ -3437,6 +3459,11 @@ def command_refine(args: argparse.Namespace) -> int:
         if not np.isfinite(row["objective_relative_change"]):
             row["objective_relative_change"] = None
         round_rows.append(row)
+    refinement_protocol = (
+        "live_student_e_step_negative_control"
+        if args.live_student_e_step_negative_control
+        else "fixed_target_curriculum"
+    )
     refined_metadata = dict(metadata)
     refinement_training_donors = sorted(
         {batch.donor_id for batch in training_batches if batch.donor_id}
@@ -3488,6 +3515,7 @@ def command_refine(args: argparse.Namespace) -> int:
                 if args.live_student_e_step_negative_control
                 else "strict_artifact"
             ),
+            "refinement_protocol": refinement_protocol,
             "excluded_from_primary_claims": bool(exclusion_reasons),
             "exclusion_reasons": exclusion_reasons,
             "parent_checkpoint": parent_checkpoint_artifact["path"],
@@ -3622,6 +3650,7 @@ def command_refine(args: argparse.Namespace) -> int:
         prototype_outputs[key] = str(prototype_path)
     atomic_json_dump(
         {
+            "refinement_protocol": refinement_protocol,
             "rounds": round_rows,
             "round_zero_validation_loss": result.round_zero_validation_loss,
             "selected_round": result.selected_round,
@@ -3635,6 +3664,7 @@ def command_refine(args: argparse.Namespace) -> int:
         {
             "checkpoint": str(checkpoint_path),
             "audit": str(audit_path),
+            "refinement_protocol": refinement_protocol,
             "rounds": len(result.rounds),
             "round_zero_validation_loss": result.round_zero_validation_loss,
             "selected_round": result.selected_round,
@@ -5183,7 +5213,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prepare.add_argument(
         "--conversion-provenance",
-        help="JSON lineage sidecar emitted by scripts/export_seurat.R",
+        help="JSON lineage sidecar emitted by the external assay converter",
     )
     prepare.add_argument("--genes")
     prepare.add_argument("--cell-type-key", default="Level1")
@@ -5568,7 +5598,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     refine = subparsers.add_parser(
         "refine",
-        help="run strict fixed-target refinement or an excluded live-E-step control",
+        help="run a fixed-target curriculum or an excluded live-E-step control",
     )
     refine.add_argument("--checkpoint", required=True)
     refine.add_argument("--train-batch", action="append", required=True)
@@ -5588,16 +5618,19 @@ def build_parser() -> argparse.ArgumentParser:
     refine.add_argument(
         "--maximum-rounds",
         type=int,
-        default=4,
-        help="maximum candidates; default leaves two parent-head and two fine-head rounds",
+        default=1,
+        help=(
+            "fixed-target M-step phases (default 1); multiple phases are an explicit "
+            "curriculum, not iterative EM"
+        ),
     )
     refine.add_argument(
         "--broad-refinement-rounds",
         type=int,
-        default=2,
+        default=0,
         help=(
-            "strict fixed-target parent-head rounds; the excluded live-E-step control "
-            "uses parent-gated transport"
+            "opt-in fixed-target parent-head phases (default 0); the excluded "
+            "live-E-step control uses parent-gated transport"
         ),
     )
     refine.add_argument("--epochs-per-round", type=int, default=25)

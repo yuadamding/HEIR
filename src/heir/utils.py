@@ -129,8 +129,7 @@ def reject_output_input_collisions(
     collisions = []
     for output in outputs:
         if any(
-            aliases(output, source) or aliases_directory_member(output, source)
-            for source in inputs
+            aliases(output, source) or aliases_directory_member(output, source) for source in inputs
         ):
             collisions.append(output)
     if collisions:

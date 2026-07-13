@@ -4,10 +4,19 @@ import hashlib
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
+from torch import nn
 
-from heir.models import HEIRConfig, HEIRModel
+from heir.models import (
+    HEIRConfig,
+    HEIRModel,
+    MorphologyStateGate,
+    MorphologyStateGateConfig,
+    evaluate_morphology_state_checkpoint,
+    fit_morphology_state_gate,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "configs" / "performance_regression_fixture_v1.json"
@@ -117,8 +126,10 @@ def test_controlled_heir_orders_matched_image_bank_and_residual_controls() -> No
     assert matched_mse < wrong_bank_mse
     assert float(matched_accuracy) == pytest.approx(expected["matched_accuracy"], abs=1.0e-7)
     assert float(shuffled_accuracy) == pytest.approx(expected["image_shuffle_accuracy"], abs=1.0e-7)
-    assert float(matched_mse) == pytest.approx(expected["matched_latent_mse"], abs=1.0e-7)
-    assert float(wrong_bank_mse) == pytest.approx(expected["wrong_bank_latent_mse"], abs=1.0e-6)
+    assert float(matched_mse.detach()) == pytest.approx(expected["matched_latent_mse"], abs=1.0e-7)
+    assert float(wrong_bank_mse.detach()) == pytest.approx(
+        expected["wrong_bank_latent_mse"], abs=1.0e-6
+    )
 
     assert model.residual_gate_head is not None
     with torch.no_grad():
@@ -134,7 +145,9 @@ def test_controlled_heir_orders_matched_image_bank_and_residual_controls() -> No
         model.residual_gate_head.bias.copy_(saved_bias)
     residual_off_mse = (residual_off.latent_mu - true_latent).square().mean()
     assert matched_mse < residual_off_mse
-    assert float(residual_off_mse) == pytest.approx(expected["residual_off_latent_mse"], abs=1.0e-6)
+    assert float(residual_off_mse.detach()) == pytest.approx(
+        expected["residual_off_latent_mse"], abs=1.0e-6
+    )
 
 
 def test_enabled_graph_beats_no_graph_and_degree_preserving_cross_type_rewire() -> None:
@@ -204,3 +217,110 @@ def test_enabled_graph_beats_no_graph_and_degree_preserving_cross_type_rewire() 
     assert float(accuracy(matched_edges, use_graph=False)) == pytest.approx(
         expected["no_graph_accuracy"], abs=1.0e-7
     )
+
+
+def _learned_state_donors(donor_offsets: dict[str, float], cells_per_type: int = 24):
+    features = []
+    latents = []
+    labels = []
+    donors = []
+    for donor, offset in donor_offsets.items():
+        for type_index in range(2):
+            state = np.linspace(-1.25, 1.25, cells_per_type) + offset
+            type_sign = -1.0 if type_index == 0 else 1.0
+            features.append(
+                np.column_stack(
+                    (
+                        np.full(cells_per_type, type_sign),
+                        state,
+                        type_sign * state,
+                    )
+                )
+            )
+            if type_index == 0:
+                residual = np.column_stack((np.zeros_like(state), state, 0.5 * state))
+                centroid = np.asarray([2.0, 0.0, 0.0])
+            else:
+                residual = np.column_stack((np.zeros_like(state), -0.5 * state, state))
+                centroid = np.asarray([-2.0, 0.0, 0.0])
+            latents.append(centroid[None, :] + residual)
+            labels.extend([type_index] * cells_per_type)
+            donors.extend([donor] * cells_per_type)
+    return (
+        np.concatenate(features).astype(np.float32),
+        np.concatenate(latents).astype(np.float32),
+        np.asarray(labels, dtype=np.int64),
+        np.asarray(donors),
+    )
+
+
+def test_learned_gate_generalizes_within_type_signal_and_fails_without_it(tmp_path: Path) -> None:
+    """Exercise actual learning and held-out donors, not hand-installed weights."""
+
+    training = _learned_state_donors({"train_a": -0.05, "train_b": 0.05})
+    heldout = _learned_state_donors({"heldout_a": -0.21, "heldout_b": 0.24})
+    config = MorphologyStateGateConfig(
+        feature_dim=3,
+        latent_dim=3,
+        num_types=2,
+        residual_rank=1,
+        residual_hidden_dim=12,
+        type_names=("epithelial", "immune"),
+    )
+    model = MorphologyStateGate.from_training_data(config, *training)
+    fit_morphology_state_gate(
+        model,
+        training[0],
+        training[1],
+        training[2],
+        epochs=120,
+        batch_size=len(training[0]),
+        learning_rate=0.03,
+        weight_decay=0.0,
+        seed=17,
+        device="cpu",
+    )
+    checkpoint = model.save_checkpoint(tmp_path / "learned_morphology_state.pt")
+    signal = evaluate_morphology_state_checkpoint(
+        checkpoint,
+        heldout[0],
+        heldout[1],
+        heldout[2],
+        heldout[3],
+        decoder=nn.Identity(),
+        expression_targets=heldout[1],
+        seed=41,
+        device="cpu",
+        bootstrap_iterations=500,
+    )
+    assert signal["status"] == "pass"
+    assert signal["primary_metrics"]["within_type_partial_r2"] > 0.95
+    assert signal["donor_bootstrap"]["within_type_r2_lower"] > 0.0
+    assert all(
+        row["matched_vs_wrong_bank_rmse_margin"] > 0.0
+        for row in signal["wrong_donor_bank_contrasts"]
+    )
+
+    rng = np.random.default_rng(91)
+    no_state_features = heldout[0].copy()
+    for donor in np.unique(heldout[3]):
+        for type_index in range(2):
+            selected = np.flatnonzero((heldout[3] == donor) & (heldout[2] == type_index))
+            shuffled = selected.copy()
+            rng.shuffle(shuffled)
+            no_state_features[selected, 1:] = no_state_features[shuffled, 1:]
+    no_signal = evaluate_morphology_state_checkpoint(
+        checkpoint,
+        no_state_features,
+        heldout[1],
+        heldout[2],
+        heldout[3],
+        decoder=nn.Identity(),
+        expression_targets=heldout[1],
+        seed=41,
+        device="cpu",
+        bootstrap_iterations=500,
+    )
+    assert no_signal["status"] == "fail"
+    assert not no_signal["checks"]["within_type_partial_r2"]
+    assert no_signal["type_classification"]["accuracy"] == pytest.approx(1.0)

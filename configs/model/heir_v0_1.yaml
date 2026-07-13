@@ -1,4 +1,6 @@
 # Model fragment documenting the blueprint defaults. Experiment YAML embeds it.
+# Refinement is disabled at the experiment level. An explicit refine command
+# defaults to one fine-head fixed_target_curriculum phase.
 morphology_dim: 1024
 num_cell_types: 6
 expression_dim: 500

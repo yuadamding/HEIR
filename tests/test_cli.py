@@ -51,7 +51,7 @@ from heir.training import (
 from heir.uncertainty import MahalanobisOOD
 
 
-def test_refine_cli_defaults_use_two_round_trust_and_fixed_prior() -> None:
+def test_refine_cli_defaults_to_one_fixed_target_phase_and_fixed_prior() -> None:
     args = build_parser().parse_args(
         [
             "refine",
@@ -65,8 +65,8 @@ def test_refine_cli_defaults_use_two_round_trust_and_fixed_prior() -> None:
             "refined",
         ]
     )
-    assert args.maximum_rounds == 4
-    assert args.broad_refinement_rounds == 2
+    assert args.maximum_rounds == 1
+    assert args.broad_refinement_rounds == 0
     assert args.prior_old_weight == 1.0
     assert args.round_selection_mode == "fixed"
     assert args.maximum_validation_loss_degradation == pytest.approx(0.01)
@@ -1805,7 +1805,17 @@ def test_assemble_batch_attaches_hash_bound_frozen_molecular_estep(tmp_path):
     assert batch.molecular_responsibilities is not None
     np.testing.assert_array_equal(
         batch.molecular_responsibilities.numpy(),
-        e_step.responsibilities,
+        e_step.resolved_conditional_known_prototype_distribution,
+    )
+    assert batch.molecular_raw_real_row_mass is not None
+    assert batch.molecular_raw_dustbin_row_mass is not None
+    np.testing.assert_array_equal(
+        batch.molecular_raw_real_row_mass.numpy(),
+        e_step.resolved_raw_real_row_mass,
+    )
+    np.testing.assert_array_equal(
+        batch.molecular_raw_dustbin_row_mass.numpy(),
+        e_step.resolved_raw_dustbin_row_mass,
     )
     index = batch.source_roles.index("frozen_e_step")
     assert batch.source_sha256[index] == hashlib.sha256(e_step_path.read_bytes()).hexdigest()

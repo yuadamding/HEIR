@@ -87,6 +87,12 @@ def _trainer(
     )
 
 
+def test_default_loss_profile_is_minimal_routing_and_latent_only() -> None:
+    weights = LossWeightConfig()
+    enabled = {name for name, value in weights.__dict__.items() if value != 0.0}
+    assert enabled == {"molecular_posterior", "molecular_routing", "molecular_latent"}
+
+
 def test_bernoulli_uot_gate_adds_each_route_cost_exactly_once_and_backpropagates() -> None:
     base_cost = torch.tensor([[0.25, 1.25], [2.0, 3.0]], requires_grad=True)
     unknown_probability = torch.tensor([0.2, 0.75], requires_grad=True)
@@ -238,10 +244,43 @@ def test_molecular_posterior_receives_base_weights_before_known_mass(
     torch.testing.assert_close(captured["weights"], torch.tensor([2.0, 3.0]))
 
 
+def test_strict_m_step_uses_raw_real_uot_mass_without_reweighting() -> None:
+    trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    conditional = torch.tensor([[0.75, 0.25], [0.20, 0.80]])
+    raw_real = torch.tensor([0.01, 0.50])
+    raw_dustbin = torch.tensor([0.09, 0.50])
+    batch = replace(
+        _patch(2, "raw-real-mass", 0.0),
+        cell_weights=torch.tensor([10.0, 2.0]),
+        molecular_responsibilities=conditional,
+        molecular_raw_real_row_mass=raw_real,
+        molecular_raw_dustbin_row_mass=raw_dustbin,
+    )
+    output = trainer._forward_output(batch)
+    captured = {}
+
+    class CaptureCriterion(torch.nn.Module):
+        def forward(self, model_output, **kwargs):
+            captured["biological_cell_weights"] = kwargs["biological_cell_weights"].detach().clone()
+            return model_output.expression.sum() * 0.0, {}
+
+    trainer.criterion = CaptureCriterion()
+    trainer._output_loss(output, batch)
+
+    # Raw UOT mass is already source-mass weighted. Multiplying by cell_weights
+    # would incorrectly produce [0.1, 1.0].
+    torch.testing.assert_close(captured["biological_cell_weights"], raw_real)
+
+
 def test_strict_fixed_responsibilities_skip_live_transport_and_direct_uot(
     monkeypatch,
 ) -> None:
     trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    trainer.weights = replace(
+        trainer.weights,
+        molecular_type=1.0,
+        transport_unassigned=1.0,
+    )
     batch = replace(
         _patch(3, "strict-m-step", 0.0),
         molecular_responsibilities=torch.tensor(
@@ -267,6 +306,7 @@ def test_strict_fixed_responsibilities_skip_live_transport_and_direct_uot(
 
 def test_frozen_dustbin_mass_supervises_transport_unassignment_without_known_mass() -> None:
     trainer = _trainer(molecular_e_step_mode="strict_artifact")
+    trainer.weights = replace(trainer.weights, transport_unassigned=1.0)
     batch = replace(
         _patch(3, "strict-all-dustbin", 0.0),
         molecular_responsibilities=torch.zeros((3, 2)),
@@ -641,7 +681,11 @@ def test_strict_fit_uses_only_hash_bound_frozen_responsibilities(
         artifact.save_npz(artifact_path)
         return replace(
             base,
-            molecular_responsibilities=torch.from_numpy(artifact.responsibilities),
+            molecular_responsibilities=torch.from_numpy(
+                artifact.resolved_conditional_known_prototype_distribution
+            ),
+            molecular_raw_real_row_mass=torch.from_numpy(artifact.resolved_raw_real_row_mass),
+            molecular_raw_dustbin_row_mass=torch.from_numpy(artifact.resolved_raw_dustbin_row_mass),
             weak_target_scope_id="sha256:" + digest(reference),
             weak_target_granularity="complete_rna_specimen",
             source_artifacts=(str(artifact_path),),

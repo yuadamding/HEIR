@@ -402,11 +402,26 @@ class HEIRTrainer:
             abs_tol=1.0e-12,
         ):
             raise ValueError("frozen E-step unknown mass differs from the trainer contract")
-        expected = torch.from_numpy(artifact.responsibilities).to(
+        expected = torch.from_numpy(artifact.resolved_conditional_known_prototype_distribution).to(
             batch.molecular_responsibilities.device
         )
         if not torch.equal(batch.molecular_responsibilities, expected):
             raise ValueError("batch molecular responsibilities differ from the frozen E-step")
+        if (
+            batch.molecular_raw_real_row_mass is None
+            or batch.molecular_raw_dustbin_row_mass is None
+        ):
+            raise ValueError("strict molecular M-step batch omits raw E-step row masses")
+        expected_real = torch.from_numpy(artifact.resolved_raw_real_row_mass).to(
+            batch.molecular_raw_real_row_mass.device
+        )
+        expected_dustbin = torch.from_numpy(artifact.resolved_raw_dustbin_row_mass).to(
+            batch.molecular_raw_dustbin_row_mass.device
+        )
+        if not torch.equal(batch.molecular_raw_real_row_mass, expected_real):
+            raise ValueError("batch raw real row mass differs from the frozen E-step")
+        if not torch.equal(batch.molecular_raw_dustbin_row_mass, expected_dustbin):
+            raise ValueError("batch raw dustbin row mass differs from the frozen E-step")
         if not set(artifact.teacher_training_donors).issubset(set(batch.molecular_training_donors)):
             raise ValueError("batch omits frozen E-step teacher training-donor provenance")
 
@@ -435,6 +450,8 @@ class HEIRTrainer:
         batch: HEIRTrainingBatch,
         responsibilities: Tensor,
         cell_weights: Tensor,
+        raw_real_row_mass: Optional[Tensor] = None,
+        raw_dustbin_row_mass: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Dict[str, Tensor]]:
         """Optimize the complete-data objective against a frozen molecular E-step.
 
@@ -447,20 +464,48 @@ class HEIRTrainer:
             raise ValueError("molecular responsibilities and prototype routing must align")
         responsibilities = responsibilities.detach()
         row_mass = responsibilities.sum(dim=1)
-        valid = row_mass > 1.0e-8
-        conditional = responsibilities / row_mass.unsqueeze(1).clamp_min(1.0e-8)
-        transport_unassigned_target = (1.0 - row_mass).clamp(0.0, 1.0)
+        if (raw_real_row_mass is None) != (raw_dustbin_row_mass is None):
+            raise ValueError("raw real and dustbin row masses must be supplied together")
+        if raw_real_row_mass is None:
+            # Backward-compatible v3/in-memory path: responsibilities are
+            # complete-row known subprobabilities.
+            valid = row_mass > 1.0e-8
+            conditional = responsibilities / row_mass.unsqueeze(1).clamp_min(1.0e-8)
+            transport_unassigned_target = (1.0 - row_mass).clamp(0.0, 1.0)
+            effective = cell_weights * row_mass
+            unassignment_weights = cell_weights
+        else:
+            assert raw_dustbin_row_mass is not None
+            if (
+                raw_real_row_mass.shape != row_mass.shape
+                or raw_dustbin_row_mass.shape != row_mass.shape
+            ):
+                raise ValueError("raw molecular row masses must align to cells")
+            raw_real = raw_real_row_mass.detach().to(dtype=cell_weights.dtype)
+            raw_dustbin = raw_dustbin_row_mass.detach().to(dtype=cell_weights.dtype)
+            if bool((raw_real < 0).any()) or bool((raw_dustbin < 0).any()):
+                raise ValueError("raw molecular row masses must be non-negative")
+            valid = raw_real > 1.0e-8
+            conditional = responsibilities
+            complete_mass = raw_real + raw_dustbin
+            transport_unassigned_target = torch.where(
+                complete_mass > 0,
+                raw_dustbin / complete_mass.clamp_min(1.0e-8),
+                torch.zeros_like(complete_mass),
+            ).clamp(0.0, 1.0)
+            # Raw UOT mass already incorporates the E-step source mass. Do not
+            # multiply by the input cell weights a second time.
+            effective = raw_real
+            unassignment_weights = complete_mass
         transport_unassigned_per_cell = F.binary_cross_entropy(
-            output.unknown_probability.clamp(1.0e-8, 1.0 - 1.0e-8),
+            output.transport_unassigned_probability.clamp(1.0e-8, 1.0 - 1.0e-8),
             transport_unassigned_target,
             reduction="none",
         )
-        cell_mass = cell_weights.sum().clamp_min(1.0e-8)
-        transport_unassigned = (transport_unassigned_per_cell * cell_weights).sum() / cell_mass
-        # The real-plan fraction is the molecular E-step's known-state mass.
-        # Dustbin-dominated cells therefore contribute proportionally less to
-        # every complete-data M-step term.
-        effective = cell_weights * row_mass
+        cell_mass = unassignment_weights.sum().clamp_min(1.0e-8)
+        transport_unassigned = (
+            transport_unassigned_per_cell * unassignment_weights
+        ).sum() / cell_mass
         mass = effective.sum().clamp_min(1.0e-8)
         if not bool(valid.any()):
             zero = output.latent_mu.sum() * 0.0
@@ -568,10 +613,15 @@ class HEIRTrainer:
             uot_cost = None
             uot_unknown_cost = None
             estimated_unknown_mass = None
-        biological_cell_weights = self._uot_known_cell_weights(
-            base_cell_weights,
-            responsibilities,
-        )
+        if batch.molecular_raw_real_row_mass is None:
+            biological_cell_weights = self._uot_known_cell_weights(
+                base_cell_weights,
+                responsibilities,
+            )
+        else:
+            biological_cell_weights = batch.molecular_raw_real_row_mass.detach().to(
+                dtype=base_cell_weights.dtype
+            )
         molecular_type_responsibilities = self._type_responsibilities(
             responsibilities,
             batch.prototype_types,
@@ -611,16 +661,45 @@ class HEIRTrainer:
             scgpt_type_prototypes=batch.scgpt_type_prototypes,
             scgpt_type_variances=batch.scgpt_type_variances,
         )
-        posterior, posterior_terms = self._molecular_posterior_loss(
+        posterior_arguments = (
             output,
             batch,
             responsibilities,
-            # _molecular_posterior_loss applies transported known-state row
-            # mass itself. Passing biological_cell_weights here would square
-            # that mass and over-suppress ambiguous but still assigned cells.
+            # The posterior applies transported mass itself. Passing
+            # biological_cell_weights here would square that mass.
             base_cell_weights,
         )
+        if batch.molecular_raw_real_row_mass is None:
+            posterior, posterior_terms = self._molecular_posterior_loss(*posterior_arguments)
+        else:
+            posterior, posterior_terms = self._molecular_posterior_loss(
+                *posterior_arguments,
+                raw_real_row_mass=batch.molecular_raw_real_row_mass,
+                raw_dustbin_row_mass=batch.molecular_raw_dustbin_row_mass,
+            )
         terms.update(posterior_terms)
+        if all(
+            name in posterior_terms
+            for name in (
+                "molecular_posterior/routing",
+                "molecular_posterior/type",
+                "molecular_posterior/latent",
+                "molecular_posterior/transport_unassigned",
+            )
+        ):
+            terms["molecular_posterior/raw_total"] = posterior
+            component_weights = {
+                "routing": self.weights.molecular_routing,
+                "type": self.weights.molecular_type,
+                "latent": self.weights.molecular_latent,
+                "transport_unassigned": self.weights.transport_unassigned,
+            }
+            weighted_components = []
+            for name, weight in component_weights.items():
+                weighted = weight * posterior_terms["molecular_posterior/%s" % name]
+                terms["weighted/molecular_posterior/%s" % name] = weighted
+                weighted_components.append(weighted)
+            posterior = sum(weighted_components[1:], weighted_components[0])
         terms["molecular_posterior"] = posterior
         terms["weighted/molecular_posterior"] = self.weights.molecular_posterior * posterior
         total = total + terms["weighted/molecular_posterior"]
@@ -787,6 +866,8 @@ class HEIRTrainer:
             if all(value is None for value in responsibility_values)
             else torch.cat([value for value in responsibility_values if value is not None], dim=0)
         )
+        molecular_raw_real_row_mass = concatenate_optional("molecular_raw_real_row_mass", 0.0)
+        molecular_raw_dustbin_row_mass = concatenate_optional("molecular_raw_dustbin_row_mass", 0.0)
 
         spot_values = [batch.spot_assignment for batch in batches]
         if any(value is None for value in spot_values) and not all(
@@ -879,6 +960,8 @@ class HEIRTrainer:
             parent_anchor_weights=concatenate_optional("parent_anchor_weights", 0.0),
             unknown_targets=unknown_targets,
             molecular_responsibilities=molecular_responsibilities,
+            molecular_raw_real_row_mass=molecular_raw_real_row_mass,
+            molecular_raw_dustbin_row_mass=molecular_raw_dustbin_row_mass,
             domain_labels=concatenate_optional("domain_labels", -100, dtype=torch.long),
             segmentation_confidence=concatenate_optional("segmentation_confidence", 1.0),
             ood_mask=concatenate_optional("ood_mask", 0, dtype=torch.bool),

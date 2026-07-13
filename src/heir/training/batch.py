@@ -33,6 +33,8 @@ class HEIRTrainingBatch:
     prototype_mask: Optional[Tensor] = None
     cell_weights: Optional[Tensor] = None
     molecular_responsibilities: Optional[Tensor] = None
+    molecular_raw_real_row_mass: Optional[Tensor] = None
+    molecular_raw_dustbin_row_mass: Optional[Tensor] = None
     anchor_labels: Optional[Tensor] = None
     anchor_weights: Optional[Tensor] = None
     parent_anchor_labels: Optional[Tensor] = None
@@ -71,13 +73,15 @@ class HEIRTrainingBatch:
     molecular_training_donors: Tuple[str, ...] = ()
 
     CONTRACT: ClassVar[str] = "heir.training_batch"
-    CONTRACT_VERSION: ClassVar[int] = 6
+    CONTRACT_VERSION: ClassVar[int] = 7
 
     _OPTIONAL_TENSORS: ClassVar[Tuple[str, ...]] = (
         "edge_weight",
         "prototype_mask",
         "cell_weights",
         "molecular_responsibilities",
+        "molecular_raw_real_row_mass",
+        "molecular_raw_dustbin_row_mass",
         "anchor_labels",
         "anchor_weights",
         "parent_anchor_labels",
@@ -184,6 +188,37 @@ class HEIRTrainingBatch:
             if bool((row_mass > 1.0 + 1.0e-4).any()):
                 raise ValueError(
                     "molecular responsibility rows must contain at most unit known mass"
+                )
+        has_raw_real = self.molecular_raw_real_row_mass is not None
+        has_raw_dustbin = self.molecular_raw_dustbin_row_mass is not None
+        if has_raw_real != has_raw_dustbin:
+            raise ValueError("raw molecular real and dustbin row masses must be supplied together")
+        if has_raw_real:
+            if self.molecular_responsibilities is None:
+                raise ValueError("raw molecular row masses require conditional responsibilities")
+            assert self.molecular_raw_real_row_mass is not None
+            assert self.molecular_raw_dustbin_row_mass is not None
+            raw_real = self.molecular_raw_real_row_mass
+            raw_dustbin = self.molecular_raw_dustbin_row_mass
+            for name, values in (
+                ("molecular_raw_real_row_mass", raw_real),
+                ("molecular_raw_dustbin_row_mass", raw_dustbin),
+            ):
+                if values.shape != (cells,):
+                    raise ValueError("%s must align to cells" % name)
+                if (
+                    not torch.is_floating_point(values)
+                    or not torch.isfinite(values).all()
+                    or bool((values < 0).any())
+                ):
+                    raise ValueError("%s must be finite and non-negative" % name)
+            row_mass = self.molecular_responsibilities.sum(dim=1)
+            positive_real = raw_real > 0
+            if bool((torch.abs(row_mass[positive_real] - 1.0) > 1.0e-4).any()) or bool(
+                (row_mass[~positive_real] > 1.0e-4).any()
+            ):
+                raise ValueError(
+                    "raw-mass batches require a known-conditional responsibility distribution"
                 )
         if self.anchor_labels is not None and self.anchor_labels.shape != (cells,):
             raise ValueError("anchor_labels must align to cells")
@@ -476,7 +511,7 @@ class HEIRTrainingBatch:
                         "HEIR training-batch version 1 lacks required provenance; "
                         "regenerate it with assemble-batch"
                     )
-                if version not in {2, 3, 4, 5}:
+                if version not in {2, 3, 4, 5, 6}:
                     raise ValueError("unsupported HEIR training-batch version %d" % version)
             optional_legacy_metadata = (
                 {
@@ -507,6 +542,8 @@ class HEIRTrainingBatch:
                         "parent_anchor_labels",
                         "parent_anchor_weights",
                         "molecular_responsibilities",
+                        "molecular_raw_real_row_mass",
+                        "molecular_raw_dustbin_row_mass",
                     }:
                         values[name] = None
                         continue

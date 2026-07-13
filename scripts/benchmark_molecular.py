@@ -1,6 +1,6 @@
 """HEIR molecular-arm falsification benchmark on real NatCommun snRNA.
 
-Runs HEIR's own prescribed validation ladder (docs/validation.md) at the level
+Runs HEIR's prescribed validation ladder (docs/scientific_validation.md) at the level
 that needs no H&E segmentation: does DONOR-MATCHED snRNA recover held-out cells'
 panel expression and composition better than a generic atlas, a wrong donor, or
 label-permuted prototypes? This isolates the *molecular personalization* premise

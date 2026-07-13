@@ -14,7 +14,7 @@ from scipy import sparse
 from heir.cli import main as heir_main
 from heir.data import HistologyBag, PrototypeSet, RNAReference
 from heir.models import HEIRConfig, HEIRModel
-from heir.training import MolecularEStepArtifact, ValidatedInitializationReceipt
+from heir.training import HEIRTrainingBatch, MolecularEStepArtifact, ValidatedInitializationReceipt
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,6 +100,8 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
             graph_mode="off",
             trunk_hidden_dims=(5,),
             decoder_hidden_dims=(4,),
+            fine_to_parent=(0, 1),
+            num_parent_types=2,
             dropout=0.0,
         )
     ).eval()
@@ -114,6 +116,9 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
             torch.tensor([[-5.0, 5.0, 0.0, 0.0, 0.0], [5.0, -5.0, 0.0, 0.0, 0.0]])
         )
         model.fine_type_head.bias.zero_()
+        assert model.parent_type_head is not None
+        model.parent_type_head.weight.zero_()
+        model.parent_type_head.bias.zero_()
         embedding, _, _ = model.encode_frozen_morphology(torch.from_numpy(morphology))
         design = torch.cat((embedding, torch.ones((len(embedding), 1))), dim=1)
         solution = torch.linalg.lstsq(design, torch.from_numpy(independent_latent)).solution
@@ -127,6 +132,7 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
         "latent_space_id": "latent-test-v1",
         "expression_space_id": "log1p-cpm-10000-v1",
         "training_donors": ["development-donor"],
+        "teacher_role": "independent_crossmodal_bridge",
     }
     checkpoint_path = tmp_path / "initializer.pt"
     torch.save(checkpoint, checkpoint_path)
@@ -318,6 +324,17 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
     )
     prototypes.save_npz(prototypes_path)
     e_step_path = tmp_path / "molecular_e_step.npz"
+    uncertainty_path = tmp_path / "image_latent_uncertainty.npz"
+    np.savez_compressed(
+        uncertainty_path,
+        image_latent_variance=np.full((8, 2), 0.05, dtype=np.float32),
+    )
+    whitening_path = tmp_path / "latent_whitening.npz"
+    np.savez_compressed(
+        whitening_path,
+        latent_mean=np.zeros(2, dtype=np.float32),
+        latent_scale=np.ones(2, dtype=np.float32),
+    )
     assert (
         E_STEP.main(
             [
@@ -333,8 +350,16 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
                 str(reference_path),
                 "--output",
                 str(e_step_path),
+                "--image-latent-uncertainty",
+                str(uncertainty_path),
+                "--latent-whitening-artifact",
+                str(whitening_path),
                 "--device",
                 "cpu",
+                "--type-compatibility-mode",
+                "hard_broad_mask",
+                "--prototype-mass-mode",
+                "uniform_within_type",
                 "--fixed-unknown-mass",
                 "0.2",
                 "--uot-epsilon",
@@ -353,6 +378,29 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
     assert artifact.target_donor == "target-donor"
     assert artifact.teacher_training_donors == ("development-donor",)
     assert artifact.transport_plan.shape == (8, 3)
+    assert artifact.type_compatibility_mode == "hard_broad_mask"
+    assert artifact.prototype_mass_mode == "uniform_within_type"
+    assert artifact.source_roles == (
+        "histology",
+        "prototype_bank",
+        "rna_reference",
+        "image_latent_uncertainty",
+        "latent_whitening",
+    )
+    np.testing.assert_array_equal(
+        artifact.image_latent_variance,
+        np.full((8, 2), 0.05, dtype=np.float32),
+    )
+    np.testing.assert_array_equal(artifact.latent_whitening_mean, np.zeros(2, dtype=np.float32))
+    np.testing.assert_array_equal(artifact.latent_whitening_scale, np.ones(2, dtype=np.float32))
+    assert artifact.resolved_raw_real_row_mass.shape == (8,)
+    assert artifact.resolved_raw_dustbin_row_mass.shape == (8,)
+    np.testing.assert_allclose(
+        artifact.resolved_conditional_known_prototype_distribution.sum(axis=1),
+        np.ones(8),
+    )
+    np.testing.assert_array_equal(artifact.raw_transport_plan[:4, 1], np.zeros(4))
+    np.testing.assert_array_equal(artifact.raw_transport_plan[4:, 0], np.zeros(4))
 
     validation_reference = replace(
         reference,
@@ -385,6 +433,10 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
                 str(validation_e_step_path),
                 "--device",
                 "cpu",
+                "--type-compatibility-mode",
+                "hard_broad_mask",
+                "--prototype-mass-mode",
+                "uniform_within_type",
                 "--fixed-unknown-mass",
                 "0.2",
                 "--uot-epsilon",
@@ -437,6 +489,18 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
             == 0
         )
     trained = tmp_path / "strict_random_initializer_control"
+    assembled_train = HEIRTrainingBatch.load_npz(train_batch)
+    assert assembled_train.molecular_raw_real_row_mass is not None
+    assert assembled_train.molecular_raw_dustbin_row_mass is not None
+    torch.testing.assert_close(
+        assembled_train.molecular_raw_real_row_mass,
+        torch.from_numpy(artifact.resolved_raw_real_row_mass),
+    )
+    assert assembled_train.molecular_responsibilities is not None
+    torch.testing.assert_close(
+        assembled_train.molecular_responsibilities,
+        torch.from_numpy(artifact.resolved_conditional_known_prototype_distribution),
+    )
     assert (
         heir_main(
             [
@@ -510,4 +574,5 @@ def test_strict_artifact_producers_create_bound_receipt_and_estep(tmp_path: Path
     )
     refined_payload = torch.load(refined / "heir_refined.pt", map_location="cpu", weights_only=True)
     assert refined_payload["metadata"]["molecular_e_step_mode"] == "strict_artifact"
+    assert refined_payload["metadata"]["refinement_protocol"] == "fixed_target_curriculum"
     assert refined_payload["metadata"]["refinement_validation_donors"] == ["target-donor"]

@@ -854,7 +854,20 @@ def test_r2_plan_routes_all_molecular_inputs_and_decoder_to_r2(tmp_path):
     assert str((ROOT / "src").resolve()) in views.command[3]
 
 
-def test_true_loo_three_fold_plan_uses_target_specific_hash_bound_inputs(tmp_path):
+def test_true_loo_three_fold_plan_uses_target_specific_hash_bound_inputs(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        RUNNER,
+        "_expected_shuffle_transform",
+        lambda control, seed, histology: {
+            "schema": "synthetic.shuffle.recipe",
+            "control": control,
+            "seed": seed,
+            "histology": str(histology),
+        },
+    )
     specifications = []
     expected = {}
     for sample in RUNNER.SAMPLES:

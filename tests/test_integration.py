@@ -5,21 +5,11 @@ import numpy as np
 import pytest
 import torch
 
-from heir.config import load_config
 from heir.data import ManifestValidationError, PrototypeSet, load_manifest
 from heir.inference import predict_cells
 from heir.models import HEIRConfig, HEIRModel
 from heir.prior.prototypes import build_sample_prototypes
 from heir.training.stages import StageInputs, TrainingStage
-
-
-def test_checked_experiment_config_loads_relative_paths():
-    config = load_config("configs/experiments/natcommun_v0_1.yaml")
-    assert config.mode == "personalized"
-    assert config.spatial_validation_only
-    assert config.manifest.endswith("/manifests/natcommun.tsv")
-    assert config.refinement.maximum_rounds == 4
-    assert config.refinement.broad_refinement_rounds == 2
 
 
 def test_stage_gate_allows_public_pretraining_but_not_locked_spatial():

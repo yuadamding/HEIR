@@ -56,7 +56,11 @@ from .metrics import (
     risk_coverage_curve,
     within_type_residuals,
 )
-from .oracle import ORACLE_LADDER_SCHEMA, evaluate_oracle_ladder
+from .oracle import (
+    ORACLE_LADDER_SCHEMA,
+    evaluate_morphology_state_checkpoint,
+    evaluate_oracle_ladder,
+)
 from .snpatho import (
     BENCHMARK_METHODS,
     HEIR_METHOD,
@@ -77,7 +81,6 @@ from .snpatho import (
     write_snpatho_benchmark,
 )
 from .spatial import morans_i, spatial_autocorrelation_agreement
-from .statistics import paired_donor_bootstrap
 
 __all__ = [
     "BenchmarkReport",
@@ -125,6 +128,7 @@ __all__ = [
     "deepbench_expression_metrics",
     "expression_metrics",
     "evaluate_oracle_ladder",
+    "evaluate_morphology_state_checkpoint",
     "evaluate_methods_on_truth_gene_mask",
     "fixed_coverage_selective_aggregation",
     "full_coverage_type_mean_aggregation",
@@ -136,7 +140,6 @@ __all__ = [
     "load_broad_type_ontology",
     "load_broad_type_plan",
     "make_broad_type_split",
-    "paired_donor_bootstrap",
     "risk_coverage_curve",
     "run_snpatho_benchmark",
     "run_deepbench",

@@ -16,8 +16,19 @@ from heir.training import (
     array_content_sha256,
     frozen_transport_telemetry,
     ordered_identity_sha256,
+    prototype_target_mass,
     recompute_initialization_validation,
 )
+
+
+def test_uniform_within_type_mass_preserves_only_broad_group_totals() -> None:
+    resolved = prototype_target_mass(
+        np.asarray([0.5, 0.1, 0.3, 0.1], dtype=np.float32),
+        np.asarray([0, 1, 2, 2], dtype=np.int64),
+        mode="uniform_within_type",
+        fine_to_parent=(0, 0, 1),
+    )
+    np.testing.assert_allclose(resolved, [0.3, 0.3, 0.2, 0.2], atol=1.0e-7)
 
 
 def _digest(path) -> str:
@@ -389,6 +400,33 @@ def test_molecular_e_step_roundtrip_is_byte_deterministic(tmp_path) -> None:
     loaded = MolecularEStepArtifact.load_npz(first)
     np.testing.assert_array_equal(loaded.transport_plan, artifact.transport_plan)
     np.testing.assert_array_equal(loaded.responsibilities, artifact.responsibilities)
+    np.testing.assert_allclose(
+        loaded.resolved_raw_real_row_mass,
+        artifact.raw_transport_plan[:, :-1].sum(axis=1),
+    )
+    np.testing.assert_allclose(
+        loaded.resolved_raw_dustbin_row_mass,
+        artifact.raw_transport_plan[:, -1],
+    )
+    np.testing.assert_allclose(
+        loaded.resolved_conditional_known_prototype_distribution.sum(axis=1),
+        np.ones(len(artifact.nucleus_ids)),
+    )
+
+
+def test_molecular_e_step_rejects_forged_explicit_raw_components(tmp_path) -> None:
+    artifact = _artifact(tmp_path)
+    forged = np.array(artifact.resolved_raw_real_row_mass, copy=True)
+    forged[0] += 0.1
+    with pytest.raises(ValueError, match="raw_real_row_mass differs"):
+        replace(
+            artifact,
+            raw_real_row_mass=forged,
+            raw_dustbin_row_mass=artifact.resolved_raw_dustbin_row_mass,
+            conditional_known_prototype_distribution=(
+                artifact.resolved_conditional_known_prototype_distribution
+            ),
+        ).validate()
 
 
 def test_molecular_e_step_rejects_reordered_or_stale_bindings(tmp_path) -> None:

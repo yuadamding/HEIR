@@ -124,7 +124,7 @@ class PredictionBundle:
     expression_space_id: str = ""
 
     CONTRACT: ClassVar[str] = "heir.prediction_bundle"
-    CONTRACT_VERSION: ClassVar[int] = 8
+    CONTRACT_VERSION: ClassVar[int] = 9
     CONDITIONAL_KNOWN_STATE: ClassVar[str] = "conditional_on_measured_known_state"
     LEGACY_CONDITIONAL_KNOWN_STATE: ClassVar[str] = (
         "legacy_conditional_on_measured_known_state_unsuppressed"
@@ -191,6 +191,16 @@ class PredictionBundle:
         if np.any(available & abstain):
             raise ValueError("abstained cells cannot expose conditional expression means")
         return available
+
+    @property
+    def transport_unassigned_probability(self) -> np.ndarray:
+        """Canonical name for low support under molecular transport.
+
+        ``unknown_probability`` remains as the in-memory and serialized legacy
+        alias so v2-v8 artifacts and downstream readers continue to work.
+        """
+
+        return np.asarray(self.unknown_probability)
 
     @property
     def public_cell_expression_mean(self) -> np.ndarray:
@@ -527,6 +537,9 @@ class PredictionBundle:
             expression_interval_available=expression_interval_available,
             gene_names=self.gene_names.astype(np.str_),
             unknown_probability=self.unknown_probability.astype(np.float32),
+            transport_unassigned_probability=self.transport_unassigned_probability.astype(
+                np.float32
+            ),
             abstain_score=self.abstain_score.astype(np.float32),
             abstain=self.abstain.astype(bool),
             ood_score=self.ood_score.astype(np.float32),
@@ -589,11 +602,11 @@ class PredictionBundle:
 
     @classmethod
     def from_npz(cls, path: Union[str, Path]) -> "PredictionBundle":
-        """Load v2-v8 or migrate the original unversioned schema in memory.
+        """Load v2-v9 or migrate the original unversioned schema in memory.
 
         Legacy artifacts receive empty provenance and optional outputs. Saving
         that object again therefore requires callers to populate provenance
-        explicitly; legacy data are never silently presented as audited v8.
+        explicitly; legacy data are never silently presented as audited v9.
         """
 
         with np.load(path, allow_pickle=False) as values:
@@ -611,7 +624,7 @@ class PredictionBundle:
                 version = int(np.asarray(values["__version__"]).item())
                 if contract != cls.CONTRACT:
                     raise ValueError("artifact is not a HEIR PredictionBundle")
-                if version not in {2, 3, 4, 5, 6, 7, cls.CONTRACT_VERSION}:
+                if version not in {2, 3, 4, 5, 6, 7, 8, cls.CONTRACT_VERSION}:
                     raise ValueError("unsupported PredictionBundle version %d" % version)
                 required_versioned = {
                     "sample_id",
@@ -654,10 +667,19 @@ class PredictionBundle:
                     )
                 if version >= 8:
                     required_versioned.add("expression_mean_available")
+                if version >= 9:
+                    required_versioned.add("transport_unassigned_probability")
                 missing = sorted(required_versioned - set(values.files))
                 if missing:
                     raise ValueError(
                         "versioned prediction artifact is missing: %s" % ", ".join(missing)
+                    )
+                if version >= 9 and not np.array_equal(
+                    np.asarray(values["transport_unassigned_probability"]),
+                    np.asarray(values["unknown_probability"]),
+                ):
+                    raise ValueError(
+                        "legacy unknown_probability differs from transport unassignment"
                     )
                 has_parent = bool(np.asarray(values["__present__parent_types"]).item())
                 has_programs = bool(np.asarray(values["__present__programs"]).item())

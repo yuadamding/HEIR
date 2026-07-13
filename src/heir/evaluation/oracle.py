@@ -9,6 +9,8 @@ from typing import Dict, Mapping, Sequence, Tuple
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
+from heir.models.morphology_state import evaluate_morphology_state_checkpoint
+
 ORACLE_LADDER_SCHEMA = "heir.oracle_ladder.v5"
 ORACLE_TRUTH_MASK_SCHEMA = "heir.oracle_truth_gene_mask.v2"
 DEFAULT_TRUTH_VARIANCE_THRESHOLD = 1.0e-12
@@ -577,4 +579,8 @@ def evaluate_oracle_ladder(
     }
 
 
-__all__ = ["ORACLE_LADDER_SCHEMA", "evaluate_oracle_ladder"]
+__all__ = [
+    "ORACLE_LADDER_SCHEMA",
+    "evaluate_morphology_state_checkpoint",
+    "evaluate_oracle_ladder",
+]

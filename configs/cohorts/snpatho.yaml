@@ -1,4 +1,0 @@
-manifest: ../../manifests/snpatho.tsv
-analysis_role: locked_validation
-samples: ["4066", "4399", "4411"]
-spatial_use: evaluation_only

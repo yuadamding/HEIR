@@ -13,9 +13,9 @@ import os
 import pickle
 import tempfile
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence, Tuple, Union
+from typing import Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -405,6 +405,54 @@ def frozen_transport_telemetry(
         "solver_target_marginal_error": float(np.abs(raw_target - desired_target).sum()),
         "transport_objective": objective,
     }
+
+
+def prototype_target_mass(
+    weights: object,
+    prototype_types: object,
+    *,
+    mode: str,
+    fine_to_parent: Optional[Sequence[int]] = None,
+) -> np.ndarray:
+    """Resolve the frozen E-step target marginal without hiding capture priors.
+
+    ``reference_weights`` preserves the historical sample-matched snRNA mass.
+    ``uniform_within_type`` preserves only each compatible type's total mass and
+    assigns that mass uniformly among its prototypes.  When a fine-to-parent
+    ontology is available, "type" means the broad parent used by the hard
+    compatibility mask; otherwise it means the recorded prototype type.
+    """
+
+    values = np.asarray(weights, dtype=np.float64)
+    types = np.asarray(prototype_types, dtype=np.int64)
+    if (
+        values.ndim != 1
+        or types.shape != values.shape
+        or not np.isfinite(values).all()
+        or np.any(values < 0)
+        or float(values.sum(dtype=np.float64)) <= 0
+        or np.any(types < 0)
+    ):
+        raise ValueError("prototype target-mass inputs are malformed")
+    if mode == "reference_weights":
+        result = np.array(values, dtype=np.float64, copy=True)
+    elif mode == "uniform_within_type":
+        groups = types
+        if fine_to_parent is not None:
+            mapping = np.asarray(tuple(int(value) for value in fine_to_parent), dtype=np.int64)
+            if mapping.ndim != 1 or len(mapping) == 0 or np.any(mapping < 0):
+                raise ValueError("fine_to_parent is malformed")
+            if types.size and int(types.max()) >= len(mapping):
+                raise ValueError("prototype types exceed fine_to_parent")
+            groups = mapping[types]
+        result = np.zeros_like(values, dtype=np.float64)
+        for group in np.unique(groups):
+            selected = groups == group
+            result[selected] = values[selected].sum(dtype=np.float64) / int(selected.sum())
+    else:
+        raise ValueError("prototype mass mode must be reference_weights or uniform_within_type")
+    result /= result.sum(dtype=np.float64)
+    return np.asarray(result, dtype=np.float32)
 
 
 def _is_sha256(value: str) -> bool:
@@ -1169,9 +1217,26 @@ class MolecularEStepArtifact:
     target_dual_residual: float
     transport_objective: float
     e_step_round: int = 0
+    raw_real_row_mass: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
+    raw_dustbin_row_mass: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
+    conditional_known_prototype_distribution: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float32)
+    )
+    type_compatibility_mode: str = "soft_type_cost"
+    prototype_mass_mode: str = "reference_weights"
+    image_latent_variance: np.ndarray = field(
+        default_factory=lambda: np.empty((0, 0), dtype=np.float32)
+    )
+    latent_whitening_mean: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
+    latent_whitening_scale: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
 
     CONTRACT = "heir.molecular_e_step"
-    CONTRACT_VERSION = 3
+    CONTRACT_VERSION = 5
+    LEGACY_CONTRACT_VERSIONS = frozenset({3, 4})
+    TYPE_COMPATIBILITY_MODES = frozenset({"soft_type_cost", "hard_broad_mask"})
+    PROTOTYPE_MASS_MODES = frozenset({"reference_weights", "uniform_within_type"})
     TRUSTED_TEACHER_ROLES = frozenset(
         {
             "generic_crossmodal_pretraining",
@@ -1180,6 +1245,103 @@ class MolecularEStepArtifact:
         }
     )
     REQUIRED_SOURCE_ROLES = frozenset({"histology", "prototype_bank", "rna_reference"})
+    OPTIONAL_SOURCE_ROLES = frozenset({"image_latent_uncertainty", "latent_whitening"})
+
+    def _resolved_transport_components(
+        self,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return raw real/dustbin mass and known-conditional routing.
+
+        Empty component arrays are accepted only for in-memory legacy-v3
+        objects.  They are deterministically reconstructed from the raw plan;
+        every newly saved v4 artifact serializes the explicit arrays.
+        """
+
+        raw = np.asarray(self.raw_transport_plan, dtype=np.float64)
+        if raw.ndim != 2 or raw.shape[1] < 1:
+            raise ValueError("raw_transport_plan must be a matrix with a dustbin column")
+        expected_real = raw[:, :-1].sum(axis=1, dtype=np.float64)
+        expected_dustbin = raw[:, -1]
+        expected_conditional = np.zeros((raw.shape[0], raw.shape[1] - 1), dtype=np.float64)
+        positive_real = expected_real > 0
+        expected_conditional[positive_real] = (
+            raw[positive_real, :-1] / expected_real[positive_real, np.newaxis]
+        )
+
+        explicit_real = np.asarray(self.raw_real_row_mass)
+        explicit_dustbin = np.asarray(self.raw_dustbin_row_mass)
+        explicit_conditional = np.asarray(self.conditional_known_prototype_distribution)
+        legacy_empty = (
+            explicit_real.size == 0
+            and explicit_dustbin.size == 0
+            and explicit_conditional.size == 0
+        )
+        if legacy_empty:
+            return (
+                np.asarray(expected_real, dtype=np.float32),
+                np.asarray(expected_dustbin, dtype=np.float32),
+                np.asarray(expected_conditional, dtype=np.float32),
+            )
+        if (
+            explicit_real.shape != expected_real.shape
+            or explicit_dustbin.shape != expected_dustbin.shape
+            or explicit_conditional.shape != expected_conditional.shape
+        ):
+            raise ValueError("explicit molecular E-step transport components have wrong shapes")
+        for name, values in (
+            ("raw_real_row_mass", explicit_real),
+            ("raw_dustbin_row_mass", explicit_dustbin),
+            ("conditional_known_prototype_distribution", explicit_conditional),
+        ):
+            if not np.issubdtype(values.dtype, np.floating):
+                raise TypeError("%s must be floating point" % name)
+            if not np.isfinite(values).all() or np.any(values < 0):
+                raise ValueError("%s must be finite and non-negative" % name)
+        if not np.allclose(explicit_real, expected_real, rtol=0.0, atol=1.0e-7):
+            raise ValueError("raw_real_row_mass differs from the raw real coupling")
+        if not np.allclose(explicit_dustbin, expected_dustbin, rtol=0.0, atol=1.0e-7):
+            raise ValueError("raw_dustbin_row_mass differs from the raw dustbin coupling")
+        if not np.allclose(
+            explicit_conditional,
+            expected_conditional,
+            rtol=0.0,
+            atol=1.0e-6,
+        ):
+            raise ValueError(
+                "conditional_known_prototype_distribution differs from the raw coupling"
+            )
+        return (
+            np.asarray(explicit_real, dtype=np.float32),
+            np.asarray(explicit_dustbin, dtype=np.float32),
+            np.asarray(explicit_conditional, dtype=np.float32),
+        )
+
+    @property
+    def resolved_raw_real_row_mass(self) -> np.ndarray:
+        return self._resolved_transport_components()[0]
+
+    @property
+    def resolved_raw_dustbin_row_mass(self) -> np.ndarray:
+        return self._resolved_transport_components()[1]
+
+    @property
+    def resolved_conditional_known_prototype_distribution(self) -> np.ndarray:
+        return self._resolved_transport_components()[2]
+
+    @property
+    def conditional_transport_unassigned_fraction(self) -> np.ndarray:
+        real, dustbin, _ = self._resolved_transport_components()
+        total = real.astype(np.float64) + dustbin.astype(np.float64)
+        result = np.zeros_like(total, dtype=np.float64)
+        positive = total > 0
+        result[positive] = dustbin[positive] / total[positive]
+        return np.asarray(result, dtype=np.float32)
+
+    @property
+    def conditional_row_normalization_residual(self) -> float:
+        """Serialization invariant formerly named ``source_marginal_residual``."""
+
+        return float(self.source_marginal_residual)
 
     def validate(self) -> None:
         cells = len(self.nucleus_ids)
@@ -1188,6 +1350,7 @@ class MolecularEStepArtifact:
         raw_plan = np.asarray(self.raw_transport_plan)
         transport_cost = np.asarray(self.transport_cost)
         source_mass = np.asarray(self.source_mass)
+        raw_real_mass, raw_dustbin_mass, conditional_known = self._resolved_transport_components()
         if plan.shape != (cells, prototypes + 1):
             raise ValueError("transport_plan must have cells-by-(prototypes plus dustbin) shape")
         if raw_plan.shape != plan.shape or transport_cost.shape != plan.shape:
@@ -1219,6 +1382,14 @@ class MolecularEStepArtifact:
         expected_plan[~positive, -1] = 1.0
         if not np.allclose(plan, expected_plan, atol=1.0e-6, rtol=0.0):
             raise ValueError("transport_plan is not the declared row-conditional raw plan")
+        if raw_real_mass.shape != (cells,) or raw_dustbin_mass.shape != (cells,):
+            raise ValueError("raw transport row masses must contain one value per nucleus")
+        if conditional_known.shape != (cells, prototypes):
+            raise ValueError("conditional known distribution must align to cells and prototypes")
+        if self.type_compatibility_mode not in self.TYPE_COMPATIBILITY_MODES:
+            raise ValueError("molecular E-step type compatibility mode is unsupported")
+        if self.prototype_mass_mode not in self.PROTOTYPE_MASS_MODES:
+            raise ValueError("molecular E-step prototype mass mode is unsupported")
         for name, values in (
             ("nucleus_ids", self.nucleus_ids),
             ("prototype_ids", self.prototype_ids),
@@ -1232,11 +1403,53 @@ class MolecularEStepArtifact:
             raise ValueError("E-step sources, hashes, and roles must align")
         if any(not _is_sha256(value) for value in self.source_sha256):
             raise ValueError("E-step source_sha256 must contain lowercase SHA-256 digests")
-        if set(self.source_roles) != self.REQUIRED_SOURCE_ROLES:
+        source_role_set = set(self.source_roles)
+        if not self.REQUIRED_SOURCE_ROLES.issubset(source_role_set) or not source_role_set.issubset(
+            self.REQUIRED_SOURCE_ROLES | self.OPTIONAL_SOURCE_ROLES
+        ):
             raise ValueError(
-                "E-step source_roles must contain exactly histology, prototype_bank, and "
-                "rna_reference"
+                "E-step source_roles require histology, prototype_bank, and rna_reference; "
+                "only declared uncertainty/whitening sources are optional"
             )
+        image_variance = np.asarray(self.image_latent_variance)
+        whitening_mean = np.asarray(self.latent_whitening_mean)
+        whitening_scale = np.asarray(self.latent_whitening_scale)
+        if image_variance.size:
+            if image_variance.shape[0] != cells or image_variance.ndim != 2:
+                raise ValueError("image_latent_variance must be cells-by-latent")
+            if (
+                not np.issubdtype(image_variance.dtype, np.floating)
+                or not np.isfinite(image_variance).all()
+                or np.any(image_variance < 0)
+            ):
+                raise ValueError("image_latent_variance must be finite and non-negative")
+            if "image_latent_uncertainty" not in source_role_set:
+                raise ValueError("image latent variance lacks a bound uncertainty source")
+        elif "image_latent_uncertainty" in source_role_set:
+            raise ValueError("uncertainty source is present without image latent variance")
+        whitening_present = whitening_mean.size or whitening_scale.size
+        if whitening_present:
+            if (
+                whitening_mean.ndim != 1
+                or whitening_scale.shape != whitening_mean.shape
+                or not len(whitening_mean)
+                or not np.issubdtype(whitening_mean.dtype, np.floating)
+                or not np.issubdtype(whitening_scale.dtype, np.floating)
+                or not np.isfinite(whitening_mean).all()
+                or not np.isfinite(whitening_scale).all()
+                or np.any(whitening_scale <= 0)
+            ):
+                raise ValueError("latent whitening mean/scale are malformed")
+            if "latent_whitening" not in source_role_set:
+                raise ValueError("latent whitening parameters lack a bound source")
+        elif "latent_whitening" in source_role_set:
+            raise ValueError("latent whitening source is present without parameters")
+        if (
+            image_variance.size
+            and whitening_present
+            and image_variance.shape[1] != len(whitening_mean)
+        ):
+            raise ValueError("image uncertainty and latent whitening widths differ")
         if self.teacher_role not in self.TRUSTED_TEACHER_ROLES:
             raise ValueError("molecular E-step teacher role is not independently grounded")
         if not self.teacher_training_donors:
@@ -1342,7 +1555,13 @@ class MolecularEStepArtifact:
 
     @property
     def responsibilities(self) -> np.ndarray:
-        """Known-state subprobabilities normalized by complete row mass."""
+        """Legacy known-state subprobabilities normalized by complete row mass.
+
+        New M-steps must consume
+        :attr:`resolved_conditional_known_prototype_distribution` together with
+        :attr:`resolved_raw_real_row_mass`.  This property preserves the v3 API
+        for historical artifact revalidation only.
+        """
 
         plan = np.asarray(self.transport_plan, dtype=np.float64)
         responsibilities = plan[:, :-1] / plan.sum(axis=1, keepdims=True)
@@ -1402,8 +1621,23 @@ class MolecularEStepArtifact:
         if tuple(str(value) for value in prototype_ids) != self.prototype_ids:
             raise ValueError("molecular E-step prototype order differs from the PrototypeSet")
         recorded = dict(zip(self.source_roles, self.source_sha256))
-        if recorded != dict(source_sha256_by_role):
+        supplied = dict(source_sha256_by_role)
+        if {role: recorded[role] for role in self.REQUIRED_SOURCE_ROLES} != {
+            role: supplied.get(role, "") for role in self.REQUIRED_SOURCE_ROLES
+        }:
             raise ValueError("molecular E-step source hashes differ from its bound inputs")
+        for path_value, digest, role in zip(
+            self.source_artifacts,
+            self.source_sha256,
+            self.source_roles,
+        ):
+            if role not in self.OPTIONAL_SOURCE_ROLES:
+                continue
+            optional_path = Path(path_value).expanduser().resolve()
+            if not optional_path.is_file() or _sha256_path(optional_path) != digest:
+                raise ValueError("molecular E-step optional source hash differs: %s" % role)
+            if role in supplied and supplied[role] != digest:
+                raise ValueError("molecular E-step optional source binding differs: %s" % role)
         if self.target_donor != target_donor:
             raise ValueError("molecular E-step target donor differs from the training batch")
         if self.feature_space_id != feature_space_id:
@@ -1461,6 +1695,9 @@ class MolecularEStepArtifact:
         means_array = np.array(prototype_means, dtype=np.float32, order="C", copy=True)
         variances_array = np.array(prototype_variances, dtype=np.float32, order="C", copy=True)
         types_array = np.array(prototype_types, dtype=np.int64, order="C", copy=True)
+        image_variance_array = np.asarray(self.image_latent_variance, dtype=np.float32)
+        whitening_mean_array = np.asarray(self.latent_whitening_mean, dtype=np.float32)
+        whitening_scale_array = np.asarray(self.latent_whitening_scale, dtype=np.float32)
         if (
             morphology_array.ndim != 2
             or morphology_array.shape[0] != len(self.nucleus_ids)
@@ -1480,6 +1717,16 @@ class MolecularEStepArtifact:
             or np.any(types_array >= len(tuple(type_names)))
         ):
             raise ValueError("molecular E-step replay tensors are malformed")
+        if image_variance_array.size and image_variance_array.shape != (
+            len(self.nucleus_ids),
+            means_array.shape[1],
+        ):
+            raise ValueError("molecular E-step image uncertainty dimensions differ")
+        if whitening_mean_array.size and (
+            whitening_mean_array.shape != (means_array.shape[1],)
+            or whitening_scale_array.shape != whitening_mean_array.shape
+        ):
+            raise ValueError("molecular E-step latent whitening dimensions differ")
         if edge_array.size and (
             int(edge_array.min()) < 0 or int(edge_array.max()) >= len(self.nucleus_ids)
         ):
@@ -1541,6 +1788,12 @@ class MolecularEStepArtifact:
             or teacher.config.num_cell_types != len(tuple(type_names))
         ):
             raise ValueError("molecular E-step teacher dimensions differ from bound inputs")
+        effective_target_mass = prototype_target_mass(
+            weights,
+            types_array,
+            mode=self.prototype_mass_mode,
+            fine_to_parent=teacher.config.fine_to_parent,
+        )
 
         morphology_tensor = torch.from_numpy(morphology_array)
         edge_tensor = torch.from_numpy(edge_array)
@@ -1549,12 +1802,21 @@ class MolecularEStepArtifact:
         )
         means_tensor = torch.from_numpy(means_array)
         variances_tensor = torch.from_numpy(variances_array)
+        image_variance_tensor = (
+            None if not image_variance_array.size else torch.from_numpy(image_variance_array)
+        )
+        whitening_mean_tensor = (
+            None if not whitening_mean_array.size else torch.from_numpy(whitening_mean_array)
+        )
+        whitening_scale_tensor = (
+            None if not whitening_scale_array.size else torch.from_numpy(whitening_scale_array)
+        )
         types_tensor = torch.from_numpy(types_array)
         source_tensor = torch.from_numpy(
             np.array(m_step_mass, dtype=np.float32, order="C", copy=True)
         )
         target_tensor = torch.from_numpy(
-            np.array(prototype_weights, dtype=np.float32, order="C", copy=True)
+            np.array(effective_target_mass, dtype=np.float32, order="C", copy=True)
         )
         with torch.inference_mode():
             _, replay_type_probabilities, replay_image_latent = teacher.encode_frozen_morphology(
@@ -1562,16 +1824,55 @@ class MolecularEStepArtifact:
                 edge_tensor,
                 edge_weight_tensor,
             )
+            if whitening_mean_tensor is not None and whitening_scale_tensor is not None:
+                replay_image_latent = (
+                    replay_image_latent - whitening_mean_tensor
+                ) / whitening_scale_tensor
+                means_tensor = (means_tensor - whitening_mean_tensor) / whitening_scale_tensor
+                variances_tensor = variances_tensor / whitening_scale_tensor.square()
+                if image_variance_tensor is not None:
+                    image_variance_tensor = image_variance_tensor / whitening_scale_tensor.square()
             variance_tensor = variances_tensor.clamp_min(teacher.config.prototype_variance_floor)
+            total_variance_tensor = variance_tensor.unsqueeze(0)
+            if image_variance_tensor is not None:
+                total_variance_tensor = total_variance_tensor + image_variance_tensor.unsqueeze(1)
             gaussian_cost = 0.5 * (
                 (replay_image_latent.unsqueeze(1) - means_tensor.unsqueeze(0)).square()
-                / variance_tensor.unsqueeze(0)
-                + variance_tensor.unsqueeze(0).log()
+                / total_variance_tensor
+                + total_variance_tensor.log()
             ).mean(dim=2)
             type_cost = (
                 -replay_type_probabilities.index_select(1, types_tensor).clamp_min(1.0e-8).log()
             )
-            replay_known_cost = gaussian_cost + self.type_cost_weight * type_cost
+            replay_pair_mask = None
+            if self.type_compatibility_mode == "hard_broad_mask":
+                if teacher.config.fine_to_parent is None:
+                    selected_broad_type = replay_type_probabilities.argmax(dim=1)
+                    prototype_broad_type = types_tensor
+                else:
+                    fine_to_parent = torch.as_tensor(
+                        teacher.config.fine_to_parent,
+                        dtype=torch.long,
+                        device=replay_type_probabilities.device,
+                    )
+                    parent_probabilities = replay_type_probabilities.new_zeros(
+                        (len(replay_type_probabilities), teacher.config.num_parent_types)
+                    )
+                    parent_probabilities = parent_probabilities.index_add(
+                        1,
+                        fine_to_parent,
+                        replay_type_probabilities,
+                    )
+                    selected_broad_type = parent_probabilities.argmax(dim=1)
+                    prototype_broad_type = fine_to_parent.index_select(0, types_tensor)
+                replay_pair_mask = selected_broad_type.unsqueeze(
+                    1
+                ) == prototype_broad_type.unsqueeze(0)
+                if not bool(replay_pair_mask.any(dim=1).all()):
+                    raise ValueError("hard broad compatibility leaves a nucleus without prototypes")
+                replay_known_cost = gaussian_cost
+            else:
+                replay_known_cost = gaussian_cost + self.type_cost_weight * type_cost
             replay_full_cost = torch.cat(
                 (
                     replay_known_cost,
@@ -1588,6 +1889,7 @@ class MolecularEStepArtifact:
                 replay_known_cost,
                 source_mass=source_tensor,
                 target_mass=target_tensor,
+                pair_mask=replay_pair_mask,
                 epsilon=self.uot_epsilon,
                 marginal_relaxation=self.uot_marginal_relaxation,
                 iterations=self.uot_iterations_run,
@@ -1640,7 +1942,9 @@ class MolecularEStepArtifact:
             raise ValueError("molecular E-step declared iteration did not replay as converged")
         desired_target = np.concatenate(
             (
-                weights / weights.sum() * (1.0 - self.fixed_unknown_mass),
+                effective_target_mass.astype(np.float64)
+                / effective_target_mass.sum(dtype=np.float64)
+                * (1.0 - self.fixed_unknown_mass),
                 np.asarray([self.fixed_unknown_mass], dtype=np.float64),
             )
         )
@@ -1661,7 +1965,7 @@ class MolecularEStepArtifact:
             raw_transport_plan=raw_plan,
             transport_cost=self.transport_cost,
             source_mass=m_step_mass,
-            target_weights=weights,
+            target_weights=effective_target_mass,
             fixed_unknown_mass=self.fixed_unknown_mass,
             epsilon=self.uot_epsilon,
             marginal_relaxation=self.uot_marginal_relaxation,
@@ -1690,6 +1994,7 @@ class MolecularEStepArtifact:
 
     def save_npz(self, path: PathLike) -> None:
         self.validate()
+        raw_real_mass, raw_dustbin_mass, conditional_known = self._resolved_transport_components()
         payload = {
             "__contract__": np.asarray(self.CONTRACT, dtype=np.dtype("U")),
             "__version__": np.asarray(self.CONTRACT_VERSION, dtype=np.int64),
@@ -1697,6 +2002,16 @@ class MolecularEStepArtifact:
             "raw_transport_plan": np.asarray(self.raw_transport_plan, dtype=np.float32),
             "transport_cost": np.asarray(self.transport_cost, dtype=np.float32),
             "source_mass": np.asarray(self.source_mass, dtype=np.float32),
+            "raw_real_row_mass": np.asarray(raw_real_mass, dtype=np.float32),
+            "raw_dustbin_row_mass": np.asarray(raw_dustbin_mass, dtype=np.float32),
+            "conditional_known_prototype_distribution": np.asarray(
+                conditional_known, dtype=np.float32
+            ),
+            "type_compatibility_mode": np.asarray(self.type_compatibility_mode),
+            "prototype_mass_mode": np.asarray(self.prototype_mass_mode),
+            "image_latent_variance": np.asarray(self.image_latent_variance, dtype=np.float32),
+            "latent_whitening_mean": np.asarray(self.latent_whitening_mean, dtype=np.float32),
+            "latent_whitening_scale": np.asarray(self.latent_whitening_scale, dtype=np.float32),
             "nucleus_ids": np.asarray(self.nucleus_ids, dtype=np.dtype("U")),
             "prototype_ids": np.asarray(self.prototype_ids, dtype=np.dtype("U")),
             "source_artifacts": np.asarray(self.source_artifacts, dtype=np.dtype("U")),
@@ -1739,6 +2054,9 @@ class MolecularEStepArtifact:
             ),
             "converged": np.asarray(self.converged, dtype=np.bool_),
             "source_marginal_residual": np.asarray(self.source_marginal_residual, dtype=np.float64),
+            "conditional_row_normalization_residual": np.asarray(
+                self.conditional_row_normalization_residual, dtype=np.float64
+            ),
             "target_marginal_residual": np.asarray(self.target_marginal_residual, dtype=np.float64),
             "solver_source_marginal_error": np.asarray(
                 self.solver_source_marginal_error, dtype=np.float64
@@ -1758,7 +2076,9 @@ class MolecularEStepArtifact:
         with np.load(path, allow_pickle=False) as archive:
             contract = str(_scalar(archive, "__contract__"))
             version = int(_scalar(archive, "__version__"))
-            if contract != cls.CONTRACT or version != cls.CONTRACT_VERSION:
+            if contract != cls.CONTRACT or version not in (
+                cls.LEGACY_CONTRACT_VERSIONS | {cls.CONTRACT_VERSION}
+            ):
                 raise ValueError("unsupported molecular E-step artifact contract")
             required_vectors = (
                 "nucleus_ids",
@@ -1779,6 +2099,31 @@ class MolecularEStepArtifact:
             ):
                 if name not in archive:
                     raise ValueError("molecular E-step artifact is missing %s" % name)
+            if version >= 4:
+                required_v4 = {
+                    "raw_real_row_mass",
+                    "raw_dustbin_row_mass",
+                    "conditional_known_prototype_distribution",
+                    "type_compatibility_mode",
+                    "prototype_mass_mode",
+                    "conditional_row_normalization_residual",
+                }
+                missing_v4 = sorted(required_v4 - set(archive.files))
+                if missing_v4:
+                    raise ValueError(
+                        "molecular E-step v4 artifact is missing: %s" % ", ".join(missing_v4)
+                    )
+            if version >= 5:
+                required_v5 = {
+                    "image_latent_variance",
+                    "latent_whitening_mean",
+                    "latent_whitening_scale",
+                }
+                missing_v5 = sorted(required_v5 - set(archive.files))
+                if missing_v5:
+                    raise ValueError(
+                        "molecular E-step v5 artifact is missing: %s" % ", ".join(missing_v5)
+                    )
             artifact = cls(
                 transport_plan=np.array(archive["transport_plan"], dtype=np.float32, copy=True),
                 raw_transport_plan=np.array(
@@ -1839,7 +2184,60 @@ class MolecularEStepArtifact:
                 target_dual_residual=float(_scalar(archive, "target_dual_residual")),
                 transport_objective=float(_scalar(archive, "transport_objective")),
                 e_step_round=int(_scalar(archive, "e_step_round")),
+                raw_real_row_mass=(
+                    np.array(archive["raw_real_row_mass"], dtype=np.float32, copy=True)
+                    if version >= 4
+                    else np.empty(0, dtype=np.float32)
+                ),
+                raw_dustbin_row_mass=(
+                    np.array(archive["raw_dustbin_row_mass"], dtype=np.float32, copy=True)
+                    if version >= 4
+                    else np.empty(0, dtype=np.float32)
+                ),
+                conditional_known_prototype_distribution=(
+                    np.array(
+                        archive["conditional_known_prototype_distribution"],
+                        dtype=np.float32,
+                        copy=True,
+                    )
+                    if version >= 4
+                    else np.empty((0, 0), dtype=np.float32)
+                ),
+                type_compatibility_mode=(
+                    str(_scalar(archive, "type_compatibility_mode"))
+                    if version >= 4
+                    else "soft_type_cost"
+                ),
+                prototype_mass_mode=(
+                    str(_scalar(archive, "prototype_mass_mode"))
+                    if version >= 4
+                    else "reference_weights"
+                ),
+                image_latent_variance=(
+                    np.array(archive["image_latent_variance"], dtype=np.float32, copy=True)
+                    if version >= 5
+                    else np.empty((0, 0), dtype=np.float32)
+                ),
+                latent_whitening_mean=(
+                    np.array(archive["latent_whitening_mean"], dtype=np.float32, copy=True)
+                    if version >= 5
+                    else np.empty(0, dtype=np.float32)
+                ),
+                latent_whitening_scale=(
+                    np.array(archive["latent_whitening_scale"], dtype=np.float32, copy=True)
+                    if version >= 5
+                    else np.empty(0, dtype=np.float32)
+                ),
             )
+            if version >= 4 and not math.isclose(
+                float(_scalar(archive, "conditional_row_normalization_residual")),
+                artifact.source_marginal_residual,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            ):
+                raise ValueError(
+                    "conditional row normalization residual differs from its legacy alias"
+                )
         artifact.validate()
         return artifact
 
