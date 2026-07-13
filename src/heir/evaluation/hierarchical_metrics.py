@@ -48,6 +48,115 @@ def macro_r2(
     return float(np.mean(list(donor_macro.values()))), rows, donor_macro
 
 
+def donor_section_type_macro_r2(
+    truth: np.ndarray,
+    prediction: np.ndarray,
+    donors: np.ndarray,
+    sections: np.ndarray,
+    labels: np.ndarray,
+    minimum_support: int,
+) -> Tuple[
+    float,
+    Sequence[Mapping[str, object]],
+    Mapping[str, float],
+    Mapping[str, Mapping[str, float]],
+]:
+    """Average types within section, sections within donor, then donors.
+
+    Types below ``minimum_support`` remain visible in the stratum rows but do
+    not contribute to the section mean.  An observed donor/section with no
+    evaluable type fails closed instead of silently disappearing from the
+    endpoint.
+    """
+
+    truth_values = np.asarray(truth)
+    prediction_values = np.asarray(prediction)
+    donor_values = np.asarray(donors).astype(str)
+    section_values = np.asarray(sections).astype(str)
+    label_values = np.asarray(labels)
+    row_count = len(truth_values)
+    if prediction_values.shape != truth_values.shape:
+        raise ValueError("section-balanced R2 truth and prediction are not row aligned")
+    if any(values.shape != (row_count,) for values in (donor_values, section_values, label_values)):
+        raise ValueError("section-balanced R2 identities are not row aligned")
+    if minimum_support <= 0:
+        raise ValueError("section-balanced R2 minimum support must be positive")
+    if row_count == 0 or any(not value.strip() for value in donor_values.tolist()):
+        raise ValueError("section-balanced R2 donor identities are missing")
+    if any(not value.strip() for value in section_values.tolist()):
+        raise ValueError("section-balanced R2 section identities are missing")
+
+    rows = []
+    donor_section_values: Dict[str, Dict[str, float]] = {}
+    donor_macro: Dict[str, float] = {}
+    for donor in sorted(set(donor_values.tolist())):
+        sections_for_donor: Dict[str, float] = {}
+        observed_sections = sorted(set(section_values[donor_values == donor].tolist()))
+        for section in observed_sections:
+            section_selected = (donor_values == donor) & (section_values == section)
+            type_r2 = []
+            for type_index in sorted(set(label_values[section_selected].tolist())):
+                selected = section_selected & (label_values == type_index)
+                support = int(selected.sum())
+                row = {
+                    "donor_id": donor,
+                    "section_id": section,
+                    "type_index": int(type_index),
+                    "support": support,
+                }
+                if support < minimum_support:
+                    rows.append(
+                        {
+                            **row,
+                            "evaluable": False,
+                            "residual_coordinate_r2": None,
+                            "reason": "support_below_minimum",
+                        }
+                    )
+                    continue
+                centered = truth_values[selected] - truth_values[selected].mean(
+                    axis=0, keepdims=True
+                )
+                denominator = float(np.square(centered).sum())
+                error = float(np.square(prediction_values[selected] - truth_values[selected]).sum())
+                value = float(1.0 - error / denominator) if denominator > 1.0e-12 else float("nan")
+                if not np.isfinite(value):
+                    rows.append(
+                        {
+                            **row,
+                            "evaluable": False,
+                            "residual_coordinate_r2": None,
+                            "reason": "zero_truth_variance",
+                        }
+                    )
+                    continue
+                rows.append(
+                    {
+                        **row,
+                        "evaluable": True,
+                        "residual_coordinate_r2": value,
+                    }
+                )
+                type_r2.append(value)
+            if not type_r2:
+                raise ValueError(
+                    "observed donor/section has no evaluable type support: %s/%s" % (donor, section)
+                )
+            sections_for_donor[section] = float(np.mean(type_r2))
+        if not sections_for_donor:
+            raise ValueError("observed donor has no evaluable section support: %s" % donor)
+        donor_section_values[donor] = sections_for_donor
+        donor_macro[donor] = float(np.mean(list(sections_for_donor.values())))
+    if not donor_macro:
+        raise ValueError("no donor/section/type stratum is evaluable")
+    return (
+        float(np.mean(list(donor_macro.values()))),
+        rows,
+        donor_macro,
+        donor_section_values,
+    )
+
+
 def macro_error_reduction(
     truth: np.ndarray,
     prediction: np.ndarray,
@@ -376,6 +485,7 @@ def within_group_donor_type_r2(
 __all__ = [
     "donor_bootstrap",
     "donor_dominance",
+    "donor_section_type_macro_r2",
     "donor_section_type_coverage",
     "donor_type_coverage",
     "exact_paired_randomization",

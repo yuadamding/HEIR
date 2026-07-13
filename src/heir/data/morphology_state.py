@@ -154,12 +154,19 @@ class MorphologyRidgeDatasetArtifact:
     scientific_scope: str = ""
     evidence_scope: str = ""
     authorizes_nucleus_intrinsic_claim: bool = False
+    registration_quality_scores: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64)
+    )
+    registration_quality_strata: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=str))
+    registration_quality_cutoffs: Mapping[str, object] = field(default_factory=dict)
+    registration_quality_definition: str = ""
+    registration_quality_applicable: bool = True
     reference_split_ids: Tuple[str, ...] = ()
     reference_means_by_split: np.ndarray = field(
         default_factory=lambda: np.empty((0, 0, 0), dtype=np.float64)
     )
 
-    SCHEMA = "heir.morphology_ridge_dataset.v4"
+    SCHEMA = "heir.morphology_ridge_dataset.v5"
 
     @classmethod
     def load_npz(cls, path: PathLike, *, role: str) -> "MorphologyRidgeDatasetArtifact":
@@ -219,6 +226,11 @@ class MorphologyRidgeDatasetArtifact:
                 "scientific_scope",
                 "evidence_scope",
                 "authorizes_nucleus_intrinsic_claim",
+                "registration_quality_scores",
+                "registration_quality_strata",
+                "registration_quality_cutoffs_json",
+                "registration_quality_definition",
+                "registration_quality_applicable",
                 "reference_split_ids",
                 "reference_means_by_split",
                 "feature_space_id",
@@ -375,6 +387,21 @@ class MorphologyRidgeDatasetArtifact:
                 authorizes_nucleus_intrinsic_claim=_boolean(
                     archive, "authorizes_nucleus_intrinsic_claim"
                 ),
+                registration_quality_scores=np.asarray(
+                    archive["registration_quality_scores"], dtype=np.float64
+                ),
+                registration_quality_strata=_strings(
+                    archive["registration_quality_strata"], "registration_quality_strata"
+                ),
+                registration_quality_cutoffs=_json_mapping(
+                    archive, "registration_quality_cutoffs_json"
+                ),
+                registration_quality_definition=str(
+                    _scalar(archive, "registration_quality_definition")
+                ),
+                registration_quality_applicable=_boolean(
+                    archive, "registration_quality_applicable"
+                ),
                 reference_split_ids=tuple(
                     _strings(archive["reference_split_ids"], "reference_split_ids", unique=True)
                 ),
@@ -521,6 +548,44 @@ class MorphologyRidgeDatasetArtifact:
             )
         if not self.planned_stratum_ids or not self.coverage_audit:
             raise ValueError("planned biological coverage must be carried into the artifact")
+        quality_scores = np.asarray(self.registration_quality_scores, dtype=np.float64)
+        quality_strata = np.asarray(self.registration_quality_strata).astype(str)
+        if (
+            quality_scores.shape != (observations,)
+            or quality_strata.shape != (observations,)
+            or not np.isfinite(quality_scores).all()
+            or np.any(quality_scores < 0.0)
+            or np.any(quality_scores > 1.0)
+        ):
+            raise ValueError("morphology-ridge registration-quality rows are malformed")
+        try:
+            best_cutoff = float(self.registration_quality_cutoffs["best"])
+            intermediate_cutoff = float(self.registration_quality_cutoffs["intermediate"])
+            near_threshold_cutoff = float(self.registration_quality_cutoffs["near_threshold"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "morphology-ridge registration-quality cutoffs are malformed"
+            ) from error
+        if not 0.0 < best_cutoff < intermediate_cutoff < near_threshold_cutoff == 1.0:
+            raise ValueError("morphology-ridge registration-quality cutoffs are not frozen")
+        expected_strata = np.full(observations, "near_threshold", dtype="<U16")
+        expected_strata[quality_scores <= intermediate_cutoff] = "intermediate"
+        expected_strata[quality_scores <= best_cutoff] = "best"
+        if not np.array_equal(quality_strata, expected_strata):
+            raise ValueError("morphology-ridge registration-quality labels differ from scores")
+        if self.registration_quality_definition != (
+            "max(annotation_nucleus_error/section_median_nucleus_diameter/diameter_limit,"
+            "annotation_nucleus_error/section_median_nearest_neighbor_distance/neighbor_limit)"
+        ):
+            raise ValueError("morphology-ridge registration-quality definition is unsupported")
+        if not self.registration_quality_applicable and (
+            self.evidence_scope != "development_pilot"
+            or np.any(quality_scores != 1.0)
+            or np.any(quality_strata != "near_threshold")
+        ):
+            raise ValueError(
+                "non-applicable registration quality is restricted to a development sentinel"
+            )
         memberships = self.coverage_audit.get("reference_membership_sha256_by_split")
         if (
             not isinstance(memberships, Mapping)
@@ -610,6 +675,9 @@ class MorphologyRidgeDatasetArtifact:
             "hypothesis_ids",
             "scientific_scope",
             "evidence_scope",
+            "registration_quality_cutoffs",
+            "registration_quality_definition",
+            "registration_quality_applicable",
             "reference_split_ids",
         ):
             if getattr(self, name) != getattr(locked_test, name):

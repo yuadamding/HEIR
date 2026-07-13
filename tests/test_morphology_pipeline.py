@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +12,11 @@ import numpy as np
 import pytest
 
 from heir.data import MorphologyRidgeDatasetArtifact, ordered_ids_sha256
+from heir.data.study_manifest import DEFAULT_ANNOTATION_QUALITY_CONTRACT
+from heir.evaluation.morphology_artifact_qc import (
+    locked_measurement_audit_report,
+    reference_evaluation_balance_report,
+)
 from heir.utils import sha256_file
 
 
@@ -27,6 +34,11 @@ BENCHMARK = _script("benchmark_morphology_state_gate")
 OPENING_RECEIPT_SHA256 = "c" * 64
 
 
+def test_preparation_uses_shared_scientific_qc_implementation() -> None:
+    assert PREPARE.locked_measurement_audit_report is locked_measurement_audit_report
+    assert PREPARE.reference_evaluation_balance_report is reference_evaluation_balance_report
+
+
 def _locked_audit() -> dict[str, object]:
     return {
         "audit_timing": "after_confirmatory_lock_before_morphology_inference",
@@ -37,6 +49,8 @@ def _locked_audit() -> dict[str, object]:
         "maximum_cell_nucleus_p95_um": 8.0,
         "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
         "maximum_registration_nearest_neighbor_ratio_p95": 0.5,
+        "best_registration_quality_max_fraction_of_limit": 0.25,
+        "intermediate_registration_quality_max_fraction_of_limit": 0.6,
         "maximum_registration_outlier_fraction": 0.05,
         "maximum_nucleus_outside_cell_fraction": 0.01,
         "minimum_nucleus_cell_area_ratio": 0.05,
@@ -66,6 +80,11 @@ def _independence() -> dict[str, object]:
         "annotation_training_scope": "development_donors_only",
         "annotation_training_donor_ids": ["D1", "D2", "D3"],
         "annotation_training_donor_ids_sha256": ordered_ids_sha256(["D1", "D2", "D3"]),
+        "training_label_ontology_source": "de_novo_gene_disjoint_development_ontology",
+        "training_label_provenance_receipt_sha256": "8" * 64,
+        "training_label_target_gene_overlap_count": 0,
+        "training_labels_establish_target_independence": True,
+        "annotation_quality_contract": copy.deepcopy(DEFAULT_ANNOTATION_QUALITY_CONTRACT),
         "locked_donors_used_for_training": False,
         "same_cohort_annotation": True,
         "cross_fitting_method": "leave_one_donor_out",
@@ -84,6 +103,7 @@ def _source(
     independence_contract: dict[str, object] | None = None,
     alternate_reference_deficit: tuple[str, str] | None = None,
     two_section_donor: str | None = None,
+    unreliable_locked_stratum: tuple[str, str, str] | None = None,
     stale_locked_measurement_composite: bool = False,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     development = ("D1", "D2", "D3")
@@ -173,6 +193,17 @@ def _source(
     split_counts = np.maximum(
         1, np.rint((np.asarray(targets, dtype=np.float64) - np.min(targets) + 1.0) * 5)
     ).astype(np.int64)
+    split_counts_half_b = split_counts.copy()
+    if unreliable_locked_stratum is not None:
+        donor, section, fine_type = unreliable_locked_stratum
+        selected = np.flatnonzero(
+            (np.asarray(donor_ids) == donor)
+            & (np.asarray(section_ids) == section)
+            & (np.asarray(fine_types) == fine_type)
+        )
+        if not len(selected):
+            raise ValueError("test unreliable locked stratum has no rows")
+        split_counts_half_b[selected] = split_counts_half_b[selected[::-1]]
     locked_audit = _locked_audit() if locked_audit is None else locked_audit
     locked_audit_json = json.dumps(locked_audit, sort_keys=True)
     locked_audit_sha = hashlib.sha256(
@@ -182,6 +213,13 @@ def _source(
     independence_json = json.dumps(independence, sort_keys=True, separators=(",", ":"))
     independence_sha = hashlib.sha256(independence_json.encode("utf-8")).hexdigest()
     registration_qc_pass = np.ones(rows, dtype=np.bool_)
+    registration_quality_scores = np.resize(np.asarray([0.1, 0.4, 0.8]), rows)
+    registration_quality_strata = np.asarray(
+        [
+            "best" if value <= 0.25 else "intermediate" if value <= 0.6 else "near_threshold"
+            for value in registration_quality_scores
+        ]
+    )
     segmentation_qc_pass = np.ones(rows, dtype=np.bool_)
     crop_qc_pass = np.ones(rows, dtype=np.bool_)
     locked_measurement_qc_pass = np.ones(rows, dtype=np.bool_)
@@ -213,9 +251,9 @@ def _source(
         type_names=np.asarray(["type_a", "type_b"]),
         nucleus_molecular_targets=np.asarray(targets, dtype=np.float64),
         nucleus_target_counts_half_a=split_counts,
-        nucleus_target_counts_half_b=split_counts,
+        nucleus_target_counts_half_b=split_counts_half_b,
         nucleus_library_size_half_a=split_counts.sum(axis=1),
-        nucleus_library_size_half_b=split_counts.sum(axis=1),
+        nucleus_library_size_half_b=split_counts_half_b.sum(axis=1),
         gene_ids=np.asarray(["g1", "g2", "g3"]),
         coordinate_features=np.asarray(coordinates, dtype=np.float64),
         coordinate_feature_names=np.asarray(["x", "y"]),
@@ -247,6 +285,16 @@ def _source(
         planned_stratum_ids=np.asarray(planned),
         planned_stratum_manifest_sha256=np.asarray("1" * 64),
         registration_qc_pass=registration_qc_pass,
+        registration_quality_scores=registration_quality_scores,
+        registration_quality_strata=registration_quality_strata,
+        registration_quality_cutoffs_json=np.asarray(
+            json.dumps(
+                {"best": 0.25, "intermediate": 0.6, "near_threshold": 1.0},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ),
+        registration_quality_definition=np.asarray(PREPARE.REGISTRATION_QUALITY_DEFINITION),
         segmentation_qc_pass=segmentation_qc_pass,
         locked_measurement_qc_pass=locked_measurement_qc_pass,
         locked_measurement_audit_thresholds_json=np.asarray(locked_audit_json),
@@ -327,11 +375,14 @@ def _manifest(
             "reserved_exclusively_for": "H-CELL",
             "reserved_donor_ids": list(locked),
             "prior_outcome_access_confirmed_false": True,
+            "prior_outcome_access_status": "unopened",
+            "prior_outcome_exposure_receipt_sha256": None,
+            "prospective_lock_eligible": True,
         },
         "observations": {
             "level": "cell",
             "registration_method": "native_xenium_cell_id_join",
-            "fine_type_field": "final_CT",
+            "fine_type_field": "fine_type",
             "supported_fine_type_ids": list(types),
         },
         "encoder": {
@@ -371,7 +422,19 @@ def _manifest(
             "permutations_per_seed": 100,
             "unit": "donor_x_fine_type_x_spatial_roi",
         },
-        "primary_endpoint": {"minimum_effect": 0.01},
+        "primary_endpoint": {
+            "name": "joint_donor_type_and_donor_section_type_macro_residual_coordinate_r2",
+            "condition_on": "fine_type",
+            "decision_rule": "both_endpoints_must_meet_frozen_minimum",
+            "donor_type_macro": {
+                "metric": "donor_equal_type_equal_residual_coordinate_r2",
+                "minimum_effect": 0.05,
+            },
+            "donor_section_type_macro": {
+                "metric": "donor_equal_section_equal_type_equal_residual_coordinate_r2",
+                "minimum_effect": 0.05,
+            },
+        },
         "decision_thresholds": {
             "minimum_shuffled_delta_r2": 0.01,
             "maximum_empirical_p": 0.05,
@@ -466,6 +529,7 @@ def _preparation_context(
     source_independence: dict[str, object] | None = None,
     alternate_reference_deficit: tuple[str, str] | None = None,
     two_section_donor: str | None = None,
+    unreliable_locked_stratum: tuple[str, str, str] | None = None,
     stale_locked_measurement_composite: bool = False,
 ) -> SimpleNamespace:
     source = tmp_path / "source.npz"
@@ -477,6 +541,7 @@ def _preparation_context(
         independence_contract=source_independence,
         alternate_reference_deficit=alternate_reference_deficit,
         two_section_donor=two_section_donor,
+        unreliable_locked_stratum=unreliable_locked_stratum,
         stale_locked_measurement_composite=stale_locked_measurement_composite,
     )
     measurement_path = tmp_path / "measurement.json"
@@ -594,6 +659,39 @@ def test_gate_settings_reject_nonintegral_randomization_contract(field: str, val
         BENCHMARK._gate_settings(manifest)
 
 
+def test_gate_settings_reject_joint_primary_endpoint_drift() -> None:
+    manifest = _manifest(
+        "8" * 64,
+        "9" * 64,
+        ("D1", "D2", "D3"),
+        ("L1", "L2"),
+    )
+    manifest.content["primary_endpoint"]["donor_section_type_macro"]["minimum_effect"] = 0.049
+
+    with pytest.raises(ValueError, match="differs from the frozen joint endpoint"):
+        BENCHMARK._gate_settings(manifest)
+
+
+def test_benchmark_rejects_calibration_manifest_projection_drift(
+    tmp_path: Path,
+    calibration_receipt,
+) -> None:
+    receipt_path = tmp_path / "calibration_receipt.json"
+    receipt_path.write_text(json.dumps(calibration_receipt), encoding="utf-8")
+    binding = calibration_receipt["exact_gate_settings"]["confirmatory_design_binding"]
+    content = copy.deepcopy(binding["scientific_manifest_projection"])
+    content["morphology_gate"]["calibration_receipt_sha256"] = sha256_file(receipt_path)
+    manifest = SimpleNamespace(content=content)
+
+    assert BENCHMARK._calibration_receipt(manifest, receipt_path) == calibration_receipt
+
+    # Dataset revision is part of the scientific projection but is not one of
+    # the benchmark's separately reconstructed gate parameters.
+    manifest.content["dataset"]["revision"] = "0" * 40
+    with pytest.raises(ValueError, match="projection differs from the live H-CELL manifest"):
+        BENCHMARK._calibration_receipt(manifest, receipt_path)
+
+
 def test_preparation_rejects_locked_audit_hash_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -604,6 +702,24 @@ def test_preparation_rejects_locked_audit_hash_drift(
     )
 
     with pytest.raises(ValueError, match="changed the frozen locked measurement audit"):
+        _run_preparation(context)
+
+
+def test_preparation_rejects_registration_quality_cutoff_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _preparation_context(tmp_path, monkeypatch)
+    with np.load(context.source, allow_pickle=False) as archive:
+        payload = {name: np.array(archive[name], copy=True) for name in archive.files}
+    payload["registration_quality_cutoffs_json"] = np.asarray(
+        json.dumps({"best": 0.20, "intermediate": 0.6, "near_threshold": 1.0})
+    )
+    np.savez_compressed(context.source, **payload)
+    plan = json.loads(context.plan_path.read_text(encoding="utf-8"))
+    plan["source_observations_sha256"] = sha256_file(context.source)
+    context.plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="changed the frozen registration-quality definition"):
         _run_preparation(context)
 
 
@@ -677,6 +793,34 @@ def test_reference_means_are_donor_section_type_specific(
     np.testing.assert_allclose(development.reference_means[second], [[99.0, 101.0]] * 2)
 
 
+def test_preparation_carries_frozen_registration_quality_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _preparation_context(tmp_path, monkeypatch)
+
+    assert _run_preparation(context) == 0
+    locked = MorphologyRidgeDatasetArtifact.load_npz(context.locked_path, role="locked_test")
+
+    assert locked.registration_quality_applicable is True
+    assert set(locked.registration_quality_strata.tolist()) == {
+        "best",
+        "intermediate",
+        "near_threshold",
+    }
+    assert locked.registration_quality_cutoffs == {
+        "best": 0.25,
+        "intermediate": 0.6,
+        "near_threshold": 1.0,
+    }
+    assert locked.registration_quality_definition == PREPARE.REGISTRATION_QUALITY_DEFINITION
+
+    with pytest.raises(ValueError, match="labels differ from scores"):
+        replace(
+            locked,
+            registration_quality_strata=np.repeat("best", len(locked.observation_ids)),
+        ).validate()
+
+
 def test_missing_locked_donor_type_stays_in_frozen_population_and_fails_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -712,8 +856,77 @@ def test_missing_locked_donor_type_stays_in_frozen_population_and_fails_audit(
     }
     missing = locked_audit["donor_type_reliability"]["L2|type_b"]
     assert missing["rows"] == 0
+    assert missing["evaluable"] is False
     assert missing["passes_frozen_reliability"] is False
     assert locked_audit["reliable_donor_type_fraction"] == pytest.approx(0.75)
+    missing_stratum = locked_audit["donor_section_type_reliability"]["L2|section_L2|type_b"]
+    assert missing_stratum["rows"] == 0
+    assert missing_stratum["evaluable"] is False
+    assert missing_stratum["passes_frozen_reliability"] is False
+    planned_reliability = locked_audit["planned_stratum_reliability"]
+    assert planned_reliability == {
+        "coverage_denominator": "all_frozen_locked_donor_section_type_strata",
+        "planned_count": 4,
+        "evaluable_count": 3,
+        "reliable_count": 3,
+        "reliable_fraction": pytest.approx(0.75),
+        "minimum_required_reliable_fraction": 1.0,
+        "pass": False,
+    }
+    assert locked_audit["worst_section_reliability_summary"] == {
+        "planned_stratum_id": "L2|section_L2|type_b",
+        "donor_id": "L2",
+        "section_id": "section_L2",
+        "fine_type_id": "type_b",
+        "rows": 0,
+        "median_spearman_brown_reliability": None,
+        "evaluable": False,
+        "passes_frozen_reliability": False,
+    }
+    assert locked_audit["pass"] is False
+
+
+def test_locked_reliability_gate_resolves_sections_and_catches_pooled_masking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit = _locked_audit()
+    audit["minimum_locked_donor_type_reliability_fraction"] = 1.0
+    context = _preparation_context(
+        tmp_path,
+        monkeypatch,
+        locked_audit=audit,
+        two_section_donor="L1",
+        unreliable_locked_stratum=("L1", "section_L1_b", "type_a"),
+    )
+
+    assert _run_preparation(context) == 0
+    locked = MorphologyRidgeDatasetArtifact.load_npz(context.locked_path, role="locked_test")
+    locked_audit = locked.coverage_audit["locked_measurement_audit"]
+
+    assert locked_audit["donor_type_reliability"]["L1|type_a"]["passes_frozen_reliability"] is True
+    section_reports = locked_audit["donor_section_type_reliability"]
+    assert section_reports["L1|section_L1_a|type_a"]["passes_frozen_reliability"] is True
+    assert section_reports["L1|section_L1_b|type_a"]["passes_frozen_reliability"] is False
+    assert section_reports["L1|section_L1_b|type_a"]["evaluable"] is True
+    assert locked_audit["reliable_donor_type_fraction"] == pytest.approx(1.0)
+    assert locked_audit["planned_stratum_reliability"]["planned_count"] == 6
+    assert locked_audit["planned_stratum_reliability"]["reliable_count"] == 5
+    assert locked_audit["planned_stratum_reliability"]["reliable_fraction"] == pytest.approx(
+        5.0 / 6.0
+    )
+    assert locked_audit["worst_section_reliability_by_donor_type"]["L1|type_a"] == {
+        "planned_section_count": 2,
+        "evaluable_section_count": 2,
+        "reliable_section_count": 1,
+        "worst_planned_stratum_id": "L1|section_L1_b|type_a",
+        "worst_median_spearman_brown_reliability": 0.0,
+        "worst_section_evaluable": True,
+        "all_planned_sections_pass_frozen_reliability": False,
+    }
+    assert (
+        locked_audit["distribution_checks"]["planned_donor_section_type_reliability_fraction"]
+        is False
+    )
     assert locked_audit["pass"] is False
 
 
@@ -859,7 +1072,9 @@ def test_hescape_reserved_outcome_declaration_fails_closed(tmp_path: Path, monke
             ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"]
         ),
         reserved_donor_outcomes_loaded=np.asarray(False),
-        analysis_scope=np.asarray("development_donors_only_hest_lock_unopened"),
+        analysis_scope=np.asarray(
+            "development_donors_only_reserved_outcomes_previously_materialized"
+        ),
     )
     manifest = SimpleNamespace(
         development_donors=("VUILD91",),
@@ -873,7 +1088,9 @@ def test_hescape_reserved_outcome_declaration_fails_closed(tmp_path: Path, monke
                     "VUILD78",
                     "VUILD96",
                 ],
-                "hescape_analysis_scope": "development_donors_only_hest_lock_unopened",
+                "hescape_analysis_scope": (
+                    "development_donors_only_reserved_outcomes_previously_materialized"
+                ),
                 "hescape_allowed_donor_ids": ["VUILD91"],
             }
         },

@@ -39,6 +39,29 @@ def test_xenium_cell_identity_is_section_scoped() -> None:
     assert first != second
 
 
+def test_registration_quality_strata_match_frozen_h_meas_definition() -> None:
+    contract = {
+        "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
+        "maximum_registration_nearest_neighbor_ratio_p95": 0.4,
+        "best_registration_quality_max_fraction_of_limit": 0.25,
+        "intermediate_registration_quality_max_fraction_of_limit": 0.6,
+    }
+    scores, strata, cutoffs = builder._registration_quality_strata(
+        np.asarray([0.05, 0.20, 0.45, 0.55]),
+        np.asarray([0.04, 0.16, 0.32, 0.20]),
+        contract,
+    )
+
+    np.testing.assert_allclose(scores, [0.1, 0.4, 0.9, 1.1])
+    assert strata.tolist() == ["best", "intermediate", "near_threshold", "failed"]
+    assert cutoffs == {"best": 0.25, "intermediate": 0.6, "near_threshold": 1.0}
+
+    malformed = dict(contract)
+    malformed["intermediate_registration_quality_max_fraction_of_limit"] = 0.2
+    with pytest.raises(ValueError, match="contract is malformed"):
+        builder._registration_quality_strata(np.asarray([0.1]), np.asarray([0.1]), malformed)
+
+
 def _wkb_square(x: float, y: float, half: float = 2.0) -> bytes:
     points = (
         (x - half, y - half),
@@ -59,8 +82,8 @@ def _sha256(path: Path) -> str:
 
 def _role_blocks(sample_id: str, salt: str) -> dict[str, int]:
     result: dict[str, int] = {}
-    for block_x in range(8):
-        role = builder._block_role(sample_id, block_x, 0, salt)
+    for block_x in range(10, 18):
+        role = builder._block_role(sample_id, block_x, 9, salt)
         result.setdefault(role, block_x)
     assert set(result) == {"reference", "evaluation"}
     return result
@@ -99,7 +122,7 @@ def _write_sample(root: Path, sample_id: str, salt: str, image_value: int) -> di
     next_transcript = 0
     for role in ("reference", "evaluation"):
         x = blocks[role] * 32 + 16
-        for type_index, y in enumerate((12, 20)):
+        for type_index, y in enumerate((300, 308)):
             cell_id = "%s_%d" % (role, type_index)
             cell_ids.append(cell_id)
             cell_geometries.append(_wkb_square(x, y, half=3.0))
@@ -152,7 +175,7 @@ def _write_sample(root: Path, sample_id: str, salt: str, image_value: int) -> di
     cellvit_seg = root / "cellvit_seg" / (sample_id + "_cellvit_seg.parquet")
     for path in (wsi, transcripts, cell_seg, nucleus_seg, cellvit_seg):
         path.parent.mkdir(parents=True, exist_ok=True)
-    image = np.full((64, 256, 3), image_value, dtype=np.uint8)
+    image = np.full((640, 832, 3), image_value, dtype=np.uint8)
     tifffile.imwrite(wsi, image, photometric="rgb")
     parquet.write_table(
         pa.table({"geometry": cell_geometries, "__index_level_0__": cell_ids}), cell_seg
@@ -251,6 +274,11 @@ def _protocol(samples: list[dict[str, object]], development: list[str], locked: 
             "annotation_training_scope": "unknown_pending_provenance",
             "annotation_training_donor_ids": [],
             "annotation_training_donor_ids_sha256": None,
+            "training_label_ontology_source": "pending",
+            "training_label_provenance_receipt_sha256": None,
+            "training_label_target_gene_overlap_count": None,
+            "training_labels_establish_target_independence": False,
+            "annotation_quality_contract": builder.DEFAULT_ANNOTATION_QUALITY_CONTRACT,
             "locked_donors_used_for_training": None,
             "same_cohort_annotation": True,
             "cross_fitting_method": "pending",
@@ -294,13 +322,34 @@ def _protocol(samples: list[dict[str, object]], development: list[str], locked: 
             ],
         },
         "transcript_split_salt": "synthetic-split-v1",
+        "frozen_h_meas_shared_measurement_thresholds": dict(
+            builder.FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS
+        ),
+        "confirmatory_primary_endpoint": {
+            "name": builder.CONFIRMATORY_PRIMARY_ENDPOINT_NAME,
+            "condition_on": "fine_type",
+            "decision_rule": builder.CONFIRMATORY_PRIMARY_DECISION_RULE,
+            "donor_type_macro": {
+                "metric": builder.CONFIRMATORY_DONOR_TYPE_METRIC,
+                "minimum_effect": builder.CONFIRMATORY_PRIMARY_MINIMUM_EFFECT,
+            },
+            "donor_section_type_macro": {
+                "metric": builder.CONFIRMATORY_DONOR_SECTION_TYPE_METRIC,
+                "minimum_effect": builder.CONFIRMATORY_PRIMARY_MINIMUM_EFFECT,
+            },
+        },
         "target_programs": {"synthetic_program": ["G1", "G2"]},
         "samples": samples,
     }
 
 
-def _write_annotations(path: Path, sample_ids: set[str] | None = None) -> None:
-    columns = (
+def _write_annotations(
+    path: Path,
+    sample_ids: set[str] | None = None,
+    *,
+    include_raw_labels: bool = True,
+) -> None:
+    columns = [
         "hest_id",
         "sample",
         "patient",
@@ -310,14 +359,14 @@ def _write_annotations(path: Path, sample_ids: set[str] | None = None) -> None:
         "disease_status",
         "tma",
         "run",
-        "final_CT",
-        "final_lineage",
         "x_centroid",
         "y_centroid",
         "nCount_RNA",
         "nFeature_RNA",
         "perc_negcontrolorunassigned",
-    )
+    ]
+    if include_raw_labels:
+        columns[9:9] = ["final_CT", "final_lineage"]
     with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
         handle.write("\t".join(columns) + "\n")
         for sample_id, (donor_id, source_sample) in sorted(builder.SECTION_IDENTITIES.items()):
@@ -326,9 +375,9 @@ def _write_annotations(path: Path, sample_ids: set[str] | None = None) -> None:
             blocks = _role_blocks(sample_id, "synthetic-frozen-v1")
             for role in ("reference", "evaluation"):
                 x = blocks[role] * 32 + 16
-                for type_index, y in enumerate((12, 20)):
+                for type_index, y in enumerate((300, 308)):
                     lineage = "Epithelial" if type_index == 0 else "Immune"
-                    values = (
+                    values = [
                         sample_id,
                         source_sample,
                         donor_id,
@@ -338,18 +387,50 @@ def _write_annotations(path: Path, sample_ids: set[str] | None = None) -> None:
                         "Disease",
                         "TMA1",
                         "Run1",
-                        "Synthetic epithelial" if type_index == 0 else "Synthetic immune",
-                        lineage,
                         str(x * builder.SOURCE_MPP),
                         str(y * builder.SOURCE_MPP),
                         "16",
                         "4",
                         "0.5",
-                    )
+                    ]
+                    if include_raw_labels:
+                        values[9:9] = [
+                            "Synthetic epithelial" if type_index == 0 else "Synthetic immune",
+                            lineage,
+                        ]
                     handle.write("\t".join(values) + "\n")
 
 
-def _external_independence_contract(annotation_receipt_sha256: str) -> dict[str, object]:
+def _write_independent_predictions(path: Path, sample_ids: set[str]) -> int:
+    lines = ["\t".join(builder.ANNOTATION_PREDICTION_COLUMNS)]
+    rows = 0
+    for sample_id in sorted(sample_ids):
+        for role in ("reference", "evaluation"):
+            for type_index in range(2):
+                lineage = "Epithelial" if type_index == 0 else "Immune"
+                fine_type = "Independent epithelial" if type_index == 0 else "Independent immune"
+                lines.append(
+                    "\t".join(
+                        (
+                            sample_id,
+                            "%s_%d" % (role, type_index),
+                            lineage,
+                            fine_type,
+                            "0.95",
+                            "false",
+                            "[0.95,0.05]" if type_index == 0 else "[0.05,0.95]",
+                        )
+                    )
+                )
+                rows += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return rows
+
+
+def _external_independence_contract(
+    annotation_receipt_sha256: str,
+    training_label_receipt_sha256: str = "b" * 64,
+) -> dict[str, object]:
     annotation_ids = ["ANN1", "ANN2"]
     training_donors = ["external-donor-1"]
     return {
@@ -361,6 +442,11 @@ def _external_independence_contract(annotation_receipt_sha256: str) -> dict[str,
         "annotation_training_scope": "external_donors_only",
         "annotation_training_donor_ids": training_donors,
         "annotation_training_donor_ids_sha256": builder._canonical_sha256(training_donors),
+        "training_label_ontology_source": "external_target_disjoint_ontology",
+        "training_label_provenance_receipt_sha256": training_label_receipt_sha256,
+        "training_label_target_gene_overlap_count": 0,
+        "training_labels_establish_target_independence": True,
+        "annotation_quality_contract": builder.DEFAULT_ANNOTATION_QUALITY_CONTRACT,
         "locked_donors_used_for_training": False,
         "same_cohort_annotation": False,
         "cross_fitting_method": "not_applicable",
@@ -370,25 +456,169 @@ def _external_independence_contract(annotation_receipt_sha256: str) -> dict[str,
     }
 
 
+def _write_training_label_provenance_receipt(
+    path: Path,
+    ontology_source_path: Path,
+    contract: dict[str, object],
+    *,
+    target_gene_ids: tuple[str, ...] = ("G1", "G2"),
+) -> None:
+    fine_types = ("Independent epithelial", "Independent immune")
+    ontology_features = ("ONTOLOGY_MARKER_A", "ONTOLOGY_MARKER_B")
+    normalization = "log1p_library_size_10000_then_reference_zscore_v1"
+    ontology_source = {
+        "schema": builder.TRAINING_LABEL_ONTOLOGY_SOURCE_SCHEMA,
+        "evidence_kind": contract["evidence_kind"],
+        "training_label_ontology_source": contract["training_label_ontology_source"],
+        "ontology_id": "synthetic-target-disjoint-lung-ontology-v1",
+        "ontology_construction_method": "external expert labels using frozen disjoint markers",
+        "training_label_feature_normalization": normalization,
+        "ordered_fine_type_ids": list(fine_types),
+        "ordered_fine_type_ids_sha256": builder._canonical_sha256(list(fine_types)),
+        "broad_lineage_by_fine_type": {
+            "Independent epithelial": "Epithelial",
+            "Independent immune": "Immune",
+        },
+        "ordered_training_label_feature_ids": list(ontology_features),
+        "ordered_training_label_feature_ids_sha256": builder._canonical_sha256(
+            list(ontology_features)
+        ),
+        "source_donor_ids": contract["annotation_training_donor_ids"],
+        "source_donor_ids_sha256": contract["annotation_training_donor_ids_sha256"],
+        "created_without_locked_outcomes": True,
+    }
+    ontology_source_path.write_text(json.dumps(ontology_source, sort_keys=True), encoding="utf-8")
+    receipt = {
+        "schema": builder.TRAINING_LABEL_PROVENANCE_RECEIPT_SCHEMA,
+        "evidence_kind": contract["evidence_kind"],
+        "ontology_id": "synthetic-target-disjoint-lung-ontology-v1",
+        "training_label_ontology_source": contract["training_label_ontology_source"],
+        "ontology_source_artifact_sha256": _sha256(ontology_source_path),
+        "ontology_construction_method": "external expert labels using frozen disjoint markers",
+        "training_label_feature_normalization": normalization,
+        "ordered_fine_type_ids": list(fine_types),
+        "ordered_fine_type_ids_sha256": builder._canonical_sha256(list(fine_types)),
+        "broad_lineage_by_fine_type": {
+            "Independent epithelial": "Epithelial",
+            "Independent immune": "Immune",
+        },
+        "ordered_training_label_feature_ids": list(ontology_features),
+        "ordered_training_label_feature_ids_sha256": builder._canonical_sha256(
+            list(ontology_features)
+        ),
+        "ordered_target_gene_ids": list(target_gene_ids),
+        "ordered_target_gene_ids_sha256": builder._canonical_sha256(list(target_gene_ids)),
+        "training_label_target_gene_overlap_count": 0,
+        "training_labels_establish_target_independence": True,
+        "annotation_training_scope": contract["annotation_training_scope"],
+        "annotation_training_donor_ids": contract["annotation_training_donor_ids"],
+        "annotation_training_donor_ids_sha256": contract["annotation_training_donor_ids_sha256"],
+        "locked_donors_used_for_training": False,
+        "same_cohort_annotation": contract["same_cohort_annotation"],
+        "created_without_locked_outcomes": True,
+    }
+    path.write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
+
+
+def _write_annotation_validation_export(path: Path) -> int:
+    lines = ["\t".join(builder.ANNOTATION_VALIDATION_COLUMNS)]
+    donor = "external-validation-donor-1"
+    lines.extend(
+        (
+            f"{donor}\tcell-0\tIndependent epithelial\tIndependent epithelial"
+            "\t0.95\tfalse\t[0.95,0.05]",
+            f"{donor}\tcell-1\tIndependent immune\tIndependent immune\t0.95\tfalse\t[0.05,0.95]",
+        )
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return 2
+
+
 def _write_external_annotation_receipt(
     path: Path,
     predictions_path: Path,
+    validation_path: Path,
     contract: dict[str, object],
     *,
     prediction_rows: int,
+    prediction_donor_ids: tuple[str, ...],
+    validation_rows: int,
 ) -> None:
+    fine_types = ("Independent epithelial", "Independent immune")
+    quality = contract["annotation_quality_contract"]
     receipt = {
         "schema": builder.ANNOTATION_RECEIPT_SCHEMA,
         "evidence_kind": contract["evidence_kind"],
         "prediction_export_sha256": _sha256(predictions_path),
         "prediction_row_count": prediction_rows,
+        "prediction_nonabstained_row_count": prediction_rows,
         "prediction_columns": list(builder.ANNOTATION_PREDICTION_COLUMNS),
         "row_order": "filtered_annotation_export_order",
+        "validation_export_sha256": _sha256(validation_path),
+        "validation_row_count": validation_rows,
+        "validation_columns": list(builder.ANNOTATION_VALIDATION_COLUMNS),
+        "validation_row_order": "validation_donor_then_cell_id",
+        "prediction_donor_ids": list(prediction_donor_ids),
+        "prediction_donor_ids_sha256": builder._canonical_sha256(list(prediction_donor_ids)),
+        "ordered_fine_type_ids": list(fine_types),
+        "ordered_fine_type_ids_sha256": builder._canonical_sha256(list(fine_types)),
+        "broad_lineage_by_fine_type": {
+            "Independent epithelial": "Epithelial",
+            "Independent immune": "Immune",
+        },
+        "probability_vector_order": list(fine_types),
+        "probability_sum_tolerance": quality["probability_sum_tolerance"],
+        "abstention_policy": {
+            "method": quality["abstention_method"],
+            "confidence_threshold": quality["confidence_threshold"],
+            "abstain_label": quality["abstain_label"],
+            "tie_breaking": quality["tie_breaking"],
+        },
+        "performance_criteria": {
+            "minimum_fine_type_macro_f1": quality["minimum_fine_type_macro_f1"],
+            "calibration_metric": quality["calibration_metric"],
+            "calibration_binning": quality["calibration_binning"],
+            "calibration_bin_count": quality["calibration_bin_count"],
+            "maximum_calibration_error": quality["maximum_calibration_error"],
+            "minimum_major_class_sensitivity": quality["minimum_major_class_sensitivity"],
+            "minimum_prediction_coverage_fraction": quality["minimum_prediction_coverage_fraction"],
+        },
+        "performance_evaluation": {
+            "validation_design": "external_donor_held_out",
+            "validation_donor_ids": ["external-validation-donor-1"],
+            "validation_donor_ids_sha256": builder._canonical_sha256(
+                ["external-validation-donor-1"]
+            ),
+            "fine_type_macro_f1": 1.0,
+            "calibration_metric": "multiclass_expected_calibration_error",
+            "calibration_error": 0.05,
+            "major_class_sensitivity_by_fine_type": {
+                "Independent epithelial": 1.0,
+                "Independent immune": 1.0,
+            },
+            "prediction_coverage_fraction": 1.0,
+            "per_validation_donor_metrics": {
+                "external-validation-donor-1": {
+                    "fine_type_macro_f1": 1.0,
+                    "calibration_error": 0.05,
+                    "minimum_major_class_sensitivity": 1.0,
+                    "prediction_coverage_fraction": 1.0,
+                }
+            },
+        },
         "ordered_annotation_feature_ids": contract["ordered_annotation_feature_ids"],
         "ordered_annotation_feature_ids_sha256": contract["ordered_annotation_feature_ids_sha256"],
+        "annotation_feature_normalization": "log1p_library_size_10000_then_reference_zscore_v1",
         "annotation_training_scope": contract["annotation_training_scope"],
         "annotation_training_donor_ids": contract["annotation_training_donor_ids"],
         "annotation_training_donor_ids_sha256": contract["annotation_training_donor_ids_sha256"],
+        "training_label_ontology_source": contract["training_label_ontology_source"],
+        "training_label_provenance_receipt_sha256": contract[
+            "training_label_provenance_receipt_sha256"
+        ],
+        "training_label_target_gene_overlap_count": 0,
+        "training_labels_establish_target_independence": True,
+        "annotation_quality_contract": builder.DEFAULT_ANNOTATION_QUALITY_CONTRACT,
         "locked_donors_used_for_training": False,
         "same_cohort_annotation": False,
         "cross_fitting_method": "not_applicable",
@@ -400,37 +630,225 @@ def _write_external_annotation_receipt(
 def test_independent_annotation_artifacts_bind_actual_prediction_bytes(tmp_path: Path) -> None:
     predictions = tmp_path / "independent-labels.tsv"
     predictions.write_text(
-        "hest_id\tcell_id\tbroad_lineage\tfine_type\n"
-        "NCBI858\tcell-1\tEpithelial\tIndependent epithelial\n",
+        "\t".join(builder.ANNOTATION_PREDICTION_COLUMNS)
+        + "\n"
+        + "NCBI858\tcell-1\tEpithelial\tIndependent epithelial\t0.95\tfalse\t"
+        "[0.95,0.05]\n",
         encoding="utf-8",
     )
     receipt = tmp_path / "annotation-receipt.json"
+    training_receipt = tmp_path / "training-label-provenance.json"
+    ontology_source = tmp_path / "training-label-ontology-source.json"
+    ontology_source.write_text('{"ontology":"synthetic"}\n', encoding="utf-8")
+    validation_export = tmp_path / "annotation-validation.tsv"
+    validation_rows = _write_annotation_validation_export(validation_export)
     contract = _external_independence_contract("0" * 64)
+    _write_training_label_provenance_receipt(training_receipt, ontology_source, contract)
+    contract["training_label_provenance_receipt_sha256"] = _sha256(training_receipt)
     _write_external_annotation_receipt(
         receipt,
         predictions,
+        validation_export,
         contract,
         prediction_rows=1,
+        prediction_donor_ids=("VUILD91",),
+        validation_rows=validation_rows,
     )
     contract["annotation_receipt_sha256"] = _sha256(receipt)
 
     verified = builder._verify_independent_annotation_artifacts(
         receipt,
         predictions,
+        training_receipt,
+        ontology_source,
+        validation_export,
         contract,
         prediction_donor_ids=("VUILD91",),
+        target_gene_ids=("G1", "G2"),
     )
 
     assert verified.receipt_sha256 == _sha256(receipt)
     assert verified.predictions_sha256 == _sha256(predictions)
+    query_validated = json.loads(receipt.read_text(encoding="utf-8"))
+    query_validated["performance_evaluation"]["validation_donor_ids"] = ["VUILD91"]
+    query_validated["performance_evaluation"]["validation_donor_ids_sha256"] = (
+        builder._canonical_sha256(["VUILD91"])
+    )
+    query_validated["performance_evaluation"]["per_validation_donor_metrics"] = {
+        "VUILD91": query_validated["performance_evaluation"]["per_validation_donor_metrics"][
+            "external-validation-donor-1"
+        ]
+    }
+    with pytest.raises(ValueError, match="invalid donor scope"):
+        builder._verify_annotation_performance_receipt(
+            query_validated,
+            contract,
+            prediction_donor_ids=("VUILD91",),
+            fine_type_ids=("Independent epithelial", "Independent immune"),
+        )
+    original_ontology = ontology_source.read_bytes()
+    ontology_source.write_bytes(original_ontology + b"tamper")
+    with pytest.raises(ValueError, match="ontology source artifact differs"):
+        builder._verify_independent_annotation_artifacts(
+            receipt,
+            predictions,
+            training_receipt,
+            ontology_source,
+            validation_export,
+            contract,
+            prediction_donor_ids=("VUILD91",),
+            target_gene_ids=("G1", "G2"),
+        )
+    ontology_source.write_bytes(original_ontology)
+    original_training_receipt = training_receipt.read_bytes()
+    training_receipt.write_bytes(original_training_receipt + b" ")
+    with pytest.raises(ValueError, match="provenance receipt differs from the frozen"):
+        builder._verify_independent_annotation_artifacts(
+            receipt,
+            predictions,
+            training_receipt,
+            ontology_source,
+            validation_export,
+            contract,
+            prediction_donor_ids=("VUILD91",),
+            target_gene_ids=("G1", "G2"),
+        )
+    training_receipt.write_bytes(original_training_receipt)
     predictions.write_text(predictions.read_text(encoding="utf-8") + "tamper", encoding="utf-8")
     with pytest.raises(ValueError, match="predictions differ"):
         builder._verify_independent_annotation_artifacts(
             receipt,
             predictions,
+            training_receipt,
+            ontology_source,
+            validation_export,
             contract,
             prediction_donor_ids=("VUILD91",),
+            target_gene_ids=("G1", "G2"),
         )
+
+
+def test_annotation_quality_is_recomputed_from_held_out_rows(tmp_path: Path) -> None:
+    predictions = tmp_path / "independent-labels.tsv"
+    predictions.write_text(
+        "\t".join(builder.ANNOTATION_PREDICTION_COLUMNS)
+        + "\nNCBI858\tcell-1\tEpithelial\tIndependent epithelial"
+        "\t0.95\tfalse\t[0.95,0.05]\n",
+        encoding="utf-8",
+    )
+    validation = tmp_path / "annotation-validation.tsv"
+    validation_rows = _write_annotation_validation_export(validation)
+    ontology_source = tmp_path / "ontology.json"
+    ontology_source.write_text('{"ontology":"synthetic"}\n', encoding="utf-8")
+    training_receipt = tmp_path / "training-label-receipt.json"
+    annotation_receipt = tmp_path / "annotation-receipt.json"
+    contract = _external_independence_contract("0" * 64)
+    _write_training_label_provenance_receipt(training_receipt, ontology_source, contract)
+    contract["training_label_provenance_receipt_sha256"] = _sha256(training_receipt)
+    _write_external_annotation_receipt(
+        annotation_receipt,
+        predictions,
+        validation,
+        contract,
+        prediction_rows=1,
+        prediction_donor_ids=("VUILD91",),
+        validation_rows=validation_rows,
+    )
+    overstated = json.loads(annotation_receipt.read_text(encoding="utf-8"))
+    overstated["performance_evaluation"]["fine_type_macro_f1"] = 0.99
+    annotation_receipt.write_text(json.dumps(overstated, sort_keys=True), encoding="utf-8")
+    contract["annotation_receipt_sha256"] = _sha256(annotation_receipt)
+
+    with pytest.raises(ValueError, match="metrics differ from row-level validation"):
+        builder._verify_independent_annotation_artifacts(
+            annotation_receipt,
+            predictions,
+            training_receipt,
+            ontology_source,
+            validation,
+            contract,
+            prediction_donor_ids=("VUILD91",),
+            target_gene_ids=("G1", "G2"),
+        )
+
+
+def test_same_cohort_receipt_binds_lodo_validation_and_prediction_model_scope() -> None:
+    development = ("development-1", "development-2", "development-3")
+    validation_sha256 = "a" * 64
+    prediction_sha256 = "b" * 64
+
+    def receipt_for(
+        prediction_donors: tuple[str, ...],
+        method: str,
+        final_training_donors: tuple[str, ...],
+    ) -> dict[str, object]:
+        return {
+            "schema": builder.ANNOTATION_CROSS_FIT_SCHEMA,
+            "validation_export_sha256": validation_sha256,
+            "prediction_export_sha256": prediction_sha256,
+            "validation_folds": [
+                {
+                    "validation_donor_id": donor,
+                    "training_donor_ids": [
+                        training_donor for training_donor in development if training_donor != donor
+                    ],
+                }
+                for donor in development
+            ],
+            "prediction_assignment": {
+                "method": method,
+                "prediction_donor_ids": list(prediction_donors),
+                "final_model_training_donor_ids": list(final_training_donors),
+                "locked_donors_used_for_training": False,
+                "created_without_locked_outcomes": True,
+            },
+        }
+
+    def verify(receipt: dict[str, object], prediction_donors: tuple[str, ...]) -> None:
+        contract = {
+            "same_cohort_annotation": True,
+            "annotation_training_donor_ids": list(development),
+            "cross_fitting_receipt_sha256": builder._canonical_sha256(receipt),
+        }
+        builder._verify_cross_fitting_receipt(
+            receipt,
+            contract,
+            prediction_donors,
+            validation_export_sha256=validation_sha256,
+            prediction_export_sha256=prediction_sha256,
+        )
+
+    development_receipt = receipt_for(
+        development,
+        "leave_one_development_donor_out_validation_models",
+        (),
+    )
+    verify(development_receipt, development)
+
+    locked = ("locked-1", "locked-2")
+    confirmatory_receipt = receipt_for(
+        locked,
+        "final_all_development_donors_model",
+        development,
+    )
+    verify(confirmatory_receipt, locked)
+
+    mixed_active_donors = development + locked
+    mixed_receipt = receipt_for(
+        mixed_active_donors,
+        "development_lodo_plus_final_all_development_donors_model",
+        development,
+    )
+    verify(mixed_receipt, mixed_active_donors)
+
+    incomplete = receipt_for(
+        locked,
+        "final_all_development_donors_model",
+        development,
+    )
+    incomplete["validation_folds"] = incomplete["validation_folds"][:-1]
+    with pytest.raises(ValueError, match="every development donor"):
+        verify(incomplete, locked)
 
 
 def test_annotation_reader_consumes_independent_labels_instead_of_final_ct(tmp_path: Path) -> None:
@@ -442,17 +860,34 @@ def test_annotation_reader_consumes_independent_labels_instead_of_final_ct(tmp_p
     for role in ("reference", "evaluation"):
         lines.extend(
             (
-                f"{sample_id}\t{role}_0\tEpithelial\tIndependent epithelial",
-                f"{sample_id}\t{role}_1\tImmune\tIndependent immune",
+                f"{sample_id}\t{role}_0\tEpithelial\tIndependent epithelial"
+                "\t0.95\tfalse\t[0.95,0.05]",
+                f"{sample_id}\t{role}_1\tImmune\tIndependent immune\t0.95\tfalse\t[0.05,0.95]",
             )
         )
     predictions.write_text("\n".join(lines) + "\n", encoding="utf-8")
     artifacts = builder.IndependentAnnotationArtifacts(
         receipt_path=tmp_path / "unused-receipt.json",
         receipt_sha256="1" * 64,
+        training_label_receipt_path=tmp_path / "unused-training-receipt.json",
+        training_label_receipt_sha256="2" * 64,
+        training_label_ontology_source_path=tmp_path / "unused-ontology-source.json",
+        training_label_ontology_source_sha256="3" * 64,
         predictions_path=predictions,
         predictions_sha256=_sha256(predictions),
+        validation_export_path=tmp_path / "unused-validation.tsv",
+        validation_export_sha256="4" * 64,
         prediction_row_count=4,
+        prediction_nonabstained_row_count=4,
+        prediction_donor_ids=("VUILD91",),
+        fine_type_ids=("Independent epithelial", "Independent immune"),
+        broad_lineage_by_fine_type={
+            "Independent epithelial": "Epithelial",
+            "Independent immune": "Immune",
+        },
+        confidence_threshold=0.8,
+        probability_sum_tolerance=1.0e-8,
+        prediction_coverage_fraction=1.0,
     )
 
     annotations = builder._read_annotations(
@@ -467,6 +902,18 @@ def test_annotation_reader_consumes_independent_labels_instead_of_final_ct(tmp_p
         "Independent epithelial",
         "Independent immune",
     }
+    predictions.write_text(
+        "\n".join(lines).replace("[0.95,0.05]", "[0.60,0.50]") + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid or unnormalized"):
+        builder._read_annotations(
+            metadata,
+            allowed_sample_ids=(sample_id,),
+            independent_artifacts=artifacts,
+            expected_row_count=4,
+            strict_sample_scope=True,
+        )
 
 
 def test_development_annotation_export_contract_is_required_and_scope_bound() -> None:
@@ -482,6 +929,27 @@ def test_development_annotation_export_contract_is_required_and_scope_bound() ->
     }
     with pytest.raises(ValueError, match="receipt is malformed"):
         builder._parse_development_annotation_export(declaration, ("NCBI858",))
+
+
+def test_h_meas_rejects_pending_or_raw_annotation_labels(tmp_path: Path) -> None:
+    pending = _protocol(
+        [],
+        list(builder.DEVELOPMENT_DONORS),
+        list(builder.LOCKED_TEST_DONORS),
+    )["label_target_independence"]
+
+    with pytest.raises(ValueError, match="requires non-pending independent label provenance"):
+        builder._require_h_meas_independent_annotation_contract(pending, ("G1", "G2"))
+
+    raw_metadata = tmp_path / "development-only.tsv.gz"
+    _write_annotations(raw_metadata, {"NCBI858"})
+    with pytest.raises(ValueError, match="require an independent prediction export"):
+        builder._read_annotations(
+            raw_metadata,
+            allowed_sample_ids=("NCBI858",),
+            expected_row_count=4,
+            strict_sample_scope=True,
+        )
 
 
 def test_wkb_centroid_and_spatial_pool_are_deterministic() -> None:
@@ -554,7 +1022,11 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         str(sample["sample_id"]) for sample in samples if sample["donor_id"] in development
     ]
     development_annotation_path = tmp_path / "GSE250346" / "annotations.development-only.tsv.gz"
-    _write_annotations(development_annotation_path, set(development_sample_ids))
+    _write_annotations(
+        development_annotation_path,
+        set(development_sample_ids),
+        include_raw_labels=False,
+    )
     protocol["measurement_development_annotation_export"] = {
         "path": str(development_annotation_path.relative_to(tmp_path)),
         "sha256": _sha256(development_annotation_path),
@@ -563,6 +1035,35 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         "sample_ids_sha256": builder._canonical_sha256(development_sample_ids),
         "source_annotation_sha256": builder.ANNOTATION_SHA256,
     }
+    annotation_predictions_path = tmp_path / "development-independent-labels.tsv"
+    prediction_rows = _write_independent_predictions(
+        annotation_predictions_path,
+        set(development_sample_ids),
+    )
+    annotation_receipt_path = tmp_path / "development-annotation-receipt.json"
+    training_label_receipt_path = tmp_path / "training-label-provenance.json"
+    ontology_source_path = tmp_path / "training-label-ontology-source.json"
+    ontology_source_path.write_text('{"ontology":"synthetic"}\n', encoding="utf-8")
+    validation_export_path = tmp_path / "annotation-validation.tsv"
+    validation_rows = _write_annotation_validation_export(validation_export_path)
+    resolved_independence = _external_independence_contract("0" * 64)
+    _write_training_label_provenance_receipt(
+        training_label_receipt_path, ontology_source_path, resolved_independence
+    )
+    resolved_independence["training_label_provenance_receipt_sha256"] = _sha256(
+        training_label_receipt_path
+    )
+    _write_external_annotation_receipt(
+        annotation_receipt_path,
+        annotation_predictions_path,
+        validation_export_path,
+        resolved_independence,
+        prediction_rows=prediction_rows,
+        prediction_donor_ids=tuple(sorted(development)),
+        validation_rows=validation_rows,
+    )
+    resolved_independence["annotation_receipt_sha256"] = _sha256(annotation_receipt_path)
+    protocol["label_target_independence"] = resolved_independence
     protocol_path = tmp_path / "protocol.json"
     protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
     draft = json.loads(
@@ -575,9 +1076,6 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
     )
     draft["analysis_plan_sha256"] = _sha256(protocol_path)
     draft["candidate_target_gene_panel_sha256"] = builder._canonical_sha256(["G1", "G2"])
-    draft["decision_thresholds"]["maximum_crop_padding_p95"] = 0.99
-    draft["decision_thresholds"]["mostly_padded_cutoff"] = 0.99
-    draft["decision_thresholds"]["maximum_mostly_padded_fraction"] = 1.0
     draft["decision_thresholds"]["required_opposite_pool_guard_um"] = protocol[
         "opposite_pool_guard_um"
     ]
@@ -585,9 +1083,9 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
     draft["type_marker_panel_sha256"] = marker_sha256
     draft["label_target_independence"] = {
         **protocol["label_target_independence"],
-        "ordered_target_gene_ids": [],
-        "ordered_target_gene_ids_sha256": None,
-        "annotation_target_overlap_count": None,
+        "ordered_target_gene_ids": ["G1", "G2"],
+        "ordered_target_gene_ids_sha256": builder._canonical_sha256(["G1", "G2"]),
+        "annotation_target_overlap_count": 0,
     }
     locked_manifest = freeze_manifest_content(
         draft,
@@ -617,6 +1115,11 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         device="cpu",
         batch_size=3,
         encoder=_FixtureEncoder(encoder_manifest.sha256),
+        annotation_receipt_path=annotation_receipt_path,
+        annotation_predictions_path=annotation_predictions_path,
+        training_label_provenance_receipt_path=training_label_receipt_path,
+        training_label_ontology_source_path=ontology_source_path,
+        annotation_validation_export_path=validation_export_path,
     )
     with np.load(output, allow_pickle=False) as archive:
         assert str(archive["schema_version"]) == builder.SOURCE_SCHEMA
@@ -759,15 +1262,33 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         assert str(archive["label_target_independence_sha256"]) == builder._canonical_sha256(
             source_independence
         )
-        assert archive["annotation_feature_ids"].size == 0
+        assert tuple(archive["annotation_feature_ids"].astype(str)) == ("ANN1", "ANN2")
+        assert str(archive["label_source_kind"]) == "independent_annotation_prediction_export"
+        assert str(archive["annotation_receipt_sha256"]) == _sha256(annotation_receipt_path)
+        assert str(archive["annotation_receipt_path"]) == str(annotation_receipt_path.resolve())
+        assert str(archive["annotation_prediction_export_sha256"]) == _sha256(
+            annotation_predictions_path
+        )
+        assert str(archive["annotation_prediction_export_path"]) == str(
+            annotation_predictions_path.resolve()
+        )
+        assert str(archive["training_label_provenance_receipt_sha256"]) == _sha256(
+            training_label_receipt_path
+        )
+        assert str(archive["training_label_ontology_source_sha256"]) == _sha256(
+            ontology_source_path
+        )
+        assert str(archive["annotation_validation_export_sha256"]) == _sha256(
+            validation_export_path
+        )
         assert set(archive["disease_estimands"].astype(str)) == {
             "disease_inclusive",
             "disease_adjusted",
         }
         assert set(archive["type_labels"].tolist()) == {0, 1}
         assert set(archive["type_names"].astype(str)) == {
-            "Synthetic epithelial",
-            "Synthetic immune",
+            "Independent epithelial",
+            "Independent immune",
         }
         assert set(archive["broad_type_labels"].tolist()) == {1, 2}
         assert tuple(archive["broad_type_names"].astype(str)) == builder.TYPE_NAMES
@@ -846,6 +1367,10 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
             "transcript_qv_summary",
             "target_qc_pass",
             "registration_qc_pass",
+            "registration_quality_scores",
+            "registration_quality_strata",
+            "registration_quality_cutoffs_json",
+            "registration_quality_definition",
         }
         assert required_row_fields <= set(archive.files)
         required_matrices = {
@@ -872,7 +1397,7 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
     assert plan["locked_donor_outcomes_materialized"] is False
     assert plan["encoder_name"] == encoder_manifest.repository
     assert plan["target_construction"] == "nucleus_overlapping_xenium_transcripts"
-    assert plan["type_names"] == ["Synthetic epithelial", "Synthetic immune"]
+    assert plan["type_names"] == ["Independent epithelial", "Independent immune"]
     assert plan["broad_type_names"] == list(builder.TYPE_NAMES)
     assert len(plan["frozen_feature_names"]) == encoder_manifest.feature_width
     assert plan["coordinate_feature_names"] == list(builder.SPATIAL_FEATURE_NAMES)
@@ -893,6 +1418,25 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
     assert plan["cell_intrinsic_hypothesis_tested"] is False
     assert plan["fine_type_marker_panel_sha256"] == builder._canonical_sha256(["TYPE_FINE"])
     assert plan["label_target_independence"] == draft["label_target_independence"]
+    assert plan["label_source_kind"] == "independent_annotation_prediction_export"
+    assert plan["annotation_receipt_sha256"] == _sha256(annotation_receipt_path)
+    assert plan["annotation_receipt_path"] == str(annotation_receipt_path.resolve())
+    assert plan["annotation_prediction_export_sha256"] == _sha256(annotation_predictions_path)
+    assert plan["annotation_prediction_export_path"] == str(annotation_predictions_path.resolve())
+    assert plan["training_label_provenance_receipt_sha256"] == _sha256(training_label_receipt_path)
+    assert plan["training_label_provenance_receipt_path"] == str(
+        training_label_receipt_path.resolve()
+    )
+    assert plan["training_label_ontology_source_sha256"] == _sha256(ontology_source_path)
+    assert plan["training_label_ontology_source_path"] == str(ontology_source_path.resolve())
+    assert plan["annotation_validation_export_sha256"] == _sha256(validation_export_path)
+    assert plan["annotation_validation_export_path"] == str(validation_export_path.resolve())
+    assert plan["registration_quality"]["definition"] == builder.REGISTRATION_QUALITY_DEFINITION
+    assert plan["registration_quality"]["cutoffs_fraction_of_limit"] == {
+        "best": 0.25,
+        "intermediate": 0.6,
+        "near_threshold": 1.0,
+    }
     assert plan["reference_splits"] == {
         "primary_split_id": "primary",
         "split_ids": ["primary", "reference_hash_fold_0", "reference_hash_fold_1"],
@@ -926,6 +1470,13 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         "label_target_independence_sha256"
         in source_schema["properties"]["identities"]["items"]["enum"]
     )
+    row_vocabulary = source_schema["properties"]["row_fields"]["items"]["enum"]
+    identity_vocabulary = source_schema["properties"]["identities"]["items"]["enum"]
+    assert {"registration_quality_scores", "registration_quality_strata"} <= set(row_vocabulary)
+    assert {
+        "registration_quality_cutoffs_json",
+        "registration_quality_definition",
+    } <= set(identity_vocabulary)
 
 
 def test_protocol_and_input_hashes_fail_closed(tmp_path: Path) -> None:
@@ -951,6 +1502,18 @@ def test_protocol_and_input_hashes_fail_closed(tmp_path: Path) -> None:
     encoder_manifest = builder._load_encoder_manifest(ENCODER_MANIFEST_PATH)
     crop_manifest = builder._load_crop_manifest(CROP_MANIFEST_PATH)
     builder._validate_protocol(protocol, encoder_manifest, crop_manifest)
+    measurement_drift = json.loads(json.dumps(protocol))
+    measurement_drift["frozen_h_meas_shared_measurement_thresholds"][
+        "maximum_annotation_cell_p95_um"
+    ] = 12.1
+    with pytest.raises(ValueError, match="frozen H-MEAS measurement contract has drifted"):
+        builder._validate_protocol(measurement_drift, encoder_manifest, crop_manifest)
+    endpoint_drift = json.loads(json.dumps(protocol))
+    endpoint_drift["confirmatory_primary_endpoint"]["donor_section_type_macro"][
+        "minimum_effect"
+    ] = 0.049
+    with pytest.raises(ValueError, match="confirmatory primary endpoint has drifted"):
+        builder._validate_protocol(endpoint_drift, encoder_manifest, crop_manifest)
     with pytest.raises(ValueError, match="dataset_revision differs"):
         builder._validate_protocol(
             {**protocol, "dataset_revision": "main"}, encoder_manifest, crop_manifest
@@ -981,6 +1544,11 @@ def test_protocol_and_input_hashes_fail_closed(tmp_path: Path) -> None:
         "annotation_training_scope": "development_donors_only",
         "annotation_training_donor_ids": development,
         "annotation_training_donor_ids_sha256": builder._canonical_sha256(development),
+        "training_label_ontology_source": "de_novo_gene_disjoint_development_ontology",
+        "training_label_provenance_receipt_sha256": "b" * 64,
+        "training_label_target_gene_overlap_count": 0,
+        "training_labels_establish_target_independence": True,
+        "annotation_quality_contract": builder.DEFAULT_ANNOTATION_QUALITY_CONTRACT,
         "locked_donors_used_for_training": False,
         "same_cohort_annotation": True,
         "cross_fitting_method": "pending",
@@ -1000,6 +1568,11 @@ def test_protocol_and_input_hashes_fail_closed(tmp_path: Path) -> None:
         "annotation_training_scope": "orthogonal_no_rna_training",
         "annotation_training_donor_ids": [],
         "annotation_training_donor_ids_sha256": None,
+        "training_label_ontology_source": "de_novo_gene_disjoint_development_ontology",
+        "training_label_provenance_receipt_sha256": "b" * 64,
+        "training_label_target_gene_overlap_count": 0,
+        "training_labels_establish_target_independence": True,
+        "annotation_quality_contract": builder.DEFAULT_ANNOTATION_QUALITY_CONTRACT,
         "locked_donors_used_for_training": False,
         "same_cohort_annotation": False,
         "cross_fitting_method": "not_applicable",

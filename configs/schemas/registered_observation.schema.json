@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["schema", "row_fields", "matrices", "identities"],
   "properties": {
-    "schema": {"const": "heir.registered_observations.v4"},
+    "schema": {"const": "heir.registered_observations.v5"},
     "row_fields": {
       "type": "array", "uniqueItems": true,
       "items": {"enum": [
@@ -15,7 +15,8 @@
         "cell_centroid_x_um", "cell_centroid_y_um", "nucleus_centroid_x_um",
         "nucleus_centroid_y_um", "annotation_centroid_x_um", "annotation_centroid_y_um",
         "registration_distance_um", "cell_area_um2", "nucleus_area_um2", "library_size",
-        "detected_target_genes", "transcript_qv_summary", "target_qc_pass", "registration_qc_pass"
+        "detected_target_genes", "transcript_qv_summary", "target_qc_pass", "registration_qc_pass",
+        "registration_quality_scores", "registration_quality_strata"
       ]}
     },
     "matrices": {
@@ -39,6 +40,7 @@
         "crop_ids", "crop_roles", "crop_comparison_families", "crop_effective_mpp",
         "crop_mask_modes", "crop_fill_modes", "label_target_independence_json",
         "label_target_independence_sha256", "annotation_feature_ids",
+        "registration_quality_cutoffs_json", "registration_quality_definition",
         "reference_split_ids", "fine_type_marker_panel_sha256",
         "study_stage", "study_manifest_sha256", "source_scope",
         "locked_donor_outcomes_materialized",

@@ -1,7 +1,7 @@
 {
   "schema": "heir.hescape_regional_protocol.v3",
   "scientific_scope": "regional_pseudospot_exploratory",
-  "analysis_scope": "development_donors_only_hest_lock_unopened",
+  "analysis_scope": "development_donors_only_reserved_outcomes_previously_materialized",
   "authorization_ceiling": "regional_pseudospot_only_no_cell_or_nucleus_claims",
   "authorizes_nucleus_claim": false,
   "dataset_repo": "Peng-AI/hescape-pyarrow",

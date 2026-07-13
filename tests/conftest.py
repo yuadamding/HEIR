@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 from typing import Mapping
+from unittest.mock import patch
 
 import pytest
 
@@ -12,21 +13,25 @@ from heir.evaluation.morphology_calibration import (
     compile_actual_gate_calibration_receipt,
 )
 from heir.evaluation.morphology_calibration_runner import (
+    AUTHORIZING_DGP_EFFECT_SPEC,
     synthetic_completed_confirmatory_design_binding,
 )
 from heir.evaluation.power import (
     ACTUAL_GATE_ENTRYPOINT,
+    ACTUAL_GATE_REPORT_SCHEMA,
     BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS,
-    BOUNDARY_EXPECTED_SOURCE_CONCLUSION,
-    CALIBRATION_DGP_SPEC_SCHEMA,
     CALIBRATION_ENGINE,
     CALIBRATION_EVIDENCE_SCHEMA,
     CALIBRATION_GENERATOR_VERSION,
     CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES,
     CALIBRATION_RUN_CONTRACT_SCHEMA,
+    CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA,
+    CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT,
     GLOBAL_NULL_CONDITION,
     REQUIRED_CALIBRATION_SCENARIOS,
+    REQUIRED_COMPLETE_GATE_CHECKS,
     REQUIRED_HYPOTHESIS_DECISIONS,
+    calibration_trial_seed,
     canonical_sha256,
     current_calibration_executable_provenance,
 )
@@ -43,6 +48,7 @@ def exact_gate_settings(
     calibration_configuration: Mapping[str, object],
 ) -> Mapping[str, object]:
     settings = copy.deepcopy(calibration_configuration["exact_gate_settings"])
+    settings["complete_gate_check_ids"] = list(REQUIRED_COMPLETE_GATE_CHECKS)
     settings["confirmatory_design_binding"] = synthetic_completed_confirmatory_design_binding()
     return settings
 
@@ -58,20 +64,6 @@ def calibration_thresholds(
 def calibration_evidence(
     exact_gate_settings: Mapping[str, object],
 ) -> Mapping[str, object]:
-    condition_definitions = {
-        GLOBAL_NULL_CONDITION: {
-            "construction": "synthetic_test_global_null",
-            "minimum_effect": 0.0,
-        },
-        **{
-            condition_id: {
-                "decision_id": decision_id,
-                "construction": "synthetic_test_quantitative_boundary",
-                "minimum_effect": 0.05,
-            }
-            for decision_id, condition_id in BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS.items()
-        },
-    }
     condition_ids = [
         GLOBAL_NULL_CONDITION,
         *(
@@ -79,38 +71,9 @@ def calibration_evidence(
             for decision_id in REQUIRED_HYPOTHESIS_DECISIONS
         ),
     ]
-    decision_truth = {
-        GLOBAL_NULL_CONDITION: {decision_id: False for decision_id in REQUIRED_HYPOTHESIS_DECISIONS}
-    }
-    for decision_id, condition_id in BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS.items():
-        decision_truth[condition_id] = {
-            candidate: candidate in {"G2_local_context", decision_id}
-            for candidate in REQUIRED_HYPOTHESIS_DECISIONS
-        }
-    expected_conclusions = {
-        GLOBAL_NULL_CONDITION: "no_morphology_specific_information",
-        **{
-            condition_id: BOUNDARY_EXPECTED_SOURCE_CONCLUSION[decision_id]
-            for decision_id, condition_id in BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS.items()
-        },
-    }
-    dgp = {
-        "schema": CALIBRATION_DGP_SPEC_SCHEMA,
-        "authorizing_boundary_calibration": True,
-        "null_condition_id": GLOBAL_NULL_CONDITION,
-        "alternative_condition_id": None,
-        "boundary_condition_ids_by_hypothesis": dict(BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS),
-        "decision_truth_by_condition": decision_truth,
-        "effect_definition": {
-            "schema": "heir.synthetic_test_boundary.v1",
-            "condition_definitions": condition_definitions,
-        },
-        "expected_source_conclusion_by_condition": expected_conclusions,
-        "hypothesis_specific_boundary_sha256": {
-            decision_id: canonical_sha256(condition_definitions[condition_id])
-            for decision_id, condition_id in BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS.items()
-        },
-    }
+    dgp = copy.deepcopy(AUTHORIZING_DGP_EFFECT_SPEC)
+    decision_truth = dgp["decision_truth_by_condition"]
+    expected_conclusions = dgp["expected_source_conclusion_by_condition"]
     run_contract = {
         "schema": CALIBRATION_RUN_CONTRACT_SCHEMA,
         "generator_version": CALIBRATION_GENERATOR_VERSION,
@@ -133,13 +96,153 @@ def calibration_evidence(
         "max_cpu_threads": 1,
         "maximum_process_rss_gib": 16.0,
         "maximum_address_space_gib": 64.0,
+        "trial_report_manifest_schema": CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA,
+        "trial_report_storage_layout": CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT,
     }
+    seed_rows = [
+        {
+            "seed": seed,
+            "required_unique_permutations": 333,
+            "generated_unique_permutations": 333,
+        }
+        for seed in (17, 29, 41)
+    ]
+    settings_sha256 = canonical_sha256(exact_gate_settings)
+    run_contract_sha256 = canonical_sha256(run_contract)
+    report_templates_by_id = {}
+    template_ids_by_condition = {}
+    for condition in condition_ids:
+        truth = decision_truth[condition]
+        expected_conclusion = expected_conclusions[condition]
+
+        def report(*, success: bool) -> Mapping[str, object]:
+            component_pass = bool(success and condition != GLOBAL_NULL_CONDITION)
+            return {
+                "schema_version": ACTUAL_GATE_REPORT_SCHEMA,
+                "component_pass": component_pass,
+                "final_inference": True,
+                "synthetic_calibration_execution": True,
+                "scientific_authorization_suppressed": True,
+                "calibration_exact_gate_settings_sha256": settings_sha256,
+                "calibration_exact_gate_settings": exact_gate_settings,
+                "checks": {name: component_pass for name in REQUIRED_COMPLETE_GATE_CHECKS},
+                "hypothesis_decisions": {
+                    name: {
+                        "tested": True,
+                        "pass": bool(success and truth[name]),
+                        **(
+                            {
+                                "registration_quality_sensitivity_pass": bool(
+                                    success and truth[name]
+                                ),
+                                "registration_quality_sensitivity": {"synthetic_fixture": True},
+                            }
+                            if name in {"G3_nucleus_intrinsic", "G3_cell_intrinsic"}
+                            else (
+                                {
+                                    (
+                                        "incremental_intrinsic_registration_quality_"
+                                        "sensitivity_pass"
+                                    ): bool(success and truth[name]),
+                                    "incremental_intrinsic_registration_quality_sensitivity": {
+                                        "synthetic_fixture": True
+                                    },
+                                }
+                                if name == "G3_mixed_intrinsic_context"
+                                else {}
+                            )
+                        ),
+                    }
+                    for name in REQUIRED_HYPOTHESIS_DECISIONS
+                },
+                "morphology_source_conclusion": (
+                    expected_conclusion
+                    if success or condition == GLOBAL_NULL_CONDITION
+                    else "inconclusive"
+                ),
+                "permutation_control": {
+                    "total_permutations": 999,
+                    "seeds": seed_rows,
+                },
+                "spatial_block_permutation_control": {
+                    "total_permutations": 999,
+                    "seeds": seed_rows,
+                },
+                "authorizes_full_heir": False,
+                "authorizes_population_inference": False,
+                "authorizes_external_generalization": False,
+                "authorizes_validated_regional_association": False,
+                "authorizes_nucleus_intrinsic_claim": False,
+                "authorizes_cell_intrinsic_claim": False,
+                "synthetic_fixture_condition": condition,
+                "synthetic_fixture_success": success,
+            }
+
+        successful = report(success=True)
+        failed = report(success=False)
+        successful_template_id = canonical_sha256(
+            {"condition": condition, "outcome": "success", "report": successful}
+        )
+        failed_template_id = canonical_sha256(
+            {"condition": condition, "outcome": "failure", "report": failed}
+        )
+        report_templates_by_id[successful_template_id] = successful
+        if condition != GLOBAL_NULL_CONDITION:
+            report_templates_by_id[failed_template_id] = failed
+        template_ids_by_condition[condition] = (
+            [successful_template_id]
+            if condition == GLOBAL_NULL_CONDITION
+            else [successful_template_id, failed_template_id]
+        )
+
     scenario_results = {}
+    ordered_report_hashes = {}
+    template_runs = {}
     for scenario in REQUIRED_SCENARIO_FAMILIES:
         scenario_results[scenario] = {}
+        ordered_report_hashes[scenario] = {}
+        template_runs[scenario] = {}
         for condition in condition_ids:
             passes = 0 if condition == GLOBAL_NULL_CONDITION else 900
             expected_conclusion = expected_conclusions[condition]
+            template_ids = template_ids_by_condition[condition]
+            template_id_by_trial = (
+                [template_ids[0]] * 1000
+                if condition == GLOBAL_NULL_CONDITION
+                else [template_ids[0]] * 900 + [template_ids[1]] * 100
+            )
+            template_runs[scenario][condition] = (
+                [{"start": 0, "stop": 1000, "template_id": template_ids[0]}]
+                if condition == GLOBAL_NULL_CONDITION
+                else [
+                    {"start": 0, "stop": 900, "template_id": template_ids[0]},
+                    {"start": 900, "stop": 1000, "template_id": template_ids[1]},
+                ]
+            )
+            report_hashes = []
+            for trial_index, template_id in enumerate(template_id_by_trial):
+                identity = {
+                    "scenario": scenario,
+                    "condition": condition,
+                    "trial_index": trial_index,
+                    "trial_seed": calibration_trial_seed(
+                        1729,
+                        scenario,
+                        condition,
+                        trial_index,
+                        ordered_conditions=condition_ids,
+                    ),
+                }
+                report_hashes.append(
+                    canonical_sha256(
+                        {
+                            **report_templates_by_id[template_id],
+                            "calibration_trial_identity": identity,
+                            "calibration_run_contract_sha256": run_contract_sha256,
+                        }
+                    )
+                )
+            ordered_report_hashes[scenario][condition] = report_hashes
             conclusion_counts = {name: 0 for name in CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES}
             conclusion_counts[expected_conclusion] = 1000 if passes == 0 else 900
             if passes:
@@ -151,14 +254,14 @@ def calibration_evidence(
                     decision_id: (900 if decision_truth[condition][decision_id] else 0)
                     for decision_id in REQUIRED_HYPOTHESIS_DECISIONS
                 },
+                "any_false_hypothesis_decision_passes": 0,
                 "morphology_source_conclusion_counts": conclusion_counts,
                 "actual_gate_executions": 1000,
                 "trial_report_set_sha256": canonical_sha256(
-                    {
-                        "scenario": scenario,
-                        "condition": condition,
-                        "synthetic_fixture": True,
-                    }
+                    {"ordered_actual_gate_report_sha256": report_hashes}
+                ),
+                "trial_realization_set_sha256": canonical_sha256(
+                    {"ordered_trial_realization_sha256": report_hashes}
                 ),
                 "all_trial_reports_use_exact_settings": True,
                 "all_trial_reports_include_required_checks": True,
@@ -169,13 +272,30 @@ def calibration_evidence(
                     "spatial_block_seed_counts": {"17": 333, "29": 333, "41": 333},
                 },
             }
+    manifest_core = {
+        "schema": CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA,
+        "storage": {
+            "kind": "non_authorizing_test_fixture_templates",
+            "layout": CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT,
+            "report_templates_by_id": report_templates_by_id,
+            "template_runs_by_scenario_condition": template_runs,
+        },
+        "ordered_report_sha256s_by_scenario_condition": ordered_report_hashes,
+        "report_reference_count": (len(REQUIRED_SCENARIO_FAMILIES) * len(condition_ids) * 1000),
+        "unique_report_count": (len(REQUIRED_SCENARIO_FAMILIES) * len(condition_ids) * 1000),
+    }
+    trial_report_manifest = {
+        **manifest_core,
+        "manifest_content_sha256": canonical_sha256(manifest_core),
+    }
     return {
         "schema": CALIBRATION_EVIDENCE_SCHEMA,
         "engine": CALIBRATION_ENGINE,
         "actual_gate_entrypoint": ACTUAL_GATE_ENTRYPOINT,
         "exact_gate_settings_sha256": canonical_sha256(exact_gate_settings),
         "run_contract": run_contract,
-        "run_contract_sha256": canonical_sha256(run_contract),
+        "run_contract_sha256": run_contract_sha256,
+        "trial_report_manifest": trial_report_manifest,
         "scenario_results": scenario_results,
     }
 
@@ -186,11 +306,18 @@ def calibration_receipt(
     calibration_thresholds: Mapping[str, object],
     calibration_evidence: Mapping[str, object],
 ) -> Mapping[str, object]:
-    return compile_actual_gate_calibration_receipt(
-        exact_gate_settings,
-        calibration_thresholds,
-        calibration_evidence,
-    )
+    # Aggregate calibration-math fixture only.  Production compilation rejects
+    # its compact templates; preserved file-backed actual-gate attestation is
+    # exercised separately by the runner tests.
+    with patch(
+        "heir.evaluation.morphology_calibration._recompute_evidence_from_trial_manifest",
+        return_value=calibration_evidence["scenario_results"],
+    ):
+        return compile_actual_gate_calibration_receipt(
+            exact_gate_settings,
+            calibration_thresholds,
+            calibration_evidence,
+        )
 
 
 @pytest.fixture

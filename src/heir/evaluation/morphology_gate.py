@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
+import json
+from dataclasses import fields, replace
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -16,11 +17,13 @@ from .hierarchical_metrics import (
     donor_bootstrap,
     donor_dominance,
     donor_section_type_coverage,
+    donor_section_type_macro_r2,
     donor_type_coverage,
     exact_paired_randomization,
     group_stratification,
     leave_one_donor_out,
     macro_error_reduction,
+    macro_r2,
     macro_reconstruction_r2,
     paired_donor_effects,
     within_group_donor_type_r2,
@@ -60,6 +63,154 @@ REGIONAL_UNI2H_COMPOSITION_FEATURES = (
     "composition_stromal",
     "composition_endothelial",
 )
+SECTION_BALANCED_AGGREGATION = (
+    "equal_types_within_section_then_equal_sections_within_donor_then_equal_donors"
+)
+REGISTRATION_QUALITY_BANDS = ("best", "intermediate", "near_threshold")
+
+
+def morphology_artifact_content_sha256(artifact: MorphologyRidgeDatasetArtifact) -> str:
+    """Hash every artifact field with explicit ndarray dtype/shape framing."""
+
+    hasher = hashlib.sha256()
+
+    def update(value: object) -> None:
+        if isinstance(value, np.ndarray):
+            contiguous = np.ascontiguousarray(value)
+            hasher.update(b"array\0")
+            hasher.update(contiguous.dtype.str.encode("ascii"))
+            hasher.update(b"\0")
+            hasher.update(json.dumps(contiguous.shape).encode("ascii"))
+            hasher.update(b"\0")
+            hasher.update(contiguous.tobytes(order="C"))
+        elif isinstance(value, Mapping):
+            hasher.update(b"mapping\0")
+            for key in sorted(value, key=str):
+                update(str(key))
+                update(value[key])
+        elif isinstance(value, (tuple, list)):
+            hasher.update(b"sequence\0")
+            hasher.update(str(len(value)).encode("ascii"))
+            hasher.update(b"\0")
+            for item in value:
+                update(item)
+        else:
+            hasher.update(b"scalar\0")
+            hasher.update(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            hasher.update(b"\0")
+
+    for field in fields(artifact):
+        update(field.name)
+        update(getattr(artifact, field.name))
+    return hasher.hexdigest()
+
+
+def _g2_section_balanced_companion(
+    truth: np.ndarray,
+    prediction: np.ndarray,
+    donors: np.ndarray,
+    sections: np.ndarray,
+    labels: np.ndarray,
+    *,
+    minimum_support: int,
+    minimum_macro_r2: float,
+) -> Mapping[str, object]:
+    """Build the required G2 section-balanced companion endpoint."""
+
+    try:
+        macro, rows, donor_values, donor_section_values = donor_section_type_macro_r2(
+            truth,
+            prediction,
+            donors,
+            sections,
+            labels,
+            minimum_support,
+        )
+    except ValueError as error:
+        return {
+            "available": False,
+            "reason": str(error),
+            "aggregation": SECTION_BALANCED_AGGREGATION,
+            "donor_equal_section_equal_type_macro_r2": None,
+            "minimum_macro_r2": float(minimum_macro_r2),
+            "meets_minimum_effect": False,
+            "pass": False,
+            "donor_macro_r2": {},
+            "donor_section_macro_r2": {},
+            "donor_section_type_rows": [],
+        }
+    passes = bool(macro >= minimum_macro_r2)
+    return {
+        "available": True,
+        "reason": None,
+        "aggregation": SECTION_BALANCED_AGGREGATION,
+        "donor_equal_section_equal_type_macro_r2": float(macro),
+        "minimum_macro_r2": float(minimum_macro_r2),
+        "meets_minimum_effect": passes,
+        "pass": passes,
+        "donor_macro_r2": donor_values,
+        "donor_section_macro_r2": donor_section_values,
+        "donor_section_type_rows": rows,
+    }
+
+
+def _g3_quality_gated_source_flags(
+    frozen_reports: Mapping[str, object],
+    quality_reports: Mapping[str, object],
+) -> Mapping[str, bool]:
+    """Combine all-row G3 evidence with the frozen registration sensitivity.
+
+    Registration quality is an authorization constraint for nucleus/cell-local
+    evidence.  The full-context-versus-target-removed family is also intrinsic:
+    it is the incremental target-cell evidence required by the mixed conclusion.
+    Context-only and incremental context evidence remain stratified diagnostics
+    because their hypothesized source is outside the registered target cell.
+    """
+
+    def family_pass(reports: Mapping[str, object], prefix: str) -> bool:
+        selected = [
+            report
+            for name, report in reports.items()
+            if str(name).startswith(prefix) and isinstance(report, Mapping)
+        ]
+        return bool(selected and all(report.get("pass") is True for report in selected))
+
+    nucleus_unstratified = family_pass(frozen_reports, "nucleus_")
+    cell_unstratified = family_pass(frozen_reports, "cell_")
+    nucleus_quality = family_pass(quality_reports, "nucleus_")
+    cell_quality = family_pass(quality_reports, "cell_")
+    nucleus_specific = bool(nucleus_unstratified and nucleus_quality)
+    cell_specific = bool(cell_unstratified and cell_quality)
+    context_specific = family_pass(frozen_reports, "context_")
+    full_vs_context_unstratified = family_pass(frozen_reports, "full_context_vs_target_removed_")
+    full_vs_context_quality = family_pass(quality_reports, "full_context_vs_target_removed_")
+    full_vs_context = bool(full_vs_context_unstratified and full_vs_context_quality)
+    full_vs_nucleus = family_pass(frozen_reports, "full_context_vs_nucleus_")
+    full_vs_cell = family_pass(frozen_reports, "full_context_vs_cell_")
+    intrinsic_specific = bool(nucleus_specific or cell_specific)
+    full_vs_intrinsic = bool(
+        (not nucleus_specific or full_vs_nucleus) and (not cell_specific or full_vs_cell)
+    )
+    mixed_information = bool(
+        context_specific and intrinsic_specific and full_vs_context and full_vs_intrinsic
+    )
+    return {
+        "nucleus_specific_unstratified": nucleus_unstratified,
+        "cell_specific_unstratified": cell_unstratified,
+        "nucleus_quality_sensitivity_pass": nucleus_quality,
+        "cell_quality_sensitivity_pass": cell_quality,
+        "nucleus_specific": nucleus_specific,
+        "cell_specific": cell_specific,
+        "context_specific": context_specific,
+        "full_vs_context_unstratified": full_vs_context_unstratified,
+        "full_vs_context_quality_sensitivity_pass": full_vs_context_quality,
+        "full_vs_context": full_vs_context,
+        "full_vs_nucleus": full_vs_nucleus,
+        "full_vs_cell": full_vs_cell,
+        "intrinsic_specific": intrinsic_specific,
+        "full_vs_intrinsic": full_vs_intrinsic,
+        "mixed_information": mixed_information,
+    }
 
 
 def _exact_positive_integer(value: object, name: str) -> int:
@@ -150,6 +301,197 @@ def _familywise_frozen_contrasts(
         "exact_sign_patterns": int(len(sign_patterns)),
         "contrasts": reports,
         "pass": bool(all(report["pass"] for report in reports.values())),
+    }
+
+
+def _registration_quality_contrast_sensitivity(
+    control_coordinates: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    pairs: Mapping[str, tuple[str, str]],
+    global_reports: Mapping[str, object],
+    artifact: MorphologyRidgeDatasetArtifact,
+    *,
+    minimum_support: int,
+    minimum_delta: float,
+) -> Mapping[str, object]:
+    """Stratify every frozen G3 contrast and fail closed for intrinsic claims.
+
+    A contrast is quality-robust only when the best-registration subset covers
+    every donor/type stratum evaluable in the all-row endpoint, clears the
+    frozen effect threshold, and is non-inferior to both the all-row contrast
+    and a fully supported near-threshold contrast by that same frozen margin.
+    """
+
+    if not artifact.registration_quality_applicable:
+        return {
+            "tested": False,
+            "pass": False,
+            "reason": "row-level registration quality is not applicable",
+            "contrasts": {},
+        }
+    quality = np.asarray(artifact.registration_quality_strata).astype(str)
+    expected_donors = sorted(set(artifact.donor_ids.astype(str).tolist()))
+
+    def band_report(
+        truth: np.ndarray,
+        focal_prediction: np.ndarray,
+        comparator_prediction: np.ndarray,
+        band: str,
+        expected_strata: set[tuple[str, int]],
+    ) -> Mapping[str, object]:
+        selected = quality == band
+        base = {
+            "rows": int(np.count_nonzero(selected)),
+            "minimum_support_per_donor_type": int(minimum_support),
+        }
+        if not selected.any():
+            return {**base, "available": False, "reason": "no rows in quality stratum"}
+        try:
+            focal_macro, focal_rows, focal_donors = macro_r2(
+                truth[selected],
+                focal_prediction[selected],
+                artifact.donor_ids[selected],
+                artifact.type_labels[selected],
+                minimum_support,
+            )
+            comparator_macro, comparator_rows, comparator_donors = macro_r2(
+                truth[selected],
+                comparator_prediction[selected],
+                artifact.donor_ids[selected],
+                artifact.type_labels[selected],
+                minimum_support,
+            )
+        except ValueError as error:
+            return {**base, "available": False, "reason": str(error)}
+        focal_support = {(str(row["donor_id"]), int(row["type_index"])) for row in focal_rows}
+        comparator_support = {
+            (str(row["donor_id"]), int(row["type_index"])) for row in comparator_rows
+        }
+        paired_support = focal_support == comparator_support
+        complete_support = bool(paired_support and focal_support == expected_strata)
+        return {
+            **base,
+            "available": True,
+            "focal_macro_r2": float(focal_macro),
+            "comparator_macro_r2": float(comparator_macro),
+            "focal_minus_comparator_macro_r2": float(focal_macro - comparator_macro),
+            "donors": sorted(focal_donors),
+            "all_locked_donors_represented": sorted(focal_donors) == expected_donors,
+            "evaluable_donor_type_strata": len(focal_support),
+            "expected_all_row_donor_type_strata": len(expected_strata),
+            "paired_focal_comparator_support": paired_support,
+            "complete_all_row_donor_type_support": complete_support,
+        }
+
+    reports: Dict[str, Mapping[str, object]] = {}
+    for name, (focal_family, comparator_family) in pairs.items():
+        focal = control_coordinates.get(focal_family)
+        comparator = control_coordinates.get(comparator_family)
+        global_report = global_reports.get(name)
+        if (
+            focal is None
+            or comparator is None
+            or not isinstance(global_report, Mapping)
+            or "mean_delta_r2" not in global_report
+        ):
+            reports[name] = {
+                "tested": False,
+                "pass": False,
+                "reason": "frozen contrast predictions or all-row report are unavailable",
+            }
+            continue
+        focal_prediction, focal_truth = focal
+        comparator_prediction, comparator_truth = comparator
+        if not np.allclose(focal_truth, comparator_truth, rtol=0.0, atol=1.0e-12):
+            reports[name] = {
+                "tested": False,
+                "pass": False,
+                "reason": "focal and comparator target coordinates differ",
+            }
+            continue
+        _, full_rows, _ = macro_r2(
+            focal_truth,
+            focal_prediction,
+            artifact.donor_ids,
+            artifact.type_labels,
+            minimum_support,
+        )
+        expected_strata = {(str(row["donor_id"]), int(row["type_index"])) for row in full_rows}
+        strata = {
+            band: band_report(
+                focal_truth,
+                focal_prediction,
+                comparator_prediction,
+                band,
+                expected_strata,
+            )
+            for band in REGISTRATION_QUALITY_BANDS
+        }
+        best = strata["best"]
+        near = strata["near_threshold"]
+        global_delta = float(global_report["mean_delta_r2"])
+        best_delta = (
+            float(best["focal_minus_comparator_macro_r2"])
+            if best.get("available") is True
+            else None
+        )
+        near_comparison_required = bool(
+            near.get("available") is True
+            and near.get("complete_all_row_donor_type_support") is True
+        )
+        best_clears_minimum = bool(best_delta is not None and best_delta >= minimum_delta)
+        best_noninferior_to_all_rows = bool(
+            best_delta is not None and best_delta + minimum_delta + 1.0e-12 >= global_delta
+        )
+        best_noninferior_to_near = bool(
+            best_delta is not None
+            and (
+                not near_comparison_required
+                or best_delta + minimum_delta + 1.0e-12
+                >= float(near["focal_minus_comparator_macro_r2"])
+            )
+        )
+        passes = bool(
+            best.get("available") is True
+            and best.get("complete_all_row_donor_type_support") is True
+            and best_clears_minimum
+            and best_noninferior_to_all_rows
+            and best_noninferior_to_near
+        )
+        reports[name] = {
+            "tested": True,
+            "focal_family": focal_family,
+            "comparator_family": comparator_family,
+            "all_row_delta_r2": global_delta,
+            "minimum_delta_r2": float(minimum_delta),
+            "quality_noninferiority_margin_delta_r2": float(minimum_delta),
+            "strata": strata,
+            "best_registration_complete_support": bool(
+                best.get("complete_all_row_donor_type_support") is True
+            ),
+            "best_registration_clears_minimum": best_clears_minimum,
+            "best_registration_noninferior_to_all_rows": best_noninferior_to_all_rows,
+            "near_threshold_comparison_required": near_comparison_required,
+            "best_registration_noninferior_to_near_threshold": (best_noninferior_to_near),
+            "effect_not_driven_only_by_near_threshold_rows": passes,
+            "pass": passes,
+        }
+    return {
+        "tested": bool(reports)
+        and all(report.get("tested") is True for report in reports.values()),
+        "quality_score_definition": artifact.registration_quality_definition,
+        "cutoffs_fraction_of_limit": dict(artifact.registration_quality_cutoffs),
+        "row_counts": {
+            band: int(np.count_nonzero(quality == band)) for band in REGISTRATION_QUALITY_BANDS
+        },
+        "scientific_rule": (
+            "best-registration rows must retain every all-row donor/type stratum, clear the "
+            "frozen delta-R2 threshold, and be non-inferior to the all-row or a fully "
+            "supported near-threshold estimate by the frozen %.6g delta-R2 margin; the "
+            "same rule applies to full-context-versus-target-removed evidence used by "
+            "the mixed conclusion" % float(minimum_delta)
+        ),
+        "contrasts": reports,
+        "pass": bool(reports) and all(report.get("pass") is True for report in reports.values()),
     }
 
 
@@ -672,6 +1014,8 @@ def evaluate_morphology_ridge_gate(
     confirmatory_analysis_plan_sha256: Optional[str] = None,
     confirmatory_design_binding: Optional[Mapping[str, object]] = None,
     synthetic_calibration_mode: bool = False,
+    calibration_trial_identity: Optional[Mapping[str, object]] = None,
+    calibration_run_contract_sha256: Optional[str] = None,
     device: str = "auto",
 ) -> Mapping[str, object]:
     """Run a locked-donor gate without treating observations as replicates."""
@@ -687,6 +1031,34 @@ def evaluate_morphology_ridge_gate(
         raise ValueError(
             "synthetic calibration mode accepts only explicitly synthetic calibration artifacts"
         )
+    if synthetic_calibration_mode:
+        if (
+            not isinstance(calibration_trial_identity, Mapping)
+            or set(calibration_trial_identity)
+            != {"scenario", "condition", "trial_index", "trial_seed"}
+            or not isinstance(calibration_run_contract_sha256, str)
+            or len(calibration_run_contract_sha256) != 64
+            or any(
+                character not in "0123456789abcdef" for character in calibration_run_contract_sha256
+            )
+        ):
+            raise ValueError("synthetic calibration gate requires a frozen trial attestation")
+        calibration_development_artifact_sha256 = morphology_artifact_content_sha256(development)
+        calibration_locked_artifact_sha256 = morphology_artifact_content_sha256(locked_test)
+        calibration_trial_realization_sha256 = canonical_sha256(
+            {
+                "calibration_trial_identity": dict(calibration_trial_identity),
+                "calibration_run_contract_sha256": calibration_run_contract_sha256,
+                "development_artifact_sha256": calibration_development_artifact_sha256,
+                "locked_artifact_sha256": calibration_locked_artifact_sha256,
+            }
+        )
+    else:
+        if calibration_trial_identity is not None or calibration_run_contract_sha256 is not None:
+            raise ValueError("non-calibration morphology gate cannot carry trial attestation")
+        calibration_development_artifact_sha256 = None
+        calibration_locked_artifact_sha256 = None
+        calibration_trial_realization_sha256 = None
     if development.cohort_id == "HESCAPE" or locked_test.cohort_id == "HESCAPE":
         raise ValueError(
             "HESCAPE is development-only; reserved HEST donors cannot enter a locked gate"
@@ -1057,6 +1429,7 @@ def evaluate_morphology_ridge_gate(
             Sequence[Mapping[str, object]],
         ],
     ] = {}
+    control_coordinates: Dict[str, tuple[np.ndarray, np.ndarray]] = {}
     control_report: Dict[str, Mapping[str, object]] = {}
     for family, pair in family_pairs.items():
         if pair is None:
@@ -1072,7 +1445,15 @@ def evaluate_morphology_ridge_gate(
             device=device,
             include_composition=include_composition,
         )
-        family_macro, *_, family_donors = fit_and_score(
+        (
+            family_macro,
+            _,
+            _,
+            family_predicted_coordinates,
+            family_truth_coordinates,
+            _,
+            family_donors,
+        ) = fit_and_score(
             development,
             locked_test,
             development_features,
@@ -1090,6 +1471,10 @@ def evaluate_morphology_ridge_gate(
             family_rank,
             family_alpha,
             family_selection,
+        )
+        control_coordinates[family] = (
+            family_predicted_coordinates,
+            family_truth_coordinates,
         )
         control_report[family] = {
             "available": True,
@@ -1334,28 +1719,37 @@ def evaluate_morphology_ridge_gate(
         maximum_p=maximum_direct_contrast_p,
     )
     frozen_reports = frozen_contrast_family.get("contrasts", {})
+    registration_quality_sensitivity = _registration_quality_contrast_sensitivity(
+        control_coordinates,
+        frozen_contrast_pairs,
+        frozen_reports,
+        locked_test,
+        minimum_support=minimum_support,
+        minimum_delta=minimum_coordinate_delta,
+    )
+    quality_reports = registration_quality_sensitivity.get("contrasts", {})
     any_source_contrast_positive = any(
         isinstance(report, Mapping) and report.get("pass") is True
         for report in frozen_reports.values()
     )
 
-    def family_pass(prefix: str) -> bool:
-        selected = [report for name, report in frozen_reports.items() if name.startswith(prefix)]
-        return bool(selected and all(report.get("pass") is True for report in selected))
-
-    nucleus_specific = family_pass("nucleus_")
-    cell_specific = family_pass("cell_")
-    context_specific = family_pass("context_")
-    full_vs_context = family_pass("full_context_vs_target_removed_")
-    full_vs_nucleus = family_pass("full_context_vs_nucleus_")
-    full_vs_cell = family_pass("full_context_vs_cell_")
-    intrinsic_specific = nucleus_specific or cell_specific
-    full_vs_intrinsic = bool(
-        (not nucleus_specific or full_vs_nucleus) and (not cell_specific or full_vs_cell)
-    )
-    mixed_information = bool(
-        context_specific and intrinsic_specific and full_vs_context and full_vs_intrinsic
-    )
+    source_flags = _g3_quality_gated_source_flags(frozen_reports, quality_reports)
+    nucleus_specific_unstratified = source_flags["nucleus_specific_unstratified"]
+    cell_specific_unstratified = source_flags["cell_specific_unstratified"]
+    nucleus_quality_sensitivity_pass = source_flags["nucleus_quality_sensitivity_pass"]
+    cell_quality_sensitivity_pass = source_flags["cell_quality_sensitivity_pass"]
+    nucleus_specific = source_flags["nucleus_specific"]
+    cell_specific = source_flags["cell_specific"]
+    context_specific = source_flags["context_specific"]
+    full_vs_context_unstratified = source_flags["full_vs_context_unstratified"]
+    full_vs_context_quality_sensitivity_pass = source_flags[
+        "full_vs_context_quality_sensitivity_pass"
+    ]
+    full_vs_context = source_flags["full_vs_context"]
+    full_vs_nucleus = source_flags["full_vs_nucleus"]
+    full_vs_cell = source_flags["full_vs_cell"]
+    full_vs_intrinsic = source_flags["full_vs_intrinsic"]
+    mixed_information = source_flags["mixed_information"]
     local_null_effects = paired_donor_effects(donor_macro, local_null["donor_null_mean_r2"])
     block_null_effects = paired_donor_effects(donor_macro, block_null["donor_null_mean_r2"])
     per_donor_effects = {
@@ -1385,6 +1779,19 @@ def evaluate_morphology_ridge_gate(
         locked_test.type_labels,
         minimum_support,
         len(locked_test.type_names),
+    )
+    g2_section_companion = (
+        _g2_section_balanced_companion(
+            truth_coordinates,
+            predicted_coordinates,
+            locked_test.donor_ids,
+            section_ids,
+            locked_test.type_labels,
+            minimum_support=minimum_support,
+            minimum_macro_r2=minimum_macro_r2,
+        )
+        if local_context_hypothesis
+        else None
     )
     section_stratification = group_stratification(
         truth_coordinates,
@@ -1587,6 +1994,9 @@ def evaluate_morphology_ridge_gate(
             }
         )
     if local_context_hypothesis:
+        checks["macro_donor_section_type_r2"] = bool(
+            g2_section_companion is not None and g2_section_companion["pass"] is True
+        )
         checks["exact_donor_paired_main_effect"] = g2_closed_test_pass
     if final_inference:
         checks["source_coverage_audit_available"] = bool(
@@ -1678,6 +2088,13 @@ def evaluate_morphology_ridge_gate(
             expected_calibration_settings if synthetic_calibration_mode else None
         ),
         "calibration_exact_gate_settings_sha256": synthetic_settings_sha256,
+        "calibration_trial_identity": (
+            dict(calibration_trial_identity) if synthetic_calibration_mode else None
+        ),
+        "calibration_run_contract_sha256": calibration_run_contract_sha256,
+        "calibration_development_artifact_sha256": (calibration_development_artifact_sha256),
+        "calibration_locked_artifact_sha256": calibration_locked_artifact_sha256,
+        "calibration_trial_realization_sha256": calibration_trial_realization_sha256,
         "calibration": calibration,
         "nucleus_hypothesis_tested": nucleus_level,
         "cell_intrinsic_hypothesis_tested": cell_intrinsic_tested,
@@ -1705,6 +2122,7 @@ def evaluate_morphology_ridge_gate(
             "G2_local_context": {
                 "tested": local_context_hypothesis,
                 "pass": bool(local_context_hypothesis and component_pass),
+                "section_balanced_companion": g2_section_companion,
                 "primary_crop_id": development.primary_crop_id,
                 "primary_crop_role": development.crop_roles[primary_crop_index],
                 "primary_crop_comparison_family": primary_crop_family,
@@ -1720,6 +2138,13 @@ def evaluate_morphology_ridge_gate(
                     if name.startswith("nucleus_")
                 },
                 "tested": nucleus_level,
+                "unstratified_familywise_pass": nucleus_specific_unstratified,
+                "registration_quality_sensitivity_pass": nucleus_quality_sensitivity_pass,
+                "registration_quality_sensitivity": {
+                    name: report
+                    for name, report in quality_reports.items()
+                    if name.startswith("nucleus_")
+                },
                 "pass": bool(
                     nucleus_level and nucleus_specific and final_inference and component_pass
                 ),
@@ -1734,6 +2159,13 @@ def evaluate_morphology_ridge_gate(
                     if name.startswith("cell_")
                 },
                 "tested": cell_intrinsic_tested,
+                "unstratified_familywise_pass": cell_specific_unstratified,
+                "registration_quality_sensitivity_pass": cell_quality_sensitivity_pass,
+                "registration_quality_sensitivity": {
+                    name: report
+                    for name, report in quality_reports.items()
+                    if name.startswith("cell_")
+                },
                 "pass": bool(
                     cell_intrinsic_tested and cell_specific and final_inference and component_pass
                 ),
@@ -1767,9 +2199,19 @@ def evaluate_morphology_ridge_gate(
                 "full_context_vs_cell_pass": full_vs_cell,
                 "full_context_vs_intrinsic_pass": full_vs_intrinsic,
                 "full_context_vs_context_pass": full_vs_context,
+                "full_context_vs_context_unstratified_pass": (full_vs_context_unstratified),
+                "incremental_intrinsic_registration_quality_sensitivity_pass": (
+                    full_vs_context_quality_sensitivity_pass
+                ),
+                "incremental_intrinsic_registration_quality_sensitivity": {
+                    name: report
+                    for name, report in quality_reports.items()
+                    if name.startswith("full_context_vs_target_removed_")
+                },
             },
         },
         "frozen_morphology_contrast_family": frozen_contrast_family,
+        "registration_quality_sensitivity": registration_quality_sensitivity,
         "morphology_source_conclusion": morphology_conclusion,
         "authorizes_nucleus_intrinsic_claim": bool(
             nucleus_level
@@ -1842,6 +2284,11 @@ def evaluate_morphology_ridge_gate(
         "primary_metrics": {
             "donor_equal_type_equal_residual_coordinate_r2": matched,
             "macro_donor_type_residual_coordinate_r2": stratum_macro,
+            "donor_equal_section_equal_type_equal_residual_coordinate_r2": (
+                g2_section_companion["donor_equal_section_equal_type_macro_r2"]
+                if g2_section_companion is not None
+                else None
+            ),
             "raw_depth_adjusted_regional_macro_r2": raw_matched if regional else None,
             "composition_adjusted_regional_macro_r2": (matched if include_composition else None),
             "coordinate_only_macro_r2": coordinate_macro,

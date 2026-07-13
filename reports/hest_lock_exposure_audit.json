@@ -1,0 +1,44 @@
+{
+  "schema": "heir.lock_exposure_audit.v1",
+  "assessment_date": "2026-07-13",
+  "source_study": "GSE250346",
+  "affected_split_id": "hest_lung_cell_association_v1",
+  "affected_donor_ids": [
+    "THD0008",
+    "THD0011",
+    "TILD117",
+    "VUILD78",
+    "VUILD96"
+  ],
+  "exposure": {
+    "run_directory": "/mnt/seagate/HEIR_runs/mr_hescape_uni2h_28c6fff_1783921182",
+    "source_commit": "28c6fff081973e003c914b6d5d0f0491cb0a6fdc",
+    "builder_source_sha256": "25238bb2f098ed69dd0e8573ed031cbf22b166740af33056184a681456a3b65d",
+    "source_artifact": {
+      "relative_path": "source.npz",
+      "bytes": 64616384,
+      "materialized_at": "2026-07-13T01:00:42-05:00"
+    },
+    "locked_test_artifact": {
+      "relative_path": "QUARANTINE_locked_donor_do_not_use/locked_test.npz",
+      "bytes": 18201904,
+      "materialized_at": "2026-07-13T01:02:26-05:00"
+    },
+    "molecular_outcomes_materialized": true,
+    "image_features_materialized": true,
+    "locked_artifact_reloaded_for_schema_validation": true,
+    "benchmark_report_found": false,
+    "endpoint_metric_viewing_or_tuning_evidence_found": false
+  },
+  "scientific_decision": {
+    "prospective_lock_valid": false,
+    "hypothesis_status": "untested_not_failed",
+    "permitted_use": "retrospective_internal_exploratory_only",
+    "prohibited_claims": [
+      "prospective_H_CELL_confirmation",
+      "prospective_H_INTRINSIC_confirmation",
+      "external_generalization"
+    ],
+    "required_replacement": "genuinely_unexposed_donors_or_independent_registered_cell_resolved_cohort"
+  }
+}

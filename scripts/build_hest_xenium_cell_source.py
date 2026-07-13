@@ -26,6 +26,12 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 from heir.data.study_manifest import (
+    CONFIRMATORY_DONOR_SECTION_TYPE_METRIC,
+    CONFIRMATORY_DONOR_TYPE_METRIC,
+    CONFIRMATORY_PRIMARY_DECISION_RULE,
+    CONFIRMATORY_PRIMARY_ENDPOINT_NAME,
+    CONFIRMATORY_PRIMARY_MINIMUM_EFFECT,
+    FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS,
     LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS,
     StudyManifest,
 )
@@ -33,10 +39,75 @@ from heir.features import EncoderManifest, FrozenPatchEncoder, create_frozen_enc
 from heir.features import load_encoder_manifest as _load_encoder_manifest
 
 PROTOCOL_SCHEMA = "heir.hest_xenium_cell_protocol.v4"
-SOURCE_SCHEMA = "heir.registered_observations.v4"
-ANNOTATION_RECEIPT_SCHEMA = "heir.independent_annotation_receipt.v1"
-ANNOTATION_CROSS_FIT_SCHEMA = "heir.annotation_cross_fitting_receipt.v1"
-ANNOTATION_PREDICTION_COLUMNS = ("hest_id", "cell_id", "broad_lineage", "fine_type")
+SOURCE_SCHEMA = "heir.registered_observations.v5"
+ANNOTATION_RECEIPT_SCHEMA = "heir.independent_annotation_receipt.v2"
+ANNOTATION_CROSS_FIT_SCHEMA = "heir.annotation_cross_fitting_receipt.v2"
+TRAINING_LABEL_PROVENANCE_RECEIPT_SCHEMA = "heir.training_label_provenance_receipt.v1"
+TRAINING_LABEL_ONTOLOGY_SOURCE_SCHEMA = "heir.training_label_ontology_source.v1"
+ANNOTATION_PREDICTION_COLUMNS = (
+    "hest_id",
+    "cell_id",
+    "broad_lineage",
+    "fine_type",
+    "confidence",
+    "abstained",
+    "fine_type_probabilities_json",
+)
+ANNOTATION_VALIDATION_COLUMNS = (
+    "validation_donor_id",
+    "cell_id",
+    "true_fine_type",
+    "predicted_fine_type",
+    "confidence",
+    "abstained",
+    "fine_type_probabilities_json",
+)
+ANNOTATION_ABSTAIN_LABEL = "__ABSTAIN__"
+# Hard scientific guardrails.  A frozen receipt may be stricter, but never looser.
+MINIMUM_ANNOTATION_FINE_TYPE_MACRO_F1 = 0.70
+MAXIMUM_ANNOTATION_EXPECTED_CALIBRATION_ERROR = 0.10
+MINIMUM_ANNOTATION_MAJOR_CLASS_SENSITIVITY = 0.50
+MINIMUM_ANNOTATION_PREDICTION_COVERAGE = 0.80
+MINIMUM_ANNOTATION_CONFIDENCE_THRESHOLD = 0.50
+MAXIMUM_ANNOTATION_PROBABILITY_SUM_TOLERANCE = 1.0e-6
+ANNOTATION_QUALITY_CONTRACT_FIELDS = {
+    "minimum_fine_type_macro_f1",
+    "calibration_metric",
+    "calibration_binning",
+    "calibration_bin_count",
+    "maximum_calibration_error",
+    "minimum_major_class_sensitivity",
+    "minimum_prediction_coverage_fraction",
+    "abstention_method",
+    "confidence_threshold",
+    "abstain_label",
+    "tie_breaking",
+    "probability_sum_tolerance",
+    "per_validation_donor_metrics_required",
+    "validation_designs_by_evidence_kind",
+}
+DEFAULT_ANNOTATION_QUALITY_CONTRACT = {
+    "minimum_fine_type_macro_f1": MINIMUM_ANNOTATION_FINE_TYPE_MACRO_F1,
+    "calibration_metric": "multiclass_expected_calibration_error",
+    "calibration_binning": "equal_width_confidence_bins",
+    "calibration_bin_count": 10,
+    "maximum_calibration_error": MAXIMUM_ANNOTATION_EXPECTED_CALIBRATION_ERROR,
+    "minimum_major_class_sensitivity": MINIMUM_ANNOTATION_MAJOR_CLASS_SENSITIVITY,
+    "minimum_prediction_coverage_fraction": MINIMUM_ANNOTATION_PREDICTION_COVERAGE,
+    "abstention_method": "maximum_probability_below_threshold",
+    "confidence_threshold": MINIMUM_ANNOTATION_CONFIDENCE_THRESHOLD,
+    "abstain_label": ANNOTATION_ABSTAIN_LABEL,
+    "tie_breaking": "ordered_fine_type_ids",
+    "probability_sum_tolerance": MAXIMUM_ANNOTATION_PROBABILITY_SUM_TOLERANCE,
+    "per_validation_donor_metrics_required": True,
+    "validation_designs_by_evidence_kind": {
+        "external_gene_disjoint_annotation": "external_donor_held_out",
+        "development_donor_cross_fitted_gene_disjoint_annotation": (
+            "leave_one_development_donor_out"
+        ),
+        "orthogonal_modality_annotation": "orthogonal_modality_validation",
+    },
+}
 DATASET_REPO = "MahmoodLab/hest"
 DATASET_REVISION = "7e8d5a0b0aace41d8c8ec0f6ecea80e4ad2a61ec"
 SOURCE_MPP = 0.2125
@@ -99,6 +170,55 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+REGISTRATION_QUALITY_DEFINITION = (
+    "max(annotation_nucleus_error/section_median_nucleus_diameter/diameter_limit,"
+    "annotation_nucleus_error/section_median_nearest_neighbor_distance/neighbor_limit)"
+)
+
+
+def _registration_quality_strata(
+    diameter_relative_values: np.ndarray,
+    neighbor_relative_values: np.ndarray,
+    contract: Mapping[str, object],
+) -> tuple[np.ndarray, np.ndarray, Mapping[str, float]]:
+    """Freeze the row-level H-MEAS registration-quality sensitivity strata."""
+
+    diameter = np.asarray(diameter_relative_values, dtype=np.float64)
+    neighbor = np.asarray(neighbor_relative_values, dtype=np.float64)
+    if diameter.ndim != 1 or neighbor.shape != diameter.shape:
+        raise ValueError("registration-quality ratio vectors are misaligned")
+    try:
+        diameter_limit = float(contract["maximum_registration_nucleus_diameter_ratio_p95"])
+        neighbor_limit = float(contract["maximum_registration_nearest_neighbor_ratio_p95"])
+        best_cutoff = float(contract["best_registration_quality_max_fraction_of_limit"])
+        intermediate_cutoff = float(
+            contract["intermediate_registration_quality_max_fraction_of_limit"]
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("registration-quality contract is incomplete") from error
+    if (
+        not np.isfinite([diameter_limit, neighbor_limit, best_cutoff, intermediate_cutoff]).all()
+        or diameter_limit <= 0.0
+        or neighbor_limit <= 0.0
+        or not 0.0 < best_cutoff < intermediate_cutoff < 1.0
+    ):
+        raise ValueError("registration-quality contract is malformed")
+    scores = np.maximum(diameter / diameter_limit, neighbor / neighbor_limit)
+    strata = np.full(len(scores), "failed", dtype="<U16")
+    strata[np.isfinite(scores) & (scores <= 1.0)] = "near_threshold"
+    strata[np.isfinite(scores) & (scores <= intermediate_cutoff)] = "intermediate"
+    strata[np.isfinite(scores) & (scores <= best_cutoff)] = "best"
+    return (
+        scores,
+        strata,
+        {
+            "best": best_cutoff,
+            "intermediate": intermediate_cutoff,
+            "near_threshold": 1.0,
+        },
+    )
+
+
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
@@ -113,9 +233,56 @@ def _section_scoped_cell_id(sample_id: str, raw_cell_id: str) -> str:
     return section + ":" + cell
 
 
+def _validate_annotation_quality_contract(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or set(value) != ANNOTATION_QUALITY_CONTRACT_FIELDS:
+        raise ValueError("HEST annotation quality contract is incomplete or contains extras")
+
+    def number(name: str) -> float:
+        raw = value[name]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError("HEST annotation quality %s must be numeric" % name)
+        result = float(raw)
+        if not math.isfinite(result):
+            raise ValueError("HEST annotation quality %s must be finite" % name)
+        return result
+
+    designs = value["validation_designs_by_evidence_kind"]
+    if (
+        not MINIMUM_ANNOTATION_FINE_TYPE_MACRO_F1 <= number("minimum_fine_type_macro_f1") <= 1.0
+        or not 0.0
+        <= number("maximum_calibration_error")
+        <= MAXIMUM_ANNOTATION_EXPECTED_CALIBRATION_ERROR
+        or not MINIMUM_ANNOTATION_MAJOR_CLASS_SENSITIVITY
+        <= number("minimum_major_class_sensitivity")
+        <= 1.0
+        or not MINIMUM_ANNOTATION_PREDICTION_COVERAGE
+        <= number("minimum_prediction_coverage_fraction")
+        <= 1.0
+        or not MINIMUM_ANNOTATION_CONFIDENCE_THRESHOLD <= number("confidence_threshold") < 1.0
+        or not 0.0
+        < number("probability_sum_tolerance")
+        <= MAXIMUM_ANNOTATION_PROBABILITY_SUM_TOLERANCE
+        or value["calibration_metric"] != "multiclass_expected_calibration_error"
+        or value["calibration_binning"] != "equal_width_confidence_bins"
+        or isinstance(value["calibration_bin_count"], bool)
+        or not isinstance(value["calibration_bin_count"], int)
+        or value["calibration_bin_count"] != 10
+        or value["abstention_method"] != "maximum_probability_below_threshold"
+        or value["abstain_label"] != ANNOTATION_ABSTAIN_LABEL
+        or value["tie_breaking"] != "ordered_fine_type_ids"
+        or value["per_validation_donor_metrics_required"] is not True
+        or not isinstance(designs, Mapping)
+        or dict(designs)
+        != DEFAULT_ANNOTATION_QUALITY_CONTRACT["validation_designs_by_evidence_kind"]
+    ):
+        raise ValueError("HEST annotation quality contract weakens the scientific guardrails")
+    return value
+
+
 def _validate_protocol_independence_contract(value: object) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or set(value) != LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS:
         raise ValueError("HEST label-target independence protocol is incomplete")
+    _validate_annotation_quality_contract(value["annotation_quality_contract"])
     raw_annotation_ids = value["ordered_annotation_feature_ids"]
     raw_training_donor_ids = value["annotation_training_donor_ids"]
     if not isinstance(raw_annotation_ids, list) or not isinstance(raw_training_donor_ids, list):
@@ -129,6 +296,7 @@ def _validate_protocol_independence_contract(value: object) -> Mapping[str, obje
         or any(not item.strip() for item in training_donor_ids)
         or not isinstance(value["same_cohort_annotation"], bool)
         or not isinstance(value["establishes_full_target_independence"], bool)
+        or not isinstance(value["training_labels_establish_target_independence"], bool)
         or not str(value["strategy"]).strip()
         or not str(value["limitation"]).strip()
     ):
@@ -142,6 +310,10 @@ def _validate_protocol_independence_contract(value: object) -> Mapping[str, obje
             or value["annotation_training_scope"] != "unknown_pending_provenance"
             or training_donor_ids
             or value["annotation_training_donor_ids_sha256"] is not None
+            or value["training_label_ontology_source"] != "pending"
+            or value["training_label_provenance_receipt_sha256"] is not None
+            or value["training_label_target_gene_overlap_count"] is not None
+            or value["training_labels_establish_target_independence"] is not False
             or value["locked_donors_used_for_training"] is not None
             or value["cross_fitting_method"] != "pending"
             or value["cross_fitting_receipt_sha256"] is not None
@@ -161,11 +333,18 @@ def _validate_protocol_independence_contract(value: object) -> Mapping[str, obje
         or value["ordered_annotation_feature_ids_sha256"] != _canonical_sha256(list(annotation_ids))
         or value["locked_donors_used_for_training"] is not False
         or value["establishes_full_target_independence"] is not True
+        or not _is_sha256(value["training_label_provenance_receipt_sha256"])
+        or isinstance(value["training_label_target_gene_overlap_count"], bool)
+        or not isinstance(value["training_label_target_gene_overlap_count"], int)
+        or value["training_label_target_gene_overlap_count"] != 0
+        or value["training_labels_establish_target_independence"] is not True
     ):
         raise ValueError("HEST label-target evidence is not receipt- and feature-bound")
     if value["same_cohort_annotation"] is True:
         if (
             evidence_kind != "development_donor_cross_fitted_gene_disjoint_annotation"
+            or value["training_label_ontology_source"]
+            != "de_novo_gene_disjoint_development_ontology"
             or value["annotation_training_scope"] != "development_donors_only"
             or not training_donor_ids
             or value["annotation_training_donor_ids_sha256"]
@@ -176,7 +355,8 @@ def _validate_protocol_independence_contract(value: object) -> Mapping[str, obje
             raise ValueError("same-cohort HEST annotation is not donor-cross-fitted")
     elif evidence_kind == "external_gene_disjoint_annotation":
         if (
-            value["annotation_training_scope"] != "external_donors_only"
+            value["training_label_ontology_source"] != "external_target_disjoint_ontology"
+            or value["annotation_training_scope"] != "external_donors_only"
             or not training_donor_ids
             or value["annotation_training_donor_ids_sha256"]
             != _canonical_sha256(list(training_donor_ids))
@@ -186,7 +366,8 @@ def _validate_protocol_independence_contract(value: object) -> Mapping[str, obje
             raise ValueError("external HEST annotation training scope is invalid")
     elif evidence_kind == "orthogonal_modality_annotation":
         if (
-            value["annotation_training_scope"] != "orthogonal_no_rna_training"
+            value["training_label_ontology_source"] != "orthogonal_modality_ontology"
+            or value["annotation_training_scope"] != "orthogonal_no_rna_training"
             or training_donor_ids
             or value["annotation_training_donor_ids_sha256"] is not None
             or value["cross_fitting_method"] != "not_applicable"
@@ -567,6 +748,27 @@ def _validate_protocol(
     for name, expected in exact.items():
         if protocol.get(name) != expected:
             raise ValueError("HEST protocol %s differs from the pinned design" % name)
+    measurement_contract = protocol.get("frozen_h_meas_shared_measurement_thresholds")
+    if (
+        not isinstance(measurement_contract, Mapping)
+        or dict(measurement_contract) != FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS
+    ):
+        raise ValueError("HEST protocol frozen H-MEAS measurement contract has drifted")
+    expected_primary_endpoint = {
+        "name": CONFIRMATORY_PRIMARY_ENDPOINT_NAME,
+        "condition_on": "fine_type",
+        "decision_rule": CONFIRMATORY_PRIMARY_DECISION_RULE,
+        "donor_type_macro": {
+            "metric": CONFIRMATORY_DONOR_TYPE_METRIC,
+            "minimum_effect": CONFIRMATORY_PRIMARY_MINIMUM_EFFECT,
+        },
+        "donor_section_type_macro": {
+            "metric": CONFIRMATORY_DONOR_SECTION_TYPE_METRIC,
+            "minimum_effect": CONFIRMATORY_PRIMARY_MINIMUM_EFFECT,
+        },
+    }
+    if protocol.get("confirmatory_primary_endpoint") != expected_primary_endpoint:
+        raise ValueError("HEST protocol confirmatory primary endpoint has drifted")
     if tuple(protocol.get("disease_estimands", ())) != (
         "disease_inclusive",
         "disease_adjusted",
@@ -862,9 +1064,22 @@ class IndependentAnnotationArtifacts:
 
     receipt_path: Path
     receipt_sha256: str
+    training_label_receipt_path: Path
+    training_label_receipt_sha256: str
+    training_label_ontology_source_path: Path
+    training_label_ontology_source_sha256: str
     predictions_path: Path
     predictions_sha256: str
+    validation_export_path: Path
+    validation_export_sha256: str
     prediction_row_count: int
+    prediction_nonabstained_row_count: int
+    prediction_donor_ids: Tuple[str, ...]
+    fine_type_ids: Tuple[str, ...]
+    broad_lineage_by_fine_type: Mapping[str, str]
+    confidence_threshold: float
+    probability_sum_tolerance: float
+    prediction_coverage_fraction: float
 
 
 _ANNOTATION_RECEIPT_FIELDS = {
@@ -872,17 +1087,132 @@ _ANNOTATION_RECEIPT_FIELDS = {
     "evidence_kind",
     "prediction_export_sha256",
     "prediction_row_count",
+    "prediction_nonabstained_row_count",
     "prediction_columns",
     "row_order",
+    "validation_export_sha256",
+    "validation_row_count",
+    "validation_columns",
+    "validation_row_order",
+    "prediction_donor_ids",
+    "prediction_donor_ids_sha256",
+    "ordered_fine_type_ids",
+    "ordered_fine_type_ids_sha256",
+    "broad_lineage_by_fine_type",
+    "probability_vector_order",
+    "probability_sum_tolerance",
+    "abstention_policy",
+    "performance_criteria",
+    "performance_evaluation",
     "ordered_annotation_feature_ids",
     "ordered_annotation_feature_ids_sha256",
+    "annotation_feature_normalization",
+    "annotation_training_scope",
+    "annotation_training_donor_ids",
+    "annotation_training_donor_ids_sha256",
+    "training_label_ontology_source",
+    "training_label_provenance_receipt_sha256",
+    "training_label_target_gene_overlap_count",
+    "training_labels_establish_target_independence",
+    "annotation_quality_contract",
+    "locked_donors_used_for_training",
+    "same_cohort_annotation",
+    "cross_fitting_method",
+    "cross_fitting_receipt",
+}
+
+_TRAINING_LABEL_PROVENANCE_RECEIPT_FIELDS = {
+    "schema",
+    "evidence_kind",
+    "ontology_id",
+    "training_label_ontology_source",
+    "ontology_source_artifact_sha256",
+    "ontology_construction_method",
+    "training_label_feature_normalization",
+    "ordered_fine_type_ids",
+    "ordered_fine_type_ids_sha256",
+    "broad_lineage_by_fine_type",
+    "ordered_training_label_feature_ids",
+    "ordered_training_label_feature_ids_sha256",
+    "ordered_target_gene_ids",
+    "ordered_target_gene_ids_sha256",
+    "training_label_target_gene_overlap_count",
+    "training_labels_establish_target_independence",
     "annotation_training_scope",
     "annotation_training_donor_ids",
     "annotation_training_donor_ids_sha256",
     "locked_donors_used_for_training",
     "same_cohort_annotation",
-    "cross_fitting_method",
-    "cross_fitting_receipt",
+    "created_without_locked_outcomes",
+}
+
+_TRAINING_LABEL_ONTOLOGY_SOURCE_FIELDS = {
+    "schema",
+    "evidence_kind",
+    "training_label_ontology_source",
+    "ontology_id",
+    "ontology_construction_method",
+    "training_label_feature_normalization",
+    "ordered_fine_type_ids",
+    "ordered_fine_type_ids_sha256",
+    "broad_lineage_by_fine_type",
+    "ordered_training_label_feature_ids",
+    "ordered_training_label_feature_ids_sha256",
+    "source_donor_ids",
+    "source_donor_ids_sha256",
+    "created_without_locked_outcomes",
+}
+
+_ANNOTATION_PERFORMANCE_CRITERIA_FIELDS = {
+    "minimum_fine_type_macro_f1",
+    "calibration_metric",
+    "calibration_binning",
+    "calibration_bin_count",
+    "maximum_calibration_error",
+    "minimum_major_class_sensitivity",
+    "minimum_prediction_coverage_fraction",
+}
+
+_ANNOTATION_PERFORMANCE_EVALUATION_FIELDS = {
+    "validation_design",
+    "validation_donor_ids",
+    "validation_donor_ids_sha256",
+    "fine_type_macro_f1",
+    "calibration_metric",
+    "calibration_error",
+    "major_class_sensitivity_by_fine_type",
+    "prediction_coverage_fraction",
+    "per_validation_donor_metrics",
+}
+
+_ANNOTATION_PER_DONOR_PERFORMANCE_FIELDS = {
+    "fine_type_macro_f1",
+    "calibration_error",
+    "minimum_major_class_sensitivity",
+    "prediction_coverage_fraction",
+}
+
+_ANNOTATION_ABSTENTION_POLICY_FIELDS = {
+    "method",
+    "confidence_threshold",
+    "abstain_label",
+    "tie_breaking",
+}
+
+_ANNOTATION_CROSS_FIT_RECEIPT_FIELDS = {
+    "schema",
+    "validation_export_sha256",
+    "prediction_export_sha256",
+    "validation_folds",
+    "prediction_assignment",
+}
+
+_ANNOTATION_PREDICTION_ASSIGNMENT_FIELDS = {
+    "method",
+    "prediction_donor_ids",
+    "final_model_training_donor_ids",
+    "locked_donors_used_for_training",
+    "created_without_locked_outcomes",
 }
 
 
@@ -896,10 +1226,603 @@ def _read_independent_annotation_receipt(path: Path) -> Mapping[str, object]:
     return value
 
 
+def _read_training_label_provenance_receipt(path: Path) -> Mapping[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("training-label provenance receipt is not valid JSON") from error
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _TRAINING_LABEL_PROVENANCE_RECEIPT_FIELDS
+        or value.get("schema") != TRAINING_LABEL_PROVENANCE_RECEIPT_SCHEMA
+    ):
+        raise ValueError("training-label provenance receipt has an incomplete or extra field set")
+    return value
+
+
+def _read_training_label_ontology_source(path: Path) -> Mapping[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("training-label ontology source is not valid JSON") from error
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _TRAINING_LABEL_ONTOLOGY_SOURCE_FIELDS
+        or value.get("schema") != TRAINING_LABEL_ONTOLOGY_SOURCE_SCHEMA
+    ):
+        raise ValueError("training-label ontology source has an incomplete or extra field set")
+    return value
+
+
+def _unique_receipt_strings(
+    value: object, label: str, *, allow_empty: bool = False
+) -> Tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError("%s must be a list" % label)
+    result = tuple(str(item) for item in value)
+    if (
+        (not allow_empty and not result)
+        or len(set(result)) != len(result)
+        or any(not item.strip() for item in result)
+    ):
+        raise ValueError("%s must contain unique nonempty strings" % label)
+    return result
+
+
+def _finite_receipt_number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("%s must be numeric" % label)
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("%s must be finite" % label)
+    return result
+
+
+def _verify_training_label_provenance_receipt(
+    path: Path,
+    ontology_source_artifact_path: Path,
+    contract: Mapping[str, object],
+    *,
+    target_gene_ids: Sequence[str],
+) -> tuple[
+    Mapping[str, object],
+    str,
+    Path,
+    str,
+    Tuple[str, ...],
+    Mapping[str, str],
+]:
+    """Load the actual ontology receipt and prove that its labels are target independent."""
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError("training-label provenance receipt is unavailable")
+    digest = _sha256_file(resolved)
+    if digest != contract.get("training_label_provenance_receipt_sha256"):
+        raise ValueError("training-label provenance receipt differs from the frozen SHA-256")
+    receipt = _read_training_label_provenance_receipt(resolved)
+    source_path = ontology_source_artifact_path.expanduser().resolve()
+    if not source_path.is_file() or source_path == resolved:
+        raise ValueError("training-label ontology source artifact is unavailable or collides")
+    source_digest = _sha256_file(source_path)
+    if source_digest != receipt["ontology_source_artifact_sha256"]:
+        raise ValueError("training-label ontology source artifact differs from its receipt")
+    source = _read_training_label_ontology_source(source_path)
+    target_ids = tuple(str(value) for value in target_gene_ids)
+    if (
+        not target_ids
+        or len(set(target_ids)) != len(target_ids)
+        or any(not value.strip() for value in target_ids)
+    ):
+        raise ValueError("frozen annotation target genes are malformed")
+    fine_type_ids = _unique_receipt_strings(
+        receipt["ordered_fine_type_ids"], "training-label ordered fine-type IDs"
+    )
+    training_label_features = _unique_receipt_strings(
+        receipt["ordered_training_label_feature_ids"],
+        "training-label ontology feature IDs",
+    )
+    receipt_target_ids = _unique_receipt_strings(
+        receipt["ordered_target_gene_ids"], "training-label target gene IDs"
+    )
+    training_donor_ids = _unique_receipt_strings(
+        receipt["annotation_training_donor_ids"],
+        "training-label annotation training donor IDs",
+        allow_empty=True,
+    )
+    source_donor_ids = _unique_receipt_strings(
+        source["source_donor_ids"],
+        "training-label ontology source donor IDs",
+        allow_empty=True,
+    )
+    broad_value = receipt["broad_lineage_by_fine_type"]
+    if not isinstance(broad_value, Mapping) or set(str(key) for key in broad_value) != set(
+        fine_type_ids
+    ):
+        raise ValueError("training-label broad-lineage ontology differs from fine-type IDs")
+    broad_lineage_by_fine_type = {str(key): str(value) for key, value in broad_value.items()}
+    if any(value not in TYPE_NAMES for value in broad_lineage_by_fine_type.values()):
+        raise ValueError("training-label ontology contains an unknown broad lineage")
+    overlap = set(training_label_features) & set(target_ids)
+    contract_donors = tuple(str(value) for value in contract["annotation_training_donor_ids"])
+    shared_ontology_fields = (
+        "evidence_kind",
+        "training_label_ontology_source",
+        "ontology_id",
+        "ontology_construction_method",
+        "training_label_feature_normalization",
+        "ordered_fine_type_ids",
+        "ordered_fine_type_ids_sha256",
+        "broad_lineage_by_fine_type",
+        "ordered_training_label_feature_ids",
+        "ordered_training_label_feature_ids_sha256",
+        "created_without_locked_outcomes",
+    )
+    if (
+        any(source[name] != receipt[name] for name in shared_ontology_fields)
+        or source_donor_ids != training_donor_ids
+        or source["source_donor_ids_sha256"] != receipt["annotation_training_donor_ids_sha256"]
+        or receipt["evidence_kind"] != contract.get("evidence_kind")
+        or receipt["training_label_ontology_source"]
+        != contract.get("training_label_ontology_source")
+        or not str(receipt["ontology_id"]).strip()
+        or not str(receipt["ontology_construction_method"]).strip()
+        or not str(receipt["training_label_feature_normalization"]).strip()
+        or not _is_sha256(receipt["ontology_source_artifact_sha256"])
+        or receipt["ordered_fine_type_ids_sha256"] != _canonical_sha256(list(fine_type_ids))
+        or receipt_target_ids != target_ids
+        or receipt["ordered_target_gene_ids_sha256"] != _canonical_sha256(list(target_ids))
+        or receipt["ordered_training_label_feature_ids_sha256"]
+        != _canonical_sha256(list(training_label_features))
+        or overlap
+        or receipt["training_label_target_gene_overlap_count"] != 0
+        or receipt["training_label_target_gene_overlap_count"]
+        != contract.get("training_label_target_gene_overlap_count")
+        or receipt["training_labels_establish_target_independence"] is not True
+        or receipt["training_labels_establish_target_independence"]
+        != contract.get("training_labels_establish_target_independence")
+        or receipt["annotation_training_scope"] != contract.get("annotation_training_scope")
+        or training_donor_ids != contract_donors
+        or receipt["annotation_training_donor_ids_sha256"]
+        != contract.get("annotation_training_donor_ids_sha256")
+        or receipt["locked_donors_used_for_training"] is not False
+        or receipt["locked_donors_used_for_training"]
+        != contract.get("locked_donors_used_for_training")
+        or receipt["same_cohort_annotation"] != contract.get("same_cohort_annotation")
+        or receipt["created_without_locked_outcomes"] is not True
+    ):
+        raise ValueError(
+            "training-label provenance receipt does not prove target-independent ontology labels"
+        )
+    return (
+        receipt,
+        digest,
+        source_path,
+        source_digest,
+        fine_type_ids,
+        broad_lineage_by_fine_type,
+    )
+
+
+def _verify_annotation_performance_receipt(
+    receipt: Mapping[str, object],
+    contract: Mapping[str, object],
+    *,
+    prediction_donor_ids: Sequence[str],
+    fine_type_ids: Sequence[str],
+) -> tuple[int, float, float]:
+    """Validate frozen held-out performance, calibration, abstention, and coverage."""
+
+    quality = _validate_annotation_quality_contract(contract["annotation_quality_contract"])
+    donors = tuple(str(value) for value in prediction_donor_ids)
+    receipt_donors = _unique_receipt_strings(
+        receipt["prediction_donor_ids"], "annotation prediction donor IDs"
+    )
+    receipt_fine_types = _unique_receipt_strings(
+        receipt["ordered_fine_type_ids"], "annotation ordered fine-type IDs"
+    )
+    if (
+        receipt_donors != donors
+        or receipt["prediction_donor_ids_sha256"] != _canonical_sha256(list(donors))
+        or receipt_fine_types != tuple(fine_type_ids)
+        or receipt["ordered_fine_type_ids_sha256"] != _canonical_sha256(list(fine_type_ids))
+        or tuple(str(value) for value in receipt["probability_vector_order"])
+        != tuple(fine_type_ids)
+    ):
+        raise ValueError("annotation receipt prediction scope or probability ontology differs")
+
+    broad_value = receipt["broad_lineage_by_fine_type"]
+    if not isinstance(broad_value, Mapping) or set(str(key) for key in broad_value) != set(
+        fine_type_ids
+    ):
+        raise ValueError("annotation receipt broad-lineage ontology is malformed")
+
+    tolerance = _finite_receipt_number(
+        receipt["probability_sum_tolerance"], "annotation probability sum tolerance"
+    )
+    if tolerance != float(quality["probability_sum_tolerance"]):
+        raise ValueError("annotation probability sum tolerance is too loose")
+    policy = receipt["abstention_policy"]
+    if not isinstance(policy, Mapping) or set(policy) != _ANNOTATION_ABSTENTION_POLICY_FIELDS:
+        raise ValueError("annotation abstention policy is incomplete")
+    confidence_threshold = _finite_receipt_number(
+        policy["confidence_threshold"], "annotation confidence threshold"
+    )
+    if (
+        policy["method"] != quality["abstention_method"]
+        or policy["abstain_label"] != quality["abstain_label"]
+        or policy["tie_breaking"] != quality["tie_breaking"]
+        or confidence_threshold != float(quality["confidence_threshold"])
+    ):
+        raise ValueError("annotation confidence/abstention rule is not frozen or conservative")
+
+    criteria = receipt["performance_criteria"]
+    evaluation = receipt["performance_evaluation"]
+    if (
+        not isinstance(criteria, Mapping)
+        or set(criteria) != _ANNOTATION_PERFORMANCE_CRITERIA_FIELDS
+        or not isinstance(evaluation, Mapping)
+        or set(evaluation) != _ANNOTATION_PERFORMANCE_EVALUATION_FIELDS
+    ):
+        raise ValueError("annotation performance criteria or evaluation are incomplete")
+    expected_criteria = {
+        "minimum_fine_type_macro_f1": quality["minimum_fine_type_macro_f1"],
+        "calibration_metric": quality["calibration_metric"],
+        "calibration_binning": quality["calibration_binning"],
+        "calibration_bin_count": quality["calibration_bin_count"],
+        "maximum_calibration_error": quality["maximum_calibration_error"],
+        "minimum_major_class_sensitivity": quality["minimum_major_class_sensitivity"],
+        "minimum_prediction_coverage_fraction": quality["minimum_prediction_coverage_fraction"],
+    }
+    if dict(criteria) != expected_criteria:
+        raise ValueError("annotation receipt criteria differ from the locked study contract")
+    minimum_macro_f1 = _finite_receipt_number(
+        criteria["minimum_fine_type_macro_f1"], "minimum annotation macro F1"
+    )
+    maximum_calibration_error = _finite_receipt_number(
+        criteria["maximum_calibration_error"], "maximum annotation calibration error"
+    )
+    minimum_sensitivity = _finite_receipt_number(
+        criteria["minimum_major_class_sensitivity"],
+        "minimum annotation major-class sensitivity",
+    )
+    minimum_coverage = _finite_receipt_number(
+        criteria["minimum_prediction_coverage_fraction"],
+        "minimum annotation prediction coverage",
+    )
+    if (
+        criteria["calibration_metric"] != "multiclass_expected_calibration_error"
+        or minimum_macro_f1 < MINIMUM_ANNOTATION_FINE_TYPE_MACRO_F1
+        or not 0.0 <= maximum_calibration_error <= (MAXIMUM_ANNOTATION_EXPECTED_CALIBRATION_ERROR)
+        or minimum_sensitivity < MINIMUM_ANNOTATION_MAJOR_CLASS_SENSITIVITY
+        or minimum_sensitivity > 1.0
+        or minimum_coverage < MINIMUM_ANNOTATION_PREDICTION_COVERAGE
+        or minimum_coverage > 1.0
+        or minimum_macro_f1 > 1.0
+    ):
+        raise ValueError("annotation performance criteria weaken the scientific guardrails")
+
+    validation_donors = _unique_receipt_strings(
+        evaluation["validation_donor_ids"], "annotation validation donor IDs"
+    )
+    if evaluation["validation_donor_ids_sha256"] != _canonical_sha256(list(validation_donors)):
+        raise ValueError("annotation validation donor IDs differ from their frozen hash")
+    training_donors = set(str(value) for value in contract["annotation_training_donor_ids"])
+    evidence_kind = str(contract["evidence_kind"])
+    expected_design = quality["validation_designs_by_evidence_kind"][evidence_kind]
+    if contract["same_cohort_annotation"] is True:
+        valid_design = (
+            evaluation["validation_design"] == expected_design
+            and set(validation_donors) == training_donors
+        )
+    elif evidence_kind == "external_gene_disjoint_annotation":
+        valid_design = (
+            evaluation["validation_design"] == expected_design
+            and not (set(validation_donors) & training_donors)
+            and not (set(validation_donors) & set(donors))
+        )
+    else:
+        valid_design = evaluation["validation_design"] == expected_design
+    if not valid_design or set(validation_donors) & set(LOCKED_TEST_DONORS):
+        raise ValueError("annotation validation design uses an invalid donor scope")
+
+    observed_macro_f1 = _finite_receipt_number(
+        evaluation["fine_type_macro_f1"], "annotation fine-type macro F1"
+    )
+    observed_calibration_error = _finite_receipt_number(
+        evaluation["calibration_error"], "annotation calibration error"
+    )
+    sensitivity_value = evaluation["major_class_sensitivity_by_fine_type"]
+    if not isinstance(sensitivity_value, Mapping) or set(
+        str(key) for key in sensitivity_value
+    ) != set(fine_type_ids):
+        raise ValueError("annotation major-class sensitivity is incomplete")
+    sensitivities = {
+        str(key): _finite_receipt_number(value, "annotation major-class sensitivity")
+        for key, value in sensitivity_value.items()
+    }
+    coverage = _finite_receipt_number(
+        evaluation["prediction_coverage_fraction"], "annotation prediction coverage"
+    )
+    per_donor_value = evaluation["per_validation_donor_metrics"]
+    if not isinstance(per_donor_value, Mapping) or set(str(key) for key in per_donor_value) != set(
+        validation_donors
+    ):
+        raise ValueError("annotation performance lacks every held-out validation donor")
+    per_donor_metrics = {}
+    for donor, raw_metrics in per_donor_value.items():
+        if (
+            not isinstance(raw_metrics, Mapping)
+            or set(raw_metrics) != _ANNOTATION_PER_DONOR_PERFORMANCE_FIELDS
+        ):
+            raise ValueError("annotation held-out donor performance is incomplete")
+        per_donor_metrics[str(donor)] = {
+            name: _finite_receipt_number(raw_metrics[name], "annotation held-out donor %s" % name)
+            for name in _ANNOTATION_PER_DONOR_PERFORMANCE_FIELDS
+        }
+    per_donor_pass = all(
+        metrics["fine_type_macro_f1"] >= minimum_macro_f1
+        and metrics["calibration_error"] <= maximum_calibration_error
+        and metrics["minimum_major_class_sensitivity"] >= minimum_sensitivity
+        and metrics["prediction_coverage_fraction"] >= minimum_coverage
+        and all(0.0 <= value <= 1.0 for value in metrics.values())
+        for metrics in per_donor_metrics.values()
+    )
+    if (
+        evaluation["calibration_metric"] != criteria["calibration_metric"]
+        or not 0.0 <= observed_macro_f1 <= 1.0
+        or observed_macro_f1 < minimum_macro_f1
+        or not 0.0 <= observed_calibration_error <= maximum_calibration_error
+        or any(not 0.0 <= value <= 1.0 for value in sensitivities.values())
+        or any(value < minimum_sensitivity for value in sensitivities.values())
+        or not 0.0 <= coverage <= 1.0
+        or coverage < minimum_coverage
+        or not per_donor_pass
+    ):
+        raise ValueError("annotation held-out performance does not meet frozen criteria")
+
+    prediction_count = receipt["prediction_row_count"]
+    nonabstained_count = receipt["prediction_nonabstained_row_count"]
+    if (
+        isinstance(prediction_count, bool)
+        or not isinstance(prediction_count, int)
+        or prediction_count < 1
+        or isinstance(nonabstained_count, bool)
+        or not isinstance(nonabstained_count, int)
+        or not 0 <= nonabstained_count <= prediction_count
+        or not math.isclose(
+            coverage,
+            nonabstained_count / prediction_count,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        )
+    ):
+        raise ValueError("annotation receipt coverage differs from its row counts")
+    return nonabstained_count, confidence_threshold, tolerance
+
+
+def _recompute_annotation_validation_metrics(
+    path: Path,
+    receipt: Mapping[str, object],
+    *,
+    fine_type_ids: Sequence[str],
+    confidence_threshold: float,
+    probability_sum_tolerance: float,
+) -> tuple[Path, str, Mapping[str, object]]:
+    """Recompute every annotation-quality endpoint from held-out row-level evidence."""
+
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError("row-level annotation validation export is unavailable")
+    digest = _sha256_file(resolved)
+    if digest != receipt["validation_export_sha256"]:
+        raise ValueError("row-level annotation validation export differs from its receipt")
+    row_count = receipt["validation_row_count"]
+    if (
+        isinstance(row_count, bool)
+        or not isinstance(row_count, int)
+        or row_count < 1
+        or tuple(str(value) for value in receipt["validation_columns"])
+        != ANNOTATION_VALIDATION_COLUMNS
+        or receipt["validation_row_order"] != "validation_donor_then_cell_id"
+    ):
+        raise ValueError("annotation validation export layout is not frozen")
+    evaluation = receipt["performance_evaluation"]
+    expected_donors = tuple(str(value) for value in evaluation["validation_donor_ids"])
+    bin_count = int(receipt["performance_criteria"]["calibration_bin_count"])
+    type_ids = tuple(str(value) for value in fine_type_ids)
+
+    def empty_accumulator() -> dict[str, object]:
+        return {
+            "rows": 0,
+            "nonabstained": 0,
+            "true": {fine_type: 0 for fine_type in type_ids},
+            "predicted": {fine_type: 0 for fine_type in type_ids},
+            "true_positive": {fine_type: 0 for fine_type in type_ids},
+            "ece_count": [0] * bin_count,
+            "ece_confidence_sum": [0.0] * bin_count,
+            "ece_correct_sum": [0] * bin_count,
+        }
+
+    overall = empty_accumulator()
+    by_donor = {donor: empty_accumulator() for donor in expected_donors}
+
+    def update(
+        accumulator: dict[str, object],
+        *,
+        truth: str,
+        predicted: str,
+        confidence: float,
+        abstained: bool,
+    ) -> None:
+        accumulator["rows"] = int(accumulator["rows"]) + 1
+        true_counts = accumulator["true"]
+        predicted_counts = accumulator["predicted"]
+        true_positive = accumulator["true_positive"]
+        assert isinstance(true_counts, dict)
+        assert isinstance(predicted_counts, dict)
+        assert isinstance(true_positive, dict)
+        true_counts[truth] += 1
+        if not abstained:
+            accumulator["nonabstained"] = int(accumulator["nonabstained"]) + 1
+            predicted_counts[predicted] += 1
+            true_positive[truth] += int(predicted == truth)
+        bin_index = min(int(confidence * bin_count), bin_count - 1)
+        ece_count = accumulator["ece_count"]
+        ece_confidence = accumulator["ece_confidence_sum"]
+        ece_correct = accumulator["ece_correct_sum"]
+        assert isinstance(ece_count, list)
+        assert isinstance(ece_confidence, list)
+        assert isinstance(ece_correct, list)
+        ece_count[bin_index] += 1
+        ece_confidence[bin_index] += confidence
+        # Calibration evaluates the raw argmax probability before abstention.
+        ece_correct[bin_index] += int(predicted == truth)
+
+    observed_rows = 0
+    previous_identity: Optional[tuple[str, str]] = None
+    with _open_annotation_predictions(resolved) as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != ANNOTATION_VALIDATION_COLUMNS:
+            raise ValueError("annotation validation columns differ from the frozen receipt")
+        for row in reader:
+            donor = str(row["validation_donor_id"])
+            cell_id = str(row["cell_id"])
+            identity = (donor, cell_id)
+            if (
+                donor not in by_donor
+                or not cell_id.strip()
+                or previous_identity is not None
+                and identity <= previous_identity
+            ):
+                raise ValueError(
+                    "annotation validation rows are unscoped, duplicated, or unordered"
+                )
+            previous_identity = identity
+            truth = str(row["true_fine_type"])
+            if truth not in type_ids:
+                raise ValueError("annotation validation truth is outside the frozen ontology")
+            predicted, confidence, abstained, _probabilities = (
+                _parse_calibrated_probability_evidence(
+                    row,
+                    fine_type_ids=type_ids,
+                    confidence_threshold=confidence_threshold,
+                    probability_sum_tolerance=probability_sum_tolerance,
+                    predicted_label_field="predicted_fine_type",
+                )
+            )
+            update(
+                overall,
+                truth=truth,
+                predicted=predicted,
+                confidence=confidence,
+                abstained=abstained,
+            )
+            update(
+                by_donor[donor],
+                truth=truth,
+                predicted=predicted,
+                confidence=confidence,
+                abstained=abstained,
+            )
+            observed_rows += 1
+    if observed_rows != row_count:
+        raise ValueError("annotation validation row count differs from its receipt")
+
+    def summarize(accumulator: Mapping[str, object]) -> Mapping[str, object]:
+        rows = int(accumulator["rows"])
+        nonabstained = int(accumulator["nonabstained"])
+        true_counts = accumulator["true"]
+        predicted_counts = accumulator["predicted"]
+        true_positive = accumulator["true_positive"]
+        assert isinstance(true_counts, Mapping)
+        assert isinstance(predicted_counts, Mapping)
+        assert isinstance(true_positive, Mapping)
+        if rows < 1 or any(int(true_counts[fine_type]) < 1 for fine_type in type_ids):
+            raise ValueError("annotation validation donor lacks a frozen major fine type")
+        sensitivities = {
+            fine_type: int(true_positive[fine_type]) / int(true_counts[fine_type])
+            for fine_type in type_ids
+        }
+        f1_values = []
+        for fine_type in type_ids:
+            tp = int(true_positive[fine_type])
+            denominator = int(true_counts[fine_type]) + int(predicted_counts[fine_type])
+            f1_values.append(0.0 if denominator == 0 else 2.0 * tp / denominator)
+        ece = 0.0
+        for count, confidence_sum, correct_sum in zip(
+            accumulator["ece_count"],
+            accumulator["ece_confidence_sum"],
+            accumulator["ece_correct_sum"],
+        ):
+            if int(count) > 0:
+                ece += (int(count) / rows) * abs(
+                    float(correct_sum) / int(count) - float(confidence_sum) / int(count)
+                )
+        return {
+            "fine_type_macro_f1": float(np.mean(f1_values)),
+            "calibration_error": float(ece),
+            "major_class_sensitivity_by_fine_type": sensitivities,
+            "minimum_major_class_sensitivity": min(sensitivities.values()),
+            "prediction_coverage_fraction": nonabstained / rows,
+        }
+
+    overall_metrics = summarize(overall)
+    donor_metrics = {donor: summarize(by_donor[donor]) for donor in expected_donors}
+    return resolved, digest, {**overall_metrics, "per_validation_donor_metrics": donor_metrics}
+
+
+def _assert_recomputed_annotation_metrics(
+    evaluation: Mapping[str, object], recomputed: Mapping[str, object]
+) -> None:
+    """Reject receipt metrics that differ from their row-level validation evidence."""
+
+    scalar_fields = (
+        "fine_type_macro_f1",
+        "calibration_error",
+        "prediction_coverage_fraction",
+    )
+    if any(
+        not math.isclose(
+            float(evaluation[name]), float(recomputed[name]), rel_tol=0.0, abs_tol=1.0e-12
+        )
+        for name in scalar_fields
+    ):
+        raise ValueError("annotation performance metrics differ from row-level validation evidence")
+    observed_sensitivity = evaluation["major_class_sensitivity_by_fine_type"]
+    recomputed_sensitivity = recomputed["major_class_sensitivity_by_fine_type"]
+    if not isinstance(observed_sensitivity, Mapping) or any(
+        not math.isclose(
+            float(observed_sensitivity[name]),
+            float(recomputed_sensitivity[name]),
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        )
+        for name in recomputed_sensitivity
+    ):
+        raise ValueError("annotation class sensitivity differs from row-level validation evidence")
+    observed_donors = evaluation["per_validation_donor_metrics"]
+    recomputed_donors = recomputed["per_validation_donor_metrics"]
+    if not isinstance(observed_donors, Mapping) or set(observed_donors) != set(recomputed_donors):
+        raise ValueError("annotation donor metrics differ from row-level validation evidence")
+    for donor, expected in recomputed_donors.items():
+        observed = observed_donors[donor]
+        if not isinstance(observed, Mapping) or any(
+            not math.isclose(
+                float(observed[name]), float(expected[name]), rel_tol=0.0, abs_tol=1.0e-12
+            )
+            for name in _ANNOTATION_PER_DONOR_PERFORMANCE_FIELDS
+        ):
+            raise ValueError("annotation donor metrics differ from row-level validation evidence")
+
+
 def _verify_cross_fitting_receipt(
     receipt: object,
     contract: Mapping[str, object],
     prediction_donor_ids: Sequence[str],
+    *,
+    validation_export_sha256: str,
+    prediction_export_sha256: str,
 ) -> None:
     if contract["same_cohort_annotation"] is not True:
         if receipt is not None or contract["cross_fitting_receipt_sha256"] is not None:
@@ -907,64 +1830,131 @@ def _verify_cross_fitting_receipt(
         return
     if (
         not isinstance(receipt, Mapping)
-        or set(receipt) != {"schema", "folds"}
+        or set(receipt) != _ANNOTATION_CROSS_FIT_RECEIPT_FIELDS
         or receipt.get("schema") != ANNOTATION_CROSS_FIT_SCHEMA
-        or not isinstance(receipt.get("folds"), list)
+        or receipt.get("validation_export_sha256") != validation_export_sha256
+        or receipt.get("prediction_export_sha256") != prediction_export_sha256
+        or not isinstance(receipt.get("validation_folds"), list)
         or _canonical_sha256(receipt) != contract["cross_fitting_receipt_sha256"]
     ):
         raise ValueError("independent annotation cross-fitting receipt differs from the lock")
     training_donors = tuple(str(value) for value in contract["annotation_training_donor_ids"])
     expected_prediction_donors = tuple(str(value) for value in prediction_donor_ids)
     folds: dict[str, tuple[str, ...]] = {}
-    for raw_fold in receipt["folds"]:
+    for raw_fold in receipt["validation_folds"]:
         if not isinstance(raw_fold, Mapping) or set(raw_fold) != {
-            "prediction_donor_id",
+            "validation_donor_id",
             "training_donor_ids",
         }:
             raise ValueError("independent annotation cross-fitting fold is malformed")
-        prediction_donor = str(raw_fold["prediction_donor_id"])
+        validation_donor = str(raw_fold["validation_donor_id"])
         raw_training = raw_fold["training_donor_ids"]
         if not isinstance(raw_training, list):
             raise ValueError("independent annotation cross-fitting donor IDs must be a list")
         fold_training = tuple(str(value) for value in raw_training)
         if (
-            not prediction_donor
-            or prediction_donor in folds
+            not validation_donor
+            or validation_donor in folds
             or not fold_training
             or len(set(fold_training)) != len(fold_training)
         ):
             raise ValueError("independent annotation cross-fitting fold is malformed")
-        folds[prediction_donor] = fold_training
-    if set(folds) != set(expected_prediction_donors):
+        folds[validation_donor] = fold_training
+    if set(folds) != set(training_donors):
         raise ValueError(
-            "independent annotation cross-fitting folds do not cover prediction donors"
+            "independent annotation cross-fitting folds do not cover every development donor"
         )
-    for prediction_donor in expected_prediction_donors:
-        expected_training = tuple(donor for donor in training_donors if donor != prediction_donor)
-        if folds[prediction_donor] != expected_training:
+    for validation_donor in training_donors:
+        expected_training = tuple(donor for donor in training_donors if donor != validation_donor)
+        if folds[validation_donor] != expected_training:
             raise ValueError(
                 "independent annotation fold is not donor-held-out from frozen development training"
             )
+    assignment = receipt["prediction_assignment"]
+    if (
+        not isinstance(assignment, Mapping)
+        or set(assignment) != _ANNOTATION_PREDICTION_ASSIGNMENT_FIELDS
+    ):
+        raise ValueError("independent annotation prediction-model assignment is incomplete")
+    assignment_prediction_donors = _unique_receipt_strings(
+        assignment["prediction_donor_ids"],
+        "annotation prediction-model donor IDs",
+    )
+    final_training_donors = _unique_receipt_strings(
+        assignment["final_model_training_donor_ids"],
+        "annotation final-model training donor IDs",
+        allow_empty=True,
+    )
+    prediction_donor_set = set(expected_prediction_donors)
+    training_donor_set = set(training_donors)
+    development_predictions = prediction_donor_set == training_donor_set
+    mixed_predictions = training_donor_set < prediction_donor_set
+    if development_predictions:
+        assignment_is_valid = (
+            assignment["method"] == "leave_one_development_donor_out_validation_models"
+            and assignment_prediction_donors == expected_prediction_donors
+            and not final_training_donors
+        )
+    elif mixed_predictions:
+        assignment_is_valid = (
+            assignment["method"] == "development_lodo_plus_final_all_development_donors_model"
+            and assignment_prediction_donors == expected_prediction_donors
+            and final_training_donors == training_donors
+        )
+    else:
+        assignment_is_valid = (
+            not (prediction_donor_set & training_donor_set)
+            and assignment["method"] == "final_all_development_donors_model"
+            and assignment_prediction_donors == expected_prediction_donors
+            and final_training_donors == training_donors
+        )
+    if (
+        not assignment_is_valid
+        or assignment["locked_donors_used_for_training"] is not False
+        or assignment["created_without_locked_outcomes"] is not True
+    ):
+        raise ValueError(
+            "independent annotation prediction export is not bound to the correct development model"
+        )
 
 
 def _verify_independent_annotation_artifacts(
     receipt_path: Path,
     predictions_path: Path,
+    training_label_receipt_path: Path,
+    training_label_ontology_source_path: Path,
+    validation_export_path: Path,
     contract: Mapping[str, object],
     *,
     prediction_donor_ids: Sequence[str],
+    target_gene_ids: Sequence[str],
 ) -> IndependentAnnotationArtifacts:
     """Bind the actual label export to the frozen non-pending evidence contract."""
 
     receipt_path = receipt_path.expanduser().resolve()
     predictions_path = predictions_path.expanduser().resolve()
+    training_label_receipt_path = training_label_receipt_path.expanduser().resolve()
+    training_label_ontology_source_path = training_label_ontology_source_path.expanduser().resolve()
+    validation_export_path = validation_export_path.expanduser().resolve()
     if (
-        receipt_path == predictions_path
+        len(
+            {
+                receipt_path,
+                predictions_path,
+                training_label_receipt_path,
+                training_label_ontology_source_path,
+                validation_export_path,
+            }
+        )
+        != 5
         or not receipt_path.is_file()
         or not predictions_path.is_file()
+        or not training_label_receipt_path.is_file()
+        or not training_label_ontology_source_path.is_file()
+        or not validation_export_path.is_file()
     ):
         raise ValueError(
-            "independent annotation receipt and prediction export must be distinct files"
+            "annotation, training-label, and prediction evidence must be distinct files"
         )
     if contract.get("evidence_kind") == "pending":
         raise ValueError("pending label-target evidence cannot materialize independent labels")
@@ -972,6 +1962,19 @@ def _verify_independent_annotation_artifacts(
     if receipt_sha256 != contract.get("annotation_receipt_sha256"):
         raise ValueError("independent annotation receipt differs from the frozen SHA-256")
     receipt = _read_independent_annotation_receipt(receipt_path)
+    (
+        training_label_receipt,
+        training_label_receipt_sha256,
+        training_label_ontology_source_path,
+        training_label_ontology_source_sha256,
+        fine_type_ids,
+        broad_lineage_by_fine_type,
+    ) = _verify_training_label_provenance_receipt(
+        training_label_receipt_path,
+        training_label_ontology_source_path,
+        contract,
+        target_gene_ids=target_gene_ids,
+    )
     contract_fields = {
         "evidence_kind",
         "ordered_annotation_feature_ids",
@@ -979,6 +1982,11 @@ def _verify_independent_annotation_artifacts(
         "annotation_training_scope",
         "annotation_training_donor_ids",
         "annotation_training_donor_ids_sha256",
+        "training_label_ontology_source",
+        "training_label_provenance_receipt_sha256",
+        "training_label_target_gene_overlap_count",
+        "training_labels_establish_target_independence",
+        "annotation_quality_contract",
         "locked_donors_used_for_training",
         "same_cohort_annotation",
         "cross_fitting_method",
@@ -988,18 +1996,46 @@ def _verify_independent_annotation_artifacts(
     ):
         raise ValueError("independent annotation receipt differs from the frozen evidence contract")
     if (
+        receipt["training_label_provenance_receipt_sha256"] != training_label_receipt_sha256
+        or tuple(str(value) for value in receipt["ordered_fine_type_ids"]) != fine_type_ids
+        or receipt["broad_lineage_by_fine_type"] != broad_lineage_by_fine_type
+        or training_label_receipt["broad_lineage_by_fine_type"]
+        != receipt["broad_lineage_by_fine_type"]
+    ):
+        raise ValueError("annotation receipt differs from its training-label ontology receipt")
+    if (
         tuple(str(value) for value in receipt["prediction_columns"])
         != (ANNOTATION_PREDICTION_COLUMNS)
         or receipt["row_order"] != "filtered_annotation_export_order"
+        or not isinstance(receipt["annotation_feature_normalization"], str)
+        or not receipt["annotation_feature_normalization"].strip()
     ):
         raise ValueError("independent annotation prediction layout is not frozen")
-    prediction_count = receipt["prediction_row_count"]
-    if (
-        not isinstance(prediction_count, int)
-        or isinstance(prediction_count, bool)
-        or prediction_count < 1
-    ):
-        raise ValueError("independent annotation prediction row count must be positive")
+    (
+        prediction_nonabstained_count,
+        confidence_threshold,
+        probability_sum_tolerance,
+    ) = _verify_annotation_performance_receipt(
+        receipt,
+        contract,
+        prediction_donor_ids=prediction_donor_ids,
+        fine_type_ids=fine_type_ids,
+    )
+    (
+        validation_export_path,
+        validation_export_sha256,
+        recomputed_validation_metrics,
+    ) = _recompute_annotation_validation_metrics(
+        validation_export_path,
+        receipt,
+        fine_type_ids=fine_type_ids,
+        confidence_threshold=confidence_threshold,
+        probability_sum_tolerance=probability_sum_tolerance,
+    )
+    _assert_recomputed_annotation_metrics(
+        receipt["performance_evaluation"], recomputed_validation_metrics
+    )
+    prediction_count = int(receipt["prediction_row_count"])
     predictions_sha256 = _sha256_file(predictions_path)
     if predictions_sha256 != receipt["prediction_export_sha256"]:
         raise ValueError("independent annotation predictions differ from their receipt")
@@ -1007,14 +2043,62 @@ def _verify_independent_annotation_artifacts(
         receipt["cross_fitting_receipt"],
         contract,
         prediction_donor_ids,
+        validation_export_sha256=validation_export_sha256,
+        prediction_export_sha256=predictions_sha256,
     )
     return IndependentAnnotationArtifacts(
         receipt_path=receipt_path,
         receipt_sha256=receipt_sha256,
+        training_label_receipt_path=training_label_receipt_path,
+        training_label_receipt_sha256=training_label_receipt_sha256,
+        training_label_ontology_source_path=training_label_ontology_source_path,
+        training_label_ontology_source_sha256=training_label_ontology_source_sha256,
         predictions_path=predictions_path,
         predictions_sha256=predictions_sha256,
+        validation_export_path=validation_export_path,
+        validation_export_sha256=validation_export_sha256,
         prediction_row_count=prediction_count,
+        prediction_nonabstained_row_count=prediction_nonabstained_count,
+        prediction_donor_ids=tuple(str(value) for value in prediction_donor_ids),
+        fine_type_ids=fine_type_ids,
+        broad_lineage_by_fine_type=broad_lineage_by_fine_type,
+        confidence_threshold=confidence_threshold,
+        probability_sum_tolerance=probability_sum_tolerance,
+        prediction_coverage_fraction=(prediction_nonabstained_count / prediction_count),
     )
+
+
+def _require_h_meas_independent_annotation_contract(
+    contract: Mapping[str, object],
+    candidate_target_gene_ids: Sequence[str],
+) -> None:
+    """Reject H-MEAS labels that are pending or not candidate-panel independent."""
+
+    if contract.get("evidence_kind") == "pending":
+        raise ValueError(
+            "H-MEAS source construction requires non-pending independent label provenance"
+        )
+    annotation_ids = tuple(
+        str(value) for value in contract.get("ordered_annotation_feature_ids", ())
+    )
+    target_ids = tuple(str(value) for value in contract.get("ordered_target_gene_ids", ()))
+    candidate_ids = tuple(str(value) for value in candidate_target_gene_ids)
+    if (
+        not annotation_ids
+        or target_ids != candidate_ids
+        or contract.get("ordered_annotation_feature_ids_sha256")
+        != _canonical_sha256(list(annotation_ids))
+        or contract.get("ordered_target_gene_ids_sha256") != _canonical_sha256(list(candidate_ids))
+        or set(annotation_ids) & set(candidate_ids)
+        or contract.get("annotation_target_overlap_count") != 0
+        or contract.get("training_label_target_gene_overlap_count") != 0
+        or contract.get("training_labels_establish_target_independence") is not True
+        or contract.get("establishes_full_target_independence") is not True
+        or contract.get("locked_donors_used_for_training") is not False
+    ):
+        raise ValueError(
+            "H-MEAS independent labels are not bound disjointly to the candidate target panel"
+        )
 
 
 def _open_annotation_predictions(path: Path):
@@ -1025,6 +2109,80 @@ def _open_annotation_predictions(path: Path):
     return path.open("r", encoding="utf-8", newline="")
 
 
+def _parse_calibrated_probability_evidence(
+    row: Mapping[str, str],
+    *,
+    fine_type_ids: Sequence[str],
+    confidence_threshold: float,
+    probability_sum_tolerance: float,
+    predicted_label_field: str,
+) -> tuple[str, float, bool, np.ndarray]:
+    try:
+        confidence = float(row["confidence"])
+        raw_probabilities = json.loads(row["fine_type_probabilities_json"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("independent annotation row lacks calibrated probabilities") from error
+    if not isinstance(raw_probabilities, list) or len(raw_probabilities) != len(fine_type_ids):
+        raise ValueError("independent annotation probability vector has the wrong ontology width")
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in raw_probabilities
+    ):
+        raise ValueError("independent annotation probability vector is nonnumeric")
+    probabilities = np.asarray(raw_probabilities, dtype=np.float64)
+    if (
+        not math.isfinite(confidence)
+        or not np.isfinite(probabilities).all()
+        or np.any(probabilities < 0.0)
+        or np.any(probabilities > 1.0)
+        or not math.isclose(
+            float(probabilities.sum()),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=probability_sum_tolerance,
+        )
+    ):
+        raise ValueError("independent annotation probabilities are invalid or unnormalized")
+    maximum = float(probabilities.max())
+    if not math.isclose(confidence, maximum, rel_tol=0.0, abs_tol=1.0e-12):
+        raise ValueError("independent annotation confidence differs from its probability vector")
+    abstained_value = row.get("abstained")
+    if abstained_value not in {"true", "false"}:
+        raise ValueError("independent annotation abstention flag must be true or false")
+    abstained = abstained_value == "true"
+    expected_abstention = confidence < confidence_threshold
+    if abstained != expected_abstention:
+        raise ValueError("independent annotation row differs from the frozen abstention rule")
+    predicted_type = tuple(fine_type_ids)[int(np.argmax(probabilities))]
+    expected_label = ANNOTATION_ABSTAIN_LABEL if abstained else predicted_type
+    if row.get(predicted_label_field) != expected_label:
+        raise ValueError("annotation label differs from calibrated argmax/abstention probability")
+    return predicted_type, confidence, abstained, probabilities
+
+
+def _validated_annotation_prediction(
+    row: Mapping[str, str],
+    artifacts: IndependentAnnotationArtifacts,
+) -> tuple[Optional[str], Optional[str]]:
+    """Validate one calibrated probability vector and apply the frozen abstention rule."""
+
+    predicted_type, _confidence, abstained, _probabilities = _parse_calibrated_probability_evidence(
+        row,
+        fine_type_ids=artifacts.fine_type_ids,
+        confidence_threshold=artifacts.confidence_threshold,
+        probability_sum_tolerance=artifacts.probability_sum_tolerance,
+        predicted_label_field="fine_type",
+    )
+    if abstained:
+        if row.get("broad_lineage") != ANNOTATION_ABSTAIN_LABEL:
+            raise ValueError("abstained annotation row does not use the frozen abstain label")
+        return None, None
+    expected_lineage = artifacts.broad_lineage_by_fine_type[predicted_type]
+    if row.get("broad_lineage") != expected_lineage:
+        raise ValueError("independent annotation label differs from calibrated argmax probability")
+    return expected_lineage, predicted_type
+
+
 def _read_annotations(
     path: Path,
     *,
@@ -1033,6 +2191,8 @@ def _read_annotations(
     expected_row_count: int = ANNOTATION_ROWS,
     strict_sample_scope: bool = False,
 ) -> Dict[str, Dict[str, AnnotationCell]]:
+    if strict_sample_scope and independent_artifacts is None:
+        raise ValueError("H-MEAS development annotations require an independent prediction export")
     required = {
         "hest_id",
         "sample",
@@ -1066,6 +2226,7 @@ def _read_annotations(
         else _open_annotation_predictions(independent_artifacts.predictions_path)
     )
     prediction_rows = 0
+    prediction_nonabstained_rows = 0
     try:
         with (
             gzip.open(path, "rt", encoding="utf-8", newline="") as handle,
@@ -1108,8 +2269,12 @@ def _read_annotations(
                         raise ValueError(
                             "independent annotation predictions differ from frozen metadata order"
                         )
-                    lineage = prediction["broad_lineage"]
-                    fine_type = prediction["fine_type"].strip()
+                    lineage, fine_type = _validated_annotation_prediction(
+                        prediction, independent_artifacts
+                    )
+                    if lineage is None or fine_type is None:
+                        continue
+                    prediction_nonabstained_rows += 1
                 disease = row["disease_status"].strip()
                 site_id = row["sample_type"].strip()
                 tma = row["tma"].strip()
@@ -1154,6 +2319,19 @@ def _read_annotations(
                 if prediction_rows != independent_artifacts.prediction_row_count:
                     raise ValueError(
                         "independent annotation prediction count differs from its receipt"
+                    )
+                if (
+                    prediction_nonabstained_rows
+                    != independent_artifacts.prediction_nonabstained_row_count
+                    or not math.isclose(
+                        prediction_nonabstained_rows / prediction_rows,
+                        independent_artifacts.prediction_coverage_fraction,
+                        rel_tol=0.0,
+                        abs_tol=1.0e-12,
+                    )
+                ):
+                    raise ValueError(
+                        "independent annotation abstention coverage differs from its receipt"
                     )
     except (OSError, UnicodeError, csv.Error) as error:
         raise ValueError("HEST GSE250346 annotation export cannot be read") from error
@@ -2542,6 +3720,9 @@ def build_source(
     *,
     annotation_receipt_path: Optional[Path] = None,
     annotation_predictions_path: Optional[Path] = None,
+    training_label_provenance_receipt_path: Optional[Path] = None,
+    training_label_ontology_source_path: Optional[Path] = None,
+    annotation_validation_export_path: Optional[Path] = None,
     device: str = "cuda",
     batch_size: int = 64,
     encoder: Optional[FrozenPatchEncoder] = None,
@@ -2604,6 +3785,21 @@ def build_source(
         raise ValueError(
             "locked measurement manifest opposite-pool guard differs from the HEST protocol"
         )
+    manifest_measurement_contract = (
+        study_manifest.content["decision_thresholds"]
+        if study_manifest.study_stage == "measurement_development"
+        else study_manifest.content["locked_measurement_audit"]
+    )
+    if {
+        name: manifest_measurement_contract.get(name)
+        for name in FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS
+    } != dict(protocol["frozen_h_meas_shared_measurement_thresholds"]):
+        raise ValueError("study manifest measurement thresholds differ from the HEST protocol")
+    if (
+        study_manifest.study_stage == "confirmatory_morphology"
+        and study_manifest.content["primary_endpoint"] != protocol["confirmatory_primary_endpoint"]
+    ):
+        raise ValueError("study manifest primary endpoint differs from the HEST protocol")
     protocol_independence = _validate_protocol_independence_contract(
         protocol.get("label_target_independence")
     )
@@ -2616,6 +3812,11 @@ def build_source(
             "locked study manifest label-target evidence differs from the HEST protocol"
         )
     independence_contract = dict(manifest_independence)
+    if study_manifest.study_stage == "measurement_development":
+        _require_h_meas_independent_annotation_contract(
+            independence_contract,
+            tuple(str(value) for value in protocol["gene_ids"]),
+        )
     if study_manifest.study_stage == "confirmatory_morphology":
         annotation_features = set(
             str(value) for value in independence_contract["ordered_annotation_feature_ids"]
@@ -2651,24 +3852,61 @@ def build_source(
     active_sample_ids = tuple(sample.sample_id for sample in samples)
     independent_artifacts: Optional[IndependentAnnotationArtifacts] = None
     if independence_contract["evidence_kind"] == "pending":
-        if annotation_receipt_path is not None or annotation_predictions_path is not None:
+        if any(
+            path is not None
+            for path in (
+                annotation_receipt_path,
+                annotation_predictions_path,
+                training_label_provenance_receipt_path,
+                training_label_ontology_source_path,
+                annotation_validation_export_path,
+            )
+        ):
             raise ValueError("pending label-target evidence cannot accept annotation artifacts")
     else:
-        if annotation_receipt_path is None or annotation_predictions_path is None:
+        if (
+            annotation_receipt_path is None
+            or annotation_predictions_path is None
+            or training_label_provenance_receipt_path is None
+            or training_label_ontology_source_path is None
+            or annotation_validation_export_path is None
+        ):
             raise ValueError(
-                "non-pending label-target evidence requires its actual receipt and predictions"
+                "non-pending label-target evidence requires annotation, training-label, and "
+                "prediction artifacts"
             )
         independent_artifacts = _verify_independent_annotation_artifacts(
             annotation_receipt_path,
             annotation_predictions_path,
+            training_label_provenance_receipt_path,
+            training_label_ontology_source_path,
+            annotation_validation_export_path,
             independence_contract,
             prediction_donor_ids=active_donors,
+            target_gene_ids=tuple(
+                str(value) for value in independence_contract["ordered_target_gene_ids"]
+            ),
         )
     annotation_artifact_inputs = {
         path
         for path in (
             None if independent_artifacts is None else independent_artifacts.receipt_path,
             None if independent_artifacts is None else independent_artifacts.predictions_path,
+            (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.training_label_receipt_path
+            ),
+            (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.training_label_ontology_source_path
+            ),
+            (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.validation_export_path
+            ),
         )
         if path is not None
     }
@@ -3658,6 +4896,15 @@ def build_source(
             neighbor_relative_values[section] = annotation_nucleus_values[section] / float(
                 np.median(nearest_neighbor_um[valid_neighbor])
             )
+    (
+        registration_quality_scores,
+        registration_quality_strata,
+        registration_quality_cutoffs,
+    ) = _registration_quality_strata(
+        diameter_relative_values,
+        neighbor_relative_values,
+        measurement_qc_contract,
+    )
     registration_qc_pass = (
         annotation_nucleus_values
         <= float(measurement_qc_contract["maximum_annotation_nucleus_p95_um"])
@@ -3743,6 +4990,21 @@ def build_source(
             "label_receipt": (
                 None if independent_artifacts is None else independent_artifacts.receipt_sha256
             ),
+            "training_label_provenance_receipt": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.training_label_receipt_sha256
+            ),
+            "training_label_ontology_source": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.training_label_ontology_source_sha256
+            ),
+            "annotation_validation_export": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.validation_export_sha256
+            ),
             "samples": [
                 {key: value for key, value in sample.items() if key.endswith("_sha256")}
                 for sample in resolved_provenance
@@ -3807,6 +5069,42 @@ def build_source(
         "label_source_sha256": label_source_sha256,
         "label_receipt_sha256": (
             None if independent_artifacts is None else independent_artifacts.receipt_sha256
+        ),
+        "label_receipt_path": (
+            None if independent_artifacts is None else str(independent_artifacts.receipt_path)
+        ),
+        "label_prediction_export_path": (
+            None if independent_artifacts is None else str(independent_artifacts.predictions_path)
+        ),
+        "training_label_provenance_receipt_sha256": (
+            None
+            if independent_artifacts is None
+            else independent_artifacts.training_label_receipt_sha256
+        ),
+        "training_label_provenance_receipt_path": (
+            None
+            if independent_artifacts is None
+            else str(independent_artifacts.training_label_receipt_path)
+        ),
+        "training_label_ontology_source_sha256": (
+            None
+            if independent_artifacts is None
+            else independent_artifacts.training_label_ontology_source_sha256
+        ),
+        "training_label_ontology_source_path": (
+            None
+            if independent_artifacts is None
+            else str(independent_artifacts.training_label_ontology_source_path)
+        ),
+        "annotation_validation_export_sha256": (
+            None
+            if independent_artifacts is None
+            else independent_artifacts.validation_export_sha256
+        ),
+        "annotation_validation_export_path": (
+            None
+            if independent_artifacts is None
+            else str(independent_artifacts.validation_export_path)
         ),
         "label_field_primary": label_field_primary,
         "label_field_secondary": label_field_secondary,
@@ -4039,6 +5337,12 @@ def build_source(
         "registration_qc_features": registration_qc,
         "registration_qc_feature_names": np.asarray(registration_qc_names),
         "registration_qc_pass": registration_qc_pass,
+        "registration_quality_scores": registration_quality_scores.astype(np.float64),
+        "registration_quality_strata": registration_quality_strata,
+        "registration_quality_cutoffs_json": np.asarray(
+            json.dumps(registration_quality_cutoffs, sort_keys=True, separators=(",", ":"))
+        ),
+        "registration_quality_definition": np.asarray(REGISTRATION_QUALITY_DEFINITION),
         "segmentation_qc_pass": segmentation_qc_pass,
         "locked_measurement_qc_pass": locked_measurement_qc_pass,
         "locked_measurement_audit_thresholds_json": np.asarray(
@@ -4090,8 +5394,56 @@ def build_source(
         "annotation_receipt_sha256": np.asarray(
             "" if independent_artifacts is None else independent_artifacts.receipt_sha256
         ),
+        "annotation_receipt_path": np.asarray(
+            "" if independent_artifacts is None else str(independent_artifacts.receipt_path)
+        ),
         "annotation_prediction_export_sha256": np.asarray(
             "" if independent_artifacts is None else independent_artifacts.predictions_sha256
+        ),
+        "annotation_prediction_export_path": np.asarray(
+            "" if independent_artifacts is None else str(independent_artifacts.predictions_path)
+        ),
+        "training_label_provenance_receipt_sha256": np.asarray(
+            (
+                ""
+                if independent_artifacts is None
+                else independent_artifacts.training_label_receipt_sha256
+            )
+        ),
+        "training_label_provenance_receipt_path": np.asarray(
+            (
+                ""
+                if independent_artifacts is None
+                else str(independent_artifacts.training_label_receipt_path)
+            )
+        ),
+        "training_label_ontology_source_sha256": np.asarray(
+            (
+                ""
+                if independent_artifacts is None
+                else independent_artifacts.training_label_ontology_source_sha256
+            )
+        ),
+        "training_label_ontology_source_path": np.asarray(
+            (
+                ""
+                if independent_artifacts is None
+                else str(independent_artifacts.training_label_ontology_source_path)
+            )
+        ),
+        "annotation_validation_export_sha256": np.asarray(
+            (
+                ""
+                if independent_artifacts is None
+                else independent_artifacts.validation_export_sha256
+            )
+        ),
+        "annotation_validation_export_path": np.asarray(
+            (
+                ""
+                if independent_artifacts is None
+                else str(independent_artifacts.validation_export_path)
+            )
         ),
         "source_file_manifest_sha256": np.asarray(source_file_manifest_sha256),
         "registration_source_sha256": np.asarray(registration_source_sha256),
@@ -4222,8 +5574,44 @@ def build_source(
         "annotation_receipt_sha256": (
             None if independent_artifacts is None else independent_artifacts.receipt_sha256
         ),
+        "annotation_receipt_path": (
+            None if independent_artifacts is None else str(independent_artifacts.receipt_path)
+        ),
         "annotation_prediction_export_sha256": (
             None if independent_artifacts is None else independent_artifacts.predictions_sha256
+        ),
+        "annotation_prediction_export_path": (
+            None if independent_artifacts is None else str(independent_artifacts.predictions_path)
+        ),
+        "training_label_provenance_receipt_sha256": (
+            None
+            if independent_artifacts is None
+            else independent_artifacts.training_label_receipt_sha256
+        ),
+        "training_label_provenance_receipt_path": (
+            None
+            if independent_artifacts is None
+            else str(independent_artifacts.training_label_receipt_path)
+        ),
+        "training_label_ontology_source_sha256": (
+            None
+            if independent_artifacts is None
+            else independent_artifacts.training_label_ontology_source_sha256
+        ),
+        "training_label_ontology_source_path": (
+            None
+            if independent_artifacts is None
+            else str(independent_artifacts.training_label_ontology_source_path)
+        ),
+        "annotation_validation_export_sha256": (
+            None
+            if independent_artifacts is None
+            else independent_artifacts.validation_export_sha256
+        ),
+        "annotation_validation_export_path": (
+            None
+            if independent_artifacts is None
+            else str(independent_artifacts.validation_export_path)
         ),
         "registration_source_sha256": registration_source_sha256,
         "exclusion_policy_sha256": exclusion_policy_sha256,
@@ -4341,6 +5729,53 @@ def build_source(
             "receipt_sha256": (
                 None if independent_artifacts is None else independent_artifacts.receipt_sha256
             ),
+            "receipt_path": (
+                None if independent_artifacts is None else str(independent_artifacts.receipt_path)
+            ),
+            "prediction_export_sha256": (
+                None if independent_artifacts is None else independent_artifacts.predictions_sha256
+            ),
+            "prediction_export_path": (
+                None
+                if independent_artifacts is None
+                else str(independent_artifacts.predictions_path)
+            ),
+            "training_label_provenance_receipt_sha256": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.training_label_receipt_sha256
+            ),
+            "training_label_provenance_receipt_path": (
+                None
+                if independent_artifacts is None
+                else str(independent_artifacts.training_label_receipt_path)
+            ),
+            "training_label_ontology_source_sha256": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.training_label_ontology_source_sha256
+            ),
+            "training_label_ontology_source_path": (
+                None
+                if independent_artifacts is None
+                else str(independent_artifacts.training_label_ontology_source_path)
+            ),
+            "validation_export_sha256": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.validation_export_sha256
+            ),
+            "validation_export_path": (
+                None
+                if independent_artifacts is None
+                else str(independent_artifacts.validation_export_path)
+            ),
+            "calibrated_probability_export": independent_artifacts is not None,
+            "prediction_coverage_fraction": (
+                None
+                if independent_artifacts is None
+                else independent_artifacts.prediction_coverage_fraction
+            ),
             "fine_type_marker_gene_ids": list(fine_marker_genes),
             "label_target_independence": independence_contract,
         },
@@ -4366,6 +5801,22 @@ def build_source(
         ],
         "disease_estimands": list(protocol["disease_estimands"]),
         "registration_qc_feature_names": list(registration_qc_names),
+        "registration_quality": {
+            "definition": REGISTRATION_QUALITY_DEFINITION,
+            "cutoffs_fraction_of_limit": dict(registration_quality_cutoffs),
+            "counts": {
+                name: int(np.count_nonzero(registration_quality_strata == name))
+                for name in ("best", "intermediate", "near_threshold", "failed")
+            },
+            "observation_stratum_manifest_sha256": _canonical_sha256(
+                [
+                    observation_id + "|" + stratum
+                    for observation_id, stratum in zip(
+                        rows.observation_ids, registration_quality_strata.tolist()
+                    )
+                ]
+            ),
+        },
         "gate": {
             "ranks": [2, 4, 6],
             "ridge_penalties": [0.1, 1.0, 10.0, 100.0],
@@ -4561,6 +6012,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--qc-output", type=Path, required=True)
     parser.add_argument("--annotation-receipt", type=Path, default=None)
     parser.add_argument("--annotation-predictions", type=Path, default=None)
+    parser.add_argument("--training-label-provenance-receipt", type=Path, default=None)
+    parser.add_argument("--training-label-ontology-source", type=Path, default=None)
+    parser.add_argument("--annotation-validation-export", type=Path, default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--batch-size", type=int, default=64)
     args = parser.parse_args(argv)
@@ -4576,6 +6030,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.qc_output,
         annotation_receipt_path=args.annotation_receipt,
         annotation_predictions_path=args.annotation_predictions,
+        training_label_provenance_receipt_path=(args.training_label_provenance_receipt),
+        training_label_ontology_source_path=args.training_label_ontology_source,
+        annotation_validation_export_path=args.annotation_validation_export,
         device=args.device,
         batch_size=args.batch_size,
     )

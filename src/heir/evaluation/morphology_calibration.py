@@ -9,6 +9,8 @@ one-sided error and power confidence bounds pass.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Mapping
 
 from .power import (
@@ -17,12 +19,16 @@ from .power import (
     CALIBRATION_EVIDENCE_SCHEMA,
     CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES,
     CALIBRATION_RECEIPT_SCHEMA,
+    CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA,
+    CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT,
     REQUIRED_CALIBRATION_SCENARIOS,
     REQUIRED_COMPLETE_GATE_CHECKS,
     REQUIRED_HYPOTHESIS_DECISIONS,
     REQUIRED_MORPHOLOGY_SOURCE_CONCLUSIONS,
+    actual_gate_trial_outcome,
     binomial_lower_confidence_bound,
     binomial_upper_confidence_bound,
+    calibration_trial_seed,
     canonical_sha256,
     required_simultaneous_confidence_level,
     validate_calibration_receipt,
@@ -32,6 +38,182 @@ from .power import (
 
 REQUIRED_SCENARIO_FAMILIES = REQUIRED_CALIBRATION_SCENARIOS
 LEGACY_SURROGATE_ENGINE = "heir.legacy_surrogate_morphology_calibration.v1"
+
+
+def _aggregate_attested_trial_outcomes(
+    outcomes: list[Mapping[str, object]],
+) -> Mapping[str, object]:
+    if not outcomes:
+        raise ValueError("calibration condition has no preserved actual-gate reports")
+    for field in ("local_roi_seed_counts", "spatial_block_seed_counts"):
+        if any(outcome[field] != outcomes[0][field] for outcome in outcomes):
+            raise ValueError("preserved actual-gate reports use inconsistent permutation streams")
+    report_hashes = [str(outcome["actual_report_sha256"]) for outcome in outcomes]
+    realization_hashes = [
+        str(outcome["calibration_trial_realization_sha256"]) for outcome in outcomes
+    ]
+    return {
+        "trials": len(outcomes),
+        "complete_gate_passes": sum(bool(value["component_pass"]) for value in outcomes),
+        "hypothesis_decision_passes": {
+            decision_id: sum(
+                bool(value["hypothesis_decision_passes"][decision_id]) for value in outcomes
+            )
+            for decision_id in REQUIRED_HYPOTHESIS_DECISIONS
+        },
+        "any_false_hypothesis_decision_passes": sum(
+            bool(value["any_false_hypothesis_decision"]) for value in outcomes
+        ),
+        "morphology_source_conclusion_counts": {
+            conclusion: sum(
+                value["morphology_source_conclusion"] == conclusion for value in outcomes
+            )
+            for conclusion in CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES
+        },
+        "actual_gate_executions": len(outcomes),
+        "trial_report_set_sha256": canonical_sha256(
+            {"ordered_actual_gate_report_sha256": report_hashes}
+        ),
+        "trial_realization_set_sha256": canonical_sha256(
+            {"ordered_trial_realization_sha256": realization_hashes}
+        ),
+        "all_trial_reports_use_exact_settings": all(
+            value["exact_gate_settings_sha256"] == outcomes[0]["exact_gate_settings_sha256"]
+            for value in outcomes
+        ),
+        "all_trial_reports_include_required_checks": all(
+            value["required_checks_present"] is True for value in outcomes
+        ),
+        "permutation_nulls": {
+            "local_roi_permutations": min(
+                int(value["local_roi_permutations"]) for value in outcomes
+            ),
+            "spatial_block_permutations": min(
+                int(value["spatial_block_permutations"]) for value in outcomes
+            ),
+            "local_roi_seed_counts": dict(outcomes[0]["local_roi_seed_counts"]),
+            "spatial_block_seed_counts": dict(outcomes[0]["spatial_block_seed_counts"]),
+        },
+    }
+
+
+def _recompute_evidence_from_trial_manifest(
+    manifest: object,
+    *,
+    settings: Mapping[str, object],
+    condition_ids: tuple[str, ...],
+    expected_trials: int,
+    base_seed: int,
+    run_contract_sha256: str,
+    decision_truth_by_condition: Mapping[str, Mapping[str, bool]],
+) -> Mapping[str, Mapping[str, object]]:
+    """Load every content-addressed report and recompute all raw outcomes."""
+
+    if not isinstance(manifest, Mapping):
+        raise ValueError("calibration trial-report manifest is malformed")
+    required = {
+        "schema",
+        "storage",
+        "ordered_report_sha256s_by_scenario_condition",
+        "report_reference_count",
+        "unique_report_count",
+        "manifest_content_sha256",
+    }
+    if set(manifest) != required or manifest.get("schema") != (
+        CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA
+    ):
+        raise ValueError("calibration trial-report manifest is incomplete")
+    core = {name: value for name, value in manifest.items() if name != "manifest_content_sha256"}
+    if manifest["manifest_content_sha256"] != canonical_sha256(core):
+        raise ValueError("calibration trial-report manifest content hash differs")
+    storage = manifest["storage"]
+    if not isinstance(storage, Mapping) or storage.get("layout") != (
+        CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT
+    ):
+        raise ValueError("calibration trial-report storage layout is unsupported")
+    storage_kind = storage.get("kind")
+    if storage_kind != "content_addressed_directory":
+        raise ValueError(
+            "authorizing calibration requires preserved per-trial report files; "
+            "templated or inline reports are non-authorizing"
+        )
+    if set(storage) != {"kind", "layout", "root_path"}:
+        raise ValueError("calibration trial-report directory declaration is malformed")
+    root = Path(str(storage["root_path"])).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError("calibration trial-report directory is unavailable")
+
+    def load_report(digest: str) -> Mapping[str, object]:
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError("calibration trial-report manifest contains a malformed hash")
+        path = (root / digest[:2] / (digest + ".json")).resolve()
+        if root not in path.parents:
+            raise ValueError("calibration trial-report path escapes its content store")
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("preserved actual-gate report is missing or invalid") from error
+        if not isinstance(report, Mapping) or canonical_sha256(report) != digest:
+            raise ValueError("preserved actual-gate report differs from its content address")
+        return report
+
+    ordered = manifest["ordered_report_sha256s_by_scenario_condition"]
+    if not isinstance(ordered, Mapping) or set(ordered) != set(REQUIRED_SCENARIO_FAMILIES):
+        raise ValueError("trial-report manifest lacks required stress families")
+    scenario_results = {}
+    all_hashes: list[str] = []
+    all_realization_hashes: list[str] = []
+    all_artifact_pairs: list[tuple[str, str]] = []
+    for scenario in REQUIRED_SCENARIO_FAMILIES:
+        conditions = ordered[scenario]
+        if not isinstance(conditions, Mapping) or set(conditions) != set(condition_ids):
+            raise ValueError("trial-report manifest lacks the frozen truth-matrix conditions")
+        scenario_results[scenario] = {}
+        for condition_id in condition_ids:
+            hashes = conditions[condition_id]
+            if not isinstance(hashes, list) or len(hashes) != expected_trials:
+                raise ValueError("trial-report manifest has the wrong trials per condition")
+            outcomes = []
+            for trial_index, value in enumerate(hashes):
+                digest = str(value)
+                identity = {
+                    "scenario": scenario,
+                    "condition": condition_id,
+                    "trial_index": trial_index,
+                    "trial_seed": calibration_trial_seed(
+                        base_seed,
+                        scenario,
+                        condition_id,
+                        trial_index,
+                        ordered_conditions=condition_ids,
+                    ),
+                }
+                outcome = actual_gate_trial_outcome(
+                    load_report(digest),
+                    exact_gate_settings=settings,
+                    expected_trial_identity=identity,
+                    expected_run_contract_sha256=run_contract_sha256,
+                    expected_decision_truth=decision_truth_by_condition[condition_id],
+                )
+                outcomes.append(outcome)
+                all_hashes.append(digest)
+                all_realization_hashes.append(str(outcome["calibration_trial_realization_sha256"]))
+                all_artifact_pairs.append(
+                    (
+                        str(outcome["calibration_development_artifact_sha256"]),
+                        str(outcome["calibration_locked_artifact_sha256"]),
+                    )
+                )
+            scenario_results[scenario][condition_id] = _aggregate_attested_trial_outcomes(outcomes)
+    if (
+        manifest["report_reference_count"] != len(all_hashes)
+        or manifest["unique_report_count"] != len(all_hashes)
+        or len(set(all_hashes)) != len(all_hashes)
+        or len(set(all_realization_hashes)) != len(all_realization_hashes)
+        or len(set(all_artifact_pairs)) != len(all_artifact_pairs)
+    ):
+        raise ValueError("calibration trial reports are not uniquely bound to trial identities")
+    return scenario_results
 
 
 class CalibrationFailure(ValueError):
@@ -99,9 +281,11 @@ def _raw_condition(
         "trials",
         "complete_gate_passes",
         "hypothesis_decision_passes",
+        "any_false_hypothesis_decision_passes",
         "morphology_source_conclusion_counts",
         "actual_gate_executions",
         "trial_report_set_sha256",
+        "trial_realization_set_sha256",
         "all_trial_reports_use_exact_settings",
         "all_trial_reports_include_required_checks",
         "permutation_nulls",
@@ -138,6 +322,11 @@ def _raw_condition(
         character not in "0123456789abcdef" for character in report_hash
     ):
         raise ValueError("actual-gate trial report-set hash is malformed")
+    realization_hash = str(value["trial_realization_set_sha256"])
+    if len(realization_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in realization_hash
+    ):
+        raise ValueError("actual-gate trial realization-set hash is malformed")
     if (
         value["all_trial_reports_use_exact_settings"] is not True
         or value["all_trial_reports_include_required_checks"] is not True
@@ -188,6 +377,15 @@ def _raw_condition(
         ):
             raise ValueError("actual-gate calibration decision pass count is invalid")
         decision_passes[decision_id] = int(count)
+    familywise_false_passes = value["any_false_hypothesis_decision_passes"]
+    if (
+        isinstance(familywise_false_passes, bool)
+        or not isinstance(familywise_false_passes, (int, float))
+        or int(familywise_false_passes) != familywise_false_passes
+        or not 0 <= int(familywise_false_passes) <= trials
+    ):
+        raise ValueError("actual-gate familywise decision false-pass count is invalid")
+    familywise_false_passes = int(familywise_false_passes)
     raw_conclusions = value["morphology_source_conclusion_counts"]
     if not isinstance(raw_conclusions, Mapping) or set(raw_conclusions) != set(
         CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES
@@ -240,6 +438,15 @@ def _raw_condition(
             decision_id: confidence_bound(count, decision_truth[decision_id])
             for decision_id, count in decision_passes.items()
         },
+        "any_false_hypothesis_decision_passes": familywise_false_passes,
+        "any_false_hypothesis_decision_pass_fraction": (familywise_false_passes / trials),
+        "any_false_hypothesis_decision_pass_upper_confidence_bound": (
+            binomial_upper_confidence_bound(
+                familywise_false_passes,
+                trials,
+                confidence_level=confidence_level,
+            )
+        ),
         "morphology_source_conclusion_counts": conclusion_counts,
         "expected_morphology_source_conclusion": expected_source_conclusion,
         "morphology_source_conclusion_correct_count": correct_conclusions,
@@ -247,6 +454,7 @@ def _raw_condition(
         "morphology_source_conclusion_correct_lower_confidence_bound": (conclusion_lower_bound),
         "actual_gate_executions": trials,
         "trial_report_set_sha256": report_hash,
+        "trial_realization_set_sha256": realization_hash,
         "all_trial_reports_use_exact_settings": True,
         "all_trial_reports_include_required_checks": True,
         "permutation_nulls": {
@@ -263,9 +471,9 @@ def compile_actual_gate_calibration_receipt(
     thresholds: Mapping[str, object],
     evidence: Mapping[str, object],
     *,
-    confidence_level: float = 0.9998809523809524,
+    confidence_level: float = 0.9998958333333333,
 ) -> Mapping[str, object]:
-    """Issue a v3 receipt from completed production-gate simulation evidence."""
+    """Issue a v5 receipt from individually attested production-gate reports."""
 
     settings = validate_exact_gate_settings(exact_gate_settings)
     if set(thresholds) != {
@@ -289,6 +497,7 @@ def compile_actual_gate_calibration_receipt(
         "exact_gate_settings_sha256",
         "run_contract",
         "run_contract_sha256",
+        "trial_report_manifest",
         "scenario_results",
     }:
         raise ValueError("actual-gate calibration evidence is incomplete")
@@ -315,6 +524,19 @@ def compile_actual_gate_calibration_receipt(
     expected_conclusions = dgp["expected_source_conclusion_by_condition"]
     expected_trials = int(run_contract["trials_per_condition"])
     raw_results = evidence["scenario_results"]
+    recomputed_results = _recompute_evidence_from_trial_manifest(
+        evidence["trial_report_manifest"],
+        settings=settings,
+        condition_ids=condition_ids,
+        expected_trials=expected_trials,
+        base_seed=int(run_contract["base_seed"]),
+        run_contract_sha256=str(evidence["run_contract_sha256"]),
+        decision_truth_by_condition=decision_truth,
+    )
+    if raw_results != recomputed_results:
+        raise ValueError(
+            "aggregate calibration evidence differs from preserved actual-gate reports"
+        )
     if not isinstance(raw_results, Mapping) or set(raw_results) != set(REQUIRED_SCENARIO_FAMILIES):
         raise ValueError("actual-gate evidence lacks required stress families")
     permutations = int(settings["permutations_per_null"])
@@ -370,6 +592,16 @@ def compile_actual_gate_calibration_receipt(
         for decision_id in REQUIRED_HYPOTHESIS_DECISIONS
         if decision_truth[condition_id][decision_id] is False
     ]
+    familywise_decision_false_pass_rates = [
+        float(result[condition_id]["any_false_hypothesis_decision_pass_fraction"])
+        for result in scenario_results.values()
+        for condition_id in condition_ids
+    ]
+    familywise_decision_false_pass_upper_bounds = [
+        float(result[condition_id]["any_false_hypothesis_decision_pass_upper_confidence_bound"])
+        for result in scenario_results.values()
+        for condition_id in condition_ids
+    ]
     effect_decision_rates = [
         float(result[condition_id]["hypothesis_decision_pass_fractions"][decision_id])
         for result in scenario_results.values()
@@ -398,6 +630,7 @@ def compile_actual_gate_calibration_receipt(
     calibrated = bool(
         max(null_upper_bounds) <= maximum_false_pass
         and max(null_decision_upper_bounds) <= maximum_false_pass
+        and max(familywise_decision_false_pass_upper_bounds) <= maximum_false_pass
         and min(effect_lower_bounds) >= minimum_power
         and min(effect_decision_lower_bounds) >= minimum_power
         and min(null_conclusion_correct_lower_bounds) >= 1.0 - maximum_false_pass
@@ -413,10 +646,15 @@ def compile_actual_gate_calibration_receipt(
         "exact_gate_settings_sha256": settings_sha256,
         "thresholds_sha256": thresholds_sha256,
         "run_contract_sha256": evidence["run_contract_sha256"],
+        "trial_report_manifest_sha256": evidence["trial_report_manifest"][
+            "manifest_content_sha256"
+        ],
+        "trial_report_reference_count": evidence["trial_report_manifest"]["report_reference_count"],
+        "trial_report_unique_count": evidence["trial_report_manifest"]["unique_report_count"],
         "scenario_results": scenario_results,
     }
     diagnostic = {
-        "schema": "heir.morphology_gate_calibration_diagnostic.v3",
+        "schema": "heir.morphology_gate_calibration_diagnostic.v5",
         "engine": CALIBRATION_ENGINE,
         "actual_gate_entrypoint": ACTUAL_GATE_ENTRYPOINT,
         "exact_gate_executed": True,
@@ -428,6 +666,11 @@ def compile_actual_gate_calibration_receipt(
         "exact_gate_settings_sha256": settings_sha256,
         "run_contract": dict(run_contract),
         "run_contract_sha256": evidence["run_contract_sha256"],
+        "trial_report_manifest_sha256": evidence["trial_report_manifest"][
+            "manifest_content_sha256"
+        ],
+        "trial_report_reference_count": evidence["trial_report_manifest"]["report_reference_count"],
+        "trial_report_unique_count": evidence["trial_report_manifest"]["unique_report_count"],
         "generator_version": run_contract["generator_version"],
         "generator_source_sha256": run_contract["generator_source_sha256"],
         "gate_source_sha256": run_contract["gate_source_sha256"],
@@ -449,6 +692,12 @@ def compile_actual_gate_calibration_receipt(
         "maximum_hypothesis_decision_false_pass_probability": max(null_decision_rates),
         "maximum_hypothesis_decision_false_pass_upper_confidence_bound": max(
             null_decision_upper_bounds
+        ),
+        "maximum_familywise_hypothesis_decision_false_pass_probability": max(
+            familywise_decision_false_pass_rates
+        ),
+        "maximum_familywise_hypothesis_decision_false_pass_upper_confidence_bound": max(
+            familywise_decision_false_pass_upper_bounds
         ),
         "power_at_quantitatively_frozen_boundary": min(effect_rates),
         "minimum_power_lower_confidence_bound": min(effect_lower_bounds),

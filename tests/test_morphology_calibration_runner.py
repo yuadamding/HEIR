@@ -7,8 +7,10 @@ import resource
 from pathlib import Path
 from typing import Mapping
 
+import numpy as np
 import pytest
 
+import heir.evaluation.morphology_calibration as calibration_compiler
 import heir.evaluation.morphology_calibration_runner as runner
 from heir.evaluation.control_models import HEST_CROP_CONTRACT
 from heir.evaluation.hierarchical_metrics import donor_section_type_coverage
@@ -22,7 +24,9 @@ from heir.evaluation.power import (
     REQUIRED_CALIBRATION_SCENARIOS,
     REQUIRED_COMPLETE_GATE_CHECKS,
     REQUIRED_HYPOTHESIS_DECISIONS,
+    REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT,
     canonical_sha256,
+    required_simultaneous_confidence_level,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +36,7 @@ CONFIG = ROOT / "configs" / "morphology_gate_calibration.json"
 def _settings() -> Mapping[str, object]:
     content = json.loads(CONFIG.read_text(encoding="utf-8"))
     settings = copy.deepcopy(content["exact_gate_settings"])
+    settings["complete_gate_check_ids"] = list(REQUIRED_COMPLETE_GATE_CHECKS)
     settings["confirmatory_design_binding"] = (
         runner.synthetic_completed_confirmatory_design_binding()
     )
@@ -72,6 +77,40 @@ def test_synthetic_calibration_builder_covers_the_frozen_experiment() -> None:
         )
         assert locked.planned_stratum_manifest_sha256 == binding["planned_stratum_manifest_sha256"]
         for artifact in (development, locked):
+            assert set(artifact.registration_quality_strata.tolist()) == {
+                "best",
+                "intermediate",
+                "near_threshold",
+            }
+            observed_quality_support = {
+                (str(donor), int(type_index), band): int(
+                    np.count_nonzero(
+                        (artifact.donor_ids.astype(str) == str(donor))
+                        & (artifact.type_labels == int(type_index))
+                        & (artifact.registration_quality_strata == band)
+                    )
+                )
+                for donor, type_index in zip(artifact.donor_ids, artifact.type_labels)
+                for band in ("best", "intermediate", "near_threshold")
+            }
+            assert min(observed_quality_support.values()) >= 20
+            section_quality_support = {
+                (str(donor), str(section), int(type_index), band): int(
+                    np.count_nonzero(
+                        (artifact.donor_ids.astype(str) == str(donor))
+                        & (artifact.section_ids.astype(str) == str(section))
+                        & (artifact.type_labels == int(type_index))
+                        & (artifact.registration_quality_strata == band)
+                    )
+                )
+                for donor, section, type_index in zip(
+                    artifact.donor_ids,
+                    artifact.section_ids,
+                    artifact.type_labels,
+                )
+                for band in ("best", "intermediate", "near_threshold")
+            }
+            assert min(section_quality_support.values()) >= 20
             observed = {
                 "%s|%s|%s" % (donor, section, artifact.type_names[int(type_index)])
                 for donor, section, type_index in zip(
@@ -84,14 +123,96 @@ def test_synthetic_calibration_builder_covers_the_frozen_experiment() -> None:
             assert artifact.coverage_audit["retained_fraction"] == pytest.approx(
                 len(observed) / len(artifact.planned_stratum_ids)
             )
+            assert artifact.coverage_audit["source_rows_before_frozen_qc"] > len(
+                artifact.observation_ids
+            )
+            assert artifact.coverage_audit["evaluation_rows_after_frozen_qc"] == len(
+                artifact.observation_ids
+            )
+            assert artifact.coverage_audit["source_qc_filtered_rows"] == len(observed)
+            assert np.max(artifact.registration_quality_scores) <= 1.0
+            assert all(
+                report["pass"] is True for report in artifact.reference_evaluation_balance.values()
+            )
+        assert development.coverage_audit["locked_measurement_audit"] is None
+        locked_audit = locked.coverage_audit["locked_measurement_audit"]
+        if scenario == "variable_transcript_reliability":
+            assert locked_audit["pass"] is False
+        else:
+            assert locked_audit["pass"] is True
+        assert locked_audit["planned_stratum_reliability"]["planned_count"] == len(
+            locked.planned_stratum_ids
+        )
+        assert (
+            locked_audit["summaries"]["rows_before_frozen_qc"]
+            == locked.coverage_audit["source_rows_before_frozen_qc"]
+        )
+        assert locked_audit["summaries"]["rows_after_frozen_qc"] == len(locked.observation_ids)
+        assert min(
+            report["rows"]
+            for report in locked_audit["donor_section_type_reliability"].values()
+            if report["rows"] > 0
+        ) >= int(locked_audit["thresholds"]["minimum_reliability_rows"])
         development.validate_compatible(locked)
+
+    _, reliable_locked = runner.build_synthetic_calibration_pair(
+        "variable_transcript_reliability",
+        PRELIMINARY_ALTERNATIVE_CONDITION,
+        1,
+    )
+    assert reliable_locked.coverage_audit["locked_measurement_audit"]["pass"] is True
+
+    strict_balance, _ = runner._synthetic_reference_evaluation_balance(
+        contract={
+            "maximum_reference_evaluation_absolute_smd": 0.0,
+            "maximum_reference_evaluation_categorical_total_variation": 0.0,
+        },
+        split_ids=("strict",),
+        observation_ids=reliable_locked.observation_ids,
+        donor_ids=reliable_locked.donor_ids,
+        section_ids=reliable_locked.section_ids,
+        type_labels=reliable_locked.type_labels,
+        type_names=reliable_locked.type_names,
+        disease_states=reliable_locked.disease_states,
+        site_ids=reliable_locked.site_ids,
+        batch_ids=reliable_locked.batch_ids,
+        balance_groups=reliable_locked.registration_quality_strata,
+        feature_matrix=np.column_stack(
+            (
+                reliable_locked.coordinate_features,
+                reliable_locked.technical_covariates,
+                reliable_locked.stain_features,
+                reliable_locked.nuclear_morphometrics,
+                reliable_locked.cell_morphometrics,
+                reliable_locked.cellvit_context_features,
+                reliable_locked.local_density_features,
+                reliable_locked.boundary_features,
+                reliable_locked.spatial_control_features,
+            )
+        ),
+        feature_names=(
+            "coordinate::0",
+            "coordinate::1",
+            *("technical::%s" % value for value in reliable_locked.technical_covariate_names),
+            *("stain::%s" % value for value in reliable_locked.stain_feature_names),
+            *("nuclear::%s" % value for value in reliable_locked.nuclear_morphometric_names),
+            *("cell::%s" % value for value in reliable_locked.cell_morphometric_names),
+            *("cellvit::%s" % value for value in reliable_locked.cellvit_context_feature_names),
+            *("density::%s" % value for value in reliable_locked.local_density_feature_names),
+            *("boundary::%s" % value for value in reliable_locked.boundary_feature_names),
+            *("spatial::%s" % value for value in reliable_locked.spatial_control_feature_names),
+        ),
+    )
+    assert strict_balance["strict"]["pass"] is False
 
     _, missing_locked = runner.build_synthetic_calibration_pair(
         "missing_fine_types",
         PRELIMINARY_ALTERNATIVE_CONDITION,
         0,
     )
-    assert set(missing_locked.type_labels.tolist()) == {0}
+    assert set(missing_locked.type_labels.tolist()) == {0, 1}
+    assert not np.any((missing_locked.donor_ids == "locked_0") & (missing_locked.type_labels == 1))
+    assert missing_locked.coverage_audit["retained_fraction"] == pytest.approx(0.9)
 
     development, _ = runner.build_synthetic_calibration_pair(
         "inactive_permutation_strata",
@@ -121,6 +242,217 @@ def test_synthetic_calibration_builder_covers_the_frozen_experiment() -> None:
     assert section_coverage["retained_fraction"] == 1.0
 
 
+def test_synthetic_locked_audit_uses_full_transcript_library_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production_audit = runner.locked_measurement_audit_report
+    observed_calls = 0
+
+    def audited_call(**kwargs):
+        nonlocal observed_calls
+        observed_calls += 1
+        half_a_counts = np.asarray(kwargs["half_a_counts"])
+        half_b_counts = np.asarray(kwargs["half_b_counts"])
+        assert np.all(
+            np.asarray(kwargs["half_a_library_sizes"]) > half_a_counts.sum(axis=1, dtype=np.uint64)
+        )
+        assert np.all(
+            np.asarray(kwargs["half_b_library_sizes"]) > half_b_counts.sum(axis=1, dtype=np.uint64)
+        )
+        return production_audit(**kwargs)
+
+    monkeypatch.setattr(runner, "locked_measurement_audit_report", audited_call)
+    runner.build_synthetic_calibration_pair(
+        "spatial_autocorrelation",
+        PRELIMINARY_ALTERNATIVE_CONDITION,
+        1,
+    )
+    assert observed_calls == 1
+
+
+def test_production_runner_freezes_six_quantitative_truth_conditions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(runner.DEDICATED_PROCESS_ENV, "1")
+    plan = runner.CalibrationRunPlan(
+        exact_gate_settings=_settings(),
+        trials_per_condition=runner.PRODUCTION_TRIALS_PER_CONDITION,
+        smoke_test=False,
+    )
+    contract = runner._run_contract(plan, _settings())
+    assert tuple(contract["conditions"]) == runner.AUTHORIZING_CALIBRATION_CONDITIONS
+    assert len(contract["conditions"]) == 6
+    dgp = contract["dgp_effect_spec"]
+    assert dgp["authorizing_boundary_calibration"] is True
+    definitions = dgp["effect_definition"]["condition_definitions"]
+    assert set(definitions) == set(contract["conditions"])
+    mixed = definitions[runner.BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS["G3_mixed_intrinsic_context"]]
+    assert mixed["target_component_population_r2"] == {
+        "nucleus_intrinsic": 0.05,
+        "extrinsic_context": 0.05,
+    }
+    assert mixed["total_morphology_population_r2"] == 0.10
+    mixed_truth = dgp["decision_truth_by_condition"][
+        runner.BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS["G3_mixed_intrinsic_context"]
+    ]
+    assert {name for name, value in mixed_truth.items() if value} == {
+        "G2_local_context",
+        "G3_nucleus_intrinsic",
+        "G3_context_only",
+        "G3_mixed_intrinsic_context",
+    }
+    assert plan.production_contract_satisfied is True
+
+
+def test_synthetic_locked_audit_enforces_every_frozen_measurement_criterion() -> None:
+    scenario = "spatial_autocorrelation"
+    condition = PRELIMINARY_ALTERNATIVE_CONDITION
+    trial_index = 1
+    _, locked = runner.build_synthetic_calibration_pair(scenario, condition, trial_index)
+    audit = locked.coverage_audit["locked_measurement_audit"]
+    assert audit["pass"] is True
+    assert audit["thresholds"] == REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT
+    assert set(audit["distribution_checks"]) == {
+        "annotation_nucleus",
+        "annotation_cell",
+        "cell_nucleus",
+        "nucleus_diameter_relative",
+        "nearest_neighbor_relative",
+        "segmentation",
+        "crop_padding",
+        "registration_qc_matches_recomputed",
+        "segmentation_qc_matches_recomputed",
+        "crop_qc_matches_recomputed",
+        "locked_measurement_qc_matches_recomputed_conjunction",
+        "donor_type_reliability_fraction",
+        "planned_donor_section_type_reliability_fraction",
+    }
+    assert set(audit["summaries"]["registration"]) == {
+        "annotation_to_nucleus_distance_um",
+        "annotation_to_cell_distance_um",
+        "native_cell_to_nucleus_distance_um",
+        "annotation_error_over_median_nucleus_diameter",
+        "annotation_error_over_median_nearest_neighbor_distance",
+    }
+    assert audit["summaries"]["segmentation"]["maximum_nucleus_outside_cell_fraction"] == 0.01
+    assert audit["summaries"]["segmentation"]["maximum_area_ratio_outlier_fraction"] == 0.05
+    assert set(audit["summaries"]["crop_padding"]) == set(HEST_CROP_CONTRACT)
+    assert set(audit["worst_section_reliability_by_donor_type"]) == set(
+        audit["donor_type_reliability"]
+    )
+
+    common = {
+        "scenario": scenario,
+        "trial_index": trial_index,
+        "seed": runner._trial_seed(1729, scenario, condition, trial_index),
+        "donor_ids": locked.donor_ids,
+        "section_ids": locked.section_ids,
+        "type_labels": locked.type_labels,
+        "type_names": locked.type_names,
+        "gene_ids": locked.gene_ids,
+        "planned_stratum_ids": locked.planned_stratum_ids,
+        "molecular_residual": locked.molecular_targets - locked.reference_means,
+        "registration_quality_scores": locked.registration_quality_scores,
+        "technical_covariates": locked.technical_covariates,
+        "coordinate_features": locked.coordinate_features,
+    }
+    failing_thresholds = {
+        "maximum_annotation_nucleus_p95_um": 0.0,
+        "maximum_annotation_cell_p95_um": 0.0,
+        "maximum_cell_nucleus_p95_um": 0.0,
+        "maximum_registration_nucleus_diameter_ratio_p95": 0.0,
+        "maximum_registration_nearest_neighbor_ratio_p95": 0.0,
+        "maximum_registration_outlier_fraction": -1.0,
+        "maximum_nucleus_outside_cell_fraction": -1.0,
+        "minimum_nucleus_cell_area_ratio": 0.31,
+        "maximum_nucleus_cell_area_ratio": 0.29,
+        "maximum_segmentation_outlier_fraction": -1.0,
+        "maximum_crop_padding_p95": 0.0,
+        "mostly_padded_cutoff": 0.0,
+        "maximum_mostly_padded_fraction": -1.0,
+        "minimum_within_fine_type_reliability": 1.0,
+        "minimum_reliability_rows": len(locked.observation_ids) + 1,
+    }
+    for field, value in failing_thresholds.items():
+        contract = {**REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT, field: value}
+        failed = runner._synthetic_locked_measurement_audit(
+            contract=contract,
+            **common,
+        )
+        assert failed["pass"] is False, field
+
+    _, missing_locked = runner.build_synthetic_calibration_pair(
+        "missing_fine_types",
+        condition,
+        trial_index,
+    )
+    strict_fraction = runner._synthetic_locked_measurement_audit(
+        contract={
+            **REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT,
+            "minimum_locked_donor_type_reliability_fraction": 1.0,
+        },
+        scenario="missing_fine_types",
+        trial_index=trial_index,
+        seed=runner._trial_seed(1729, "missing_fine_types", condition, trial_index),
+        donor_ids=missing_locked.donor_ids,
+        section_ids=missing_locked.section_ids,
+        type_labels=missing_locked.type_labels,
+        type_names=missing_locked.type_names,
+        gene_ids=missing_locked.gene_ids,
+        planned_stratum_ids=missing_locked.planned_stratum_ids,
+        molecular_residual=missing_locked.molecular_targets - missing_locked.reference_means,
+        registration_quality_scores=missing_locked.registration_quality_scores,
+        technical_covariates=missing_locked.technical_covariates,
+        coordinate_features=missing_locked.coordinate_features,
+    )
+    assert strict_fraction["pass"] is False
+
+
+def test_authorizing_dgp_places_signal_in_the_prespecified_image_sources() -> None:
+    def apparent_multivariate_r2(artifact, crop_id: str) -> float:
+        features = artifact.image_feature_tensor[:, artifact.crop_ids.index(crop_id), :]
+        design = np.column_stack((np.ones(len(features)), features))
+        target = artifact.molecular_targets - artifact.reference_means
+        prediction = design @ np.linalg.lstsq(design, target, rcond=None)[0]
+        denominator = np.square(target - target.mean(axis=0)).sum(axis=0)
+        return float(np.mean(1.0 - np.square(target - prediction).sum(axis=0) / denominator))
+
+    artifacts = {
+        condition: runner.build_synthetic_calibration_pair(
+            "crop_family_multiplicity",
+            condition,
+            0,
+        )[0]
+        for condition in runner.AUTHORIZING_CALIBRATION_CONDITIONS
+    }
+    null = artifacts[GLOBAL_NULL_CONDITION]
+    assert apparent_multivariate_r2(null, "crop_112um") < 0.05
+
+    g2 = artifacts[runner.BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS["G2_local_context"]]
+    assert apparent_multivariate_r2(g2, "crop_112um") > (
+        apparent_multivariate_r2(g2, "blank_patch") + 0.02
+    )
+
+    for decision_id, informative, negative in (
+        ("G3_nucleus_intrinsic", "nucleus_mask_only", "nucleus_mask_blurred_112um"),
+        ("G3_cell_intrinsic", "cell_mask_only", "cell_mask_blurred_112um"),
+        (
+            "G3_context_only",
+            "target_cell_removed_112um",
+            "target_cell_removed_blurred_112um",
+        ),
+    ):
+        artifact = artifacts[runner.BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS[decision_id]]
+        assert apparent_multivariate_r2(artifact, informative) > (
+            apparent_multivariate_r2(artifact, negative) + 0.02
+        )
+
+    mixed = artifacts[runner.BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS["G3_mixed_intrinsic_context"]]
+    full = apparent_multivariate_r2(mixed, "crop_112um")
+    assert full > apparent_multivariate_r2(mixed, "nucleus_mask_only") + 0.02
+    assert full > apparent_multivariate_r2(mixed, "target_cell_removed_112um") + 0.02
+
+
 def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -139,7 +471,6 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
     original_pool_environment = {name: os.environ.get(name) for name in pool_variables}
     settings_sha256 = canonical_sha256(settings)
     calls: list[Mapping[str, object]] = []
-    reports: list[Mapping[str, object]] = []
 
     def fake_production_gate(development, locked, **kwargs):
         assert len(os.sched_getaffinity(0)) == 1
@@ -165,6 +496,7 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
         for name, expected in settings["gate_parameters"].items():
             assert kwargs[name] == expected
         calls.append(kwargs)
+        component_pass = len(calls) % 2 == 0
         seed_rows = [
             {
                 "seed": seed,
@@ -173,16 +505,55 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
             }
             for seed in settings["permutation_seeds"]
         ]
+        development_artifact_sha256 = runner.morphology_artifact_content_sha256(development)
+        locked_artifact_sha256 = runner.morphology_artifact_content_sha256(locked)
+        realization_sha256 = canonical_sha256(
+            {
+                "calibration_trial_identity": kwargs["calibration_trial_identity"],
+                "calibration_run_contract_sha256": kwargs["calibration_run_contract_sha256"],
+                "development_artifact_sha256": development_artifact_sha256,
+                "locked_artifact_sha256": locked_artifact_sha256,
+            }
+        )
         report = {
             "schema_version": ACTUAL_GATE_REPORT_SCHEMA,
-            "component_pass": len(calls) % 2 == 0,
+            "component_pass": component_pass,
             "final_inference": True,
             "synthetic_calibration_execution": True,
             "scientific_authorization_suppressed": True,
             "calibration_exact_gate_settings_sha256": settings_sha256,
-            "checks": {name: True for name in REQUIRED_COMPLETE_GATE_CHECKS},
+            "calibration_exact_gate_settings": settings,
+            "calibration_trial_identity": kwargs["calibration_trial_identity"],
+            "calibration_run_contract_sha256": kwargs["calibration_run_contract_sha256"],
+            "calibration_development_artifact_sha256": development_artifact_sha256,
+            "calibration_locked_artifact_sha256": locked_artifact_sha256,
+            "calibration_trial_realization_sha256": realization_sha256,
+            "checks": {name: component_pass for name in REQUIRED_COMPLETE_GATE_CHECKS},
             "hypothesis_decisions": {
-                name: {"tested": True, "pass": False} for name in REQUIRED_HYPOTHESIS_DECISIONS
+                name: {
+                    "tested": True,
+                    "pass": False,
+                    **(
+                        {
+                            "registration_quality_sensitivity_pass": False,
+                            "registration_quality_sensitivity": {"synthetic_test": True},
+                        }
+                        if name in {"G3_nucleus_intrinsic", "G3_cell_intrinsic"}
+                        else (
+                            {
+                                (
+                                    "incremental_intrinsic_registration_quality_sensitivity_pass"
+                                ): False,
+                                "incremental_intrinsic_registration_quality_sensitivity": {
+                                    "synthetic_test": True
+                                },
+                            }
+                            if name == "G3_mixed_intrinsic_context"
+                            else {}
+                        )
+                    ),
+                }
+                for name in REQUIRED_HYPOTHESIS_DECISIONS
             },
             "morphology_source_conclusion": (
                 "inconclusive"
@@ -209,7 +580,6 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
             "authorizes_cell_intrinsic_claim": False,
             "test_report_serial": len(calls),
         }
-        reports.append(report)
         return report
 
     monkeypatch.setattr(runner, "evaluate_morphology_ridge_gate", fake_production_gate)
@@ -249,6 +619,128 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
     assert execution["evidence_content_sha256"] == canonical_sha256(evidence)
     contract = evidence["run_contract"]
     assert evidence["run_contract_sha256"] == canonical_sha256(contract)
+    manifest = evidence["trial_report_manifest"]
+    assert manifest["report_reference_count"] == 2 * len(REQUIRED_CALIBRATION_SCENARIOS)
+    assert manifest["manifest_content_sha256"] == canonical_sha256(
+        {name: value for name, value in manifest.items() if name != "manifest_content_sha256"}
+    )
+    assert manifest["storage"]["kind"] == "content_addressed_directory"
+    for report_hash in {
+        value
+        for scenario in manifest["ordered_report_sha256s_by_scenario_condition"].values()
+        for hashes in scenario.values()
+        for value in hashes
+    }:
+        assert (
+            Path(manifest["storage"]["root_path"]) / report_hash[:2] / (report_hash + ".json")
+        ).is_file()
+    recomputed = calibration_compiler._recompute_evidence_from_trial_manifest(
+        manifest,
+        settings=settings,
+        condition_ids=tuple(contract["conditions"]),
+        expected_trials=1,
+        base_seed=int(contract["base_seed"]),
+        run_contract_sha256=evidence["run_contract_sha256"],
+        decision_truth_by_condition=contract["dgp_effect_spec"]["decision_truth_by_condition"],
+    )
+    assert recomputed == evidence["scenario_results"]
+
+    swapped = copy.deepcopy(manifest)
+    first_scenario = REQUIRED_CALIBRATION_SCENARIOS[0]
+    first_condition_id, second_condition_id = tuple(contract["conditions"])
+    first_hash = swapped["ordered_report_sha256s_by_scenario_condition"][first_scenario][
+        first_condition_id
+    ][0]
+    second_hash = swapped["ordered_report_sha256s_by_scenario_condition"][first_scenario][
+        second_condition_id
+    ][0]
+    swapped["ordered_report_sha256s_by_scenario_condition"][first_scenario][first_condition_id][
+        0
+    ] = second_hash
+    swapped["ordered_report_sha256s_by_scenario_condition"][first_scenario][second_condition_id][
+        0
+    ] = first_hash
+    swapped["manifest_content_sha256"] = canonical_sha256(
+        {name: value for name, value in swapped.items() if name != "manifest_content_sha256"}
+    )
+    with pytest.raises(ValueError, match="frozen trial identity"):
+        calibration_compiler._recompute_evidence_from_trial_manifest(
+            swapped,
+            settings=settings,
+            condition_ids=tuple(contract["conditions"]),
+            expected_trials=1,
+            base_seed=int(contract["base_seed"]),
+            run_contract_sha256=evidence["run_contract_sha256"],
+            decision_truth_by_condition=contract["dgp_effect_spec"]["decision_truth_by_condition"],
+        )
+
+    first_path = Path(manifest["storage"]["root_path"]) / first_hash[:2] / (first_hash + ".json")
+    bypass = json.loads(first_path.read_text(encoding="utf-8"))
+    bypass["hypothesis_decisions"]["G3_nucleus_intrinsic"]["pass"] = True
+    with pytest.raises(ValueError, match="bypasses registration-quality sensitivity"):
+        runner.actual_gate_trial_outcome(
+            bypass,
+            exact_gate_settings=settings,
+            expected_trial_identity=bypass["calibration_trial_identity"],
+            expected_run_contract_sha256=evidence["run_contract_sha256"],
+            expected_decision_truth=contract["dgp_effect_spec"]["decision_truth_by_condition"][
+                first_condition_id
+            ],
+        )
+
+    mixed_bypass = json.loads(first_path.read_text(encoding="utf-8"))
+    mixed_bypass["hypothesis_decisions"]["G3_mixed_intrinsic_context"]["pass"] = True
+    with pytest.raises(
+        ValueError,
+        match="mixed decision bypasses incremental registration-quality sensitivity",
+    ):
+        runner.actual_gate_trial_outcome(
+            mixed_bypass,
+            exact_gate_settings=settings,
+            expected_trial_identity=mixed_bypass["calibration_trial_identity"],
+            expected_run_contract_sha256=evidence["run_contract_sha256"],
+            expected_decision_truth=contract["dgp_effect_spec"]["decision_truth_by_condition"][
+                first_condition_id
+            ],
+        )
+
+    realization_bypass = json.loads(first_path.read_text(encoding="utf-8"))
+    realization_bypass["calibration_trial_realization_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="deterministic trial realization"):
+        runner.actual_gate_trial_outcome(
+            realization_bypass,
+            exact_gate_settings=settings,
+            expected_trial_identity=realization_bypass["calibration_trial_identity"],
+            expected_run_contract_sha256=evidence["run_contract_sha256"],
+            expected_decision_truth=contract["dgp_effect_spec"]["decision_truth_by_condition"][
+                first_condition_id
+            ],
+        )
+
+    duplicated = copy.deepcopy(manifest)
+    duplicated["ordered_report_sha256s_by_scenario_condition"][first_scenario][second_condition_id][
+        0
+    ] = first_hash
+    all_hashes = [
+        digest
+        for scenario_rows in duplicated["ordered_report_sha256s_by_scenario_condition"].values()
+        for condition_hashes in scenario_rows.values()
+        for digest in condition_hashes
+    ]
+    duplicated["unique_report_count"] = len(set(all_hashes))
+    duplicated["manifest_content_sha256"] = canonical_sha256(
+        {name: value for name, value in duplicated.items() if name != "manifest_content_sha256"}
+    )
+    with pytest.raises(ValueError, match="frozen trial identity"):
+        calibration_compiler._recompute_evidence_from_trial_manifest(
+            duplicated,
+            settings=settings,
+            condition_ids=tuple(contract["conditions"]),
+            expected_trials=1,
+            base_seed=int(contract["base_seed"]),
+            run_contract_sha256=evidence["run_contract_sha256"],
+            decision_truth_by_condition=contract["dgp_effect_spec"]["decision_truth_by_condition"],
+        )
     assert contract["base_seed"] == 1729
     assert contract["dgp_effect_spec"]["authorizing_boundary_calibration"] is False
     assert (
@@ -260,7 +752,11 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
         GLOBAL_NULL_CONDITION
     ]
     assert first_condition["trial_report_set_sha256"] == canonical_sha256(
-        {"ordered_actual_gate_report_sha256": [canonical_sha256(reports[0])]}
+        {
+            "ordered_actual_gate_report_sha256": manifest[
+                "ordered_report_sha256s_by_scenario_condition"
+            ][REQUIRED_CALIBRATION_SCENARIOS[0]][GLOBAL_NULL_CONDITION]
+        }
     )
     assert first_condition["actual_gate_executions"] == 1
     assert first_condition["complete_gate_passes"] == 0
@@ -304,7 +800,7 @@ def test_runner_calls_actual_entrypoint_hashes_reports_and_resumes(
             settings,
             config["thresholds"],
             evidence,
-            confidence_level=config["confidence_level"],
+            confidence_level=required_simultaneous_confidence_level(),
         )
 
 
@@ -348,7 +844,10 @@ def test_runner_rejects_invalid_resource_limits(overrides, message: str) -> None
         runner.CalibrationRunPlan(**parameters).validate()
 
 
-def test_runner_refuses_to_start_above_rss_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runner_refuses_to_start_above_rss_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.setattr(runner, "_process_rss_gib", lambda: 17.0)
     monkeypatch.setattr(runner, "_process_virtual_memory_gib", lambda: 0.5)
     plan = runner.CalibrationRunPlan(
@@ -358,11 +857,12 @@ def test_runner_refuses_to_start_above_rss_ceiling(monkeypatch: pytest.MonkeyPat
         maximum_process_rss_gib=16.0,
     )
     with pytest.raises(MemoryError, match="RSS.*exceeds"):
-        runner.run_actual_gate_calibration(plan)
+        runner.run_actual_gate_calibration(plan, checkpoint_path=tmp_path / "checkpoint.json")
 
 
 def test_runner_refuses_to_start_above_address_space_ceiling(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(runner, "_process_virtual_memory_gib", lambda: 2.0)
     plan = runner.CalibrationRunPlan(
@@ -373,7 +873,7 @@ def test_runner_refuses_to_start_above_address_space_ceiling(
         maximum_address_space_gib=1.0,
     )
     with pytest.raises(MemoryError, match="virtual memory.*exceeds"):
-        runner.run_actual_gate_calibration(plan)
+        runner.run_actual_gate_calibration(plan, checkpoint_path=tmp_path / "checkpoint.json")
 
 
 def test_address_space_limit_never_raises_a_stricter_existing_soft_limit(

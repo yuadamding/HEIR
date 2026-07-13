@@ -10,6 +10,7 @@ from typing import Optional
 import numpy as np
 import pytest
 
+import heir.evaluation.measurement_gate as gate_module
 from heir.evaluation.measurement_gate import (
     MEASUREMENT_GATE_SCHEMA,
     MeasurementThresholds,
@@ -56,6 +57,7 @@ def _thresholds() -> MeasurementThresholds:
         minimum_reliable_development_donor_fraction=1.0,
         minimum_within_fine_type_reliability=0.8,
         minimum_reliability_rows=4,
+        minimum_common_reliable_genes=1,
         target_basis_rank=1,
         minimum_reliable_development_donors=3,
         minimum_reliable_donors_per_fine_type=3,
@@ -394,7 +396,7 @@ def test_reserved_locked_rows_are_a_protocol_violation() -> None:
         (
             "locked_donor_outcomes_materialized",
             True,
-            "locked donor outcomes stayed unopened",
+            "source build materialized non-development donor outcomes",
         ),
         ("study_manifest_sha256", "c" * 64, "measurement study manifest"),
     ),
@@ -613,6 +615,38 @@ def test_measurement_receipt_is_bound_to_manifest_source_and_file_sha(
     with pytest.raises(ValueError, match="content hash"):
         require_passing_measurement_receipt(
             tampered,
+            expected_study_manifest_sha256="a" * 64,
+        )
+    insufficient = copy.deepcopy(report)
+    reliability = insufficient["target_selection_receipt"]["reliability_contract"]
+    reliability["minimum_common_reliable_genes"] = 999
+    core = {
+        name: value
+        for name, value in insufficient["target_selection_receipt"].items()
+        if name != "receipt_content_sha256"
+    }
+    selection_definition = {
+        name: value
+        for name, value in core.items()
+        if name
+        not in {
+            "selection_core_sha256",
+            "study_manifest_sha256",
+            "source_sha256",
+            "transcript_identity_manifest_sha256",
+            "transcript_split_salt_sha256",
+        }
+    }
+    core["selection_core_sha256"] = gate_module._mapping_sha256(selection_definition)
+    insufficient["target_selection_receipt"]["selection_core_sha256"] = core[
+        "selection_core_sha256"
+    ]
+    insufficient["target_selection_receipt"]["receipt_content_sha256"] = (
+        gate_module._mapping_sha256(core)
+    )
+    with pytest.raises(ValueError, match="target-panel strategy or fallback"):
+        require_passing_measurement_receipt(
+            insufficient,
             expected_study_manifest_sha256="a" * 64,
         )
     path = tmp_path / "measurement.json"

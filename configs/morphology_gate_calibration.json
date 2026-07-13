@@ -1,10 +1,10 @@
 {
   "schema": "heir.morphology_gate_calibration_config.v2",
-  "confidence_level": 0.9998809523809524,
+  "confidence_level": 0.9998958333333333,
   "exact_gate_settings": {
     "actual_gate_entrypoint": "heir.evaluation.morphology_gate.evaluate_morphology_ridge_gate",
     "actual_gate_report_schema": "heir.morphology_ridge_evaluation.v5",
-    "confirmatory_analysis_plan_sha256": "329d8570b61458f6e7cb88b42e8d382eba928dc39e78ad276324e240cfafb8d2",
+    "confirmatory_analysis_plan_sha256": "ae86925c981e098664a4dbf2442687967e73875790d4e8bc1fb9e338ba535405",
     "confirmatory_design_binding": {
       "status": "pending_pre_h_meas",
       "reason": "H-MEAS has not yet issued the development-only target-panel and supported-type receipt; authorizing calibration is forbidden"
@@ -131,6 +131,7 @@
       "primary_claim_is_explicit_local_context",
       "matched_macro_r2",
       "macro_donor_type_r2",
+      "macro_donor_section_type_r2",
       "local_roi_null_separates",
       "spatial_block_null_separates",
       "every_required_null_separates",

@@ -67,7 +67,9 @@ def _minimal_source_payload() -> dict[str, object]:
     crop = builder.CROP_PROTOCOLS[crop_role]
     payload: dict[str, object] = {
         "schema_version": np.asarray(builder.SOURCE_SCHEMA),
-        "analysis_scope": np.asarray("development_donors_only_hest_lock_unopened"),
+        "analysis_scope": np.asarray(
+            "development_donors_only_reserved_outcomes_previously_materialized"
+        ),
         "reserved_hest_locked_donors": np.asarray(builder.RESERVED_HEST_LOCKED_DONORS),
         "reserved_donor_outcomes_loaded": np.asarray(False),
         "observation_ids": np.asarray(["A", "B"]),
@@ -311,7 +313,7 @@ def test_protocol_pins_true_donors_and_never_splits_paired_sections() -> None:
     assert tuple(protocol["reserved_hest_locked_donors"]) == (builder.RESERVED_HEST_LOCKED_DONORS)
     assert "locked_test_donors" not in protocol
     roles = {donor: "development" for donor in builder.DEVELOPMENT_DONORS} | {
-        donor: "reserved_unopened" for donor in builder.RESERVED_HEST_LOCKED_DONORS
+        donor: "excluded_previously_materialized" for donor in builder.RESERVED_HEST_LOCKED_DONORS
     }
     for left, right in (
         ("NCBI856", "NCBI857"),

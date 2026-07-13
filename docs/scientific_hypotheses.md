@@ -16,11 +16,21 @@ Primary evidence: unique cell/transcript identities, row-level registration geom
 detection and zero fractions, split-half gene/program reliability, target-basis ceiling, crop padding,
 and reference/evaluation separation.
 
+Execution prerequisite: H-MEAS may proceed only from a hashed annotation export containing the ten
+development donors and no historically designated test rows. The combined 20-section annotation
+source is not an admissible analyst input. Fine types must come from a receipt-bound independent
+annotation whose inputs and training-label ontology are disjoint from the full candidate target
+panel; development `final_CT`/`final_lineage` labels cannot select the H-MEAS panel.
+
 Reference and evaluation cells may share a section and source file, but they must have disjoint
 observation, cell, and spatial-block identities with a positive physical guard. Development donors
-select the target panel and supported fine types. The identical frozen measurement thresholds are
-then audited on locked rows without changing that selection; every failed or unsupported locked
-donor/section/type stratum remains in the intention-to-analyze coverage denominator.
+select the common reliable target panel and supported fine types. The panel must contain at least six
+genes to support the confirmatory rank-six candidate. If that common panel fails, a type-specific-panel or
+prespecified-program fallback requires a new development-only study version; no confirmatory result
+may trigger the switch. The identical frozen measurement thresholds are then audited on a fresh
+pristine confirmatory cohort without changing that selection; every failed or unsupported planned
+donor/section/type stratum remains in the intention-to-analyze coverage denominator. Reliability is
+reported by donor/type and donor/section/type, including the worst section.
 
 Authorization: a pass permits morphology experiments to run. It does not support a morphology claim.
 
@@ -50,17 +60,27 @@ z_i = B_t.T @ r_i
 z_hat_i = f_t(image_i)
 ```
 
-The primary endpoint is residual-coordinate R² macro-averaged first over supported fine types within
-donor and then equally across donors. Technical correction, weighted basis, and model selection use
-development donors only.
+The frozen joint primary endpoint explicitly contains donor/type macro residual-coordinate R² and
+donor/section/type macro residual-coordinate R². The first averages supported fine types within donor
+and then donors; the second averages fine types within section, sections within donor, and donors.
+Each must be at least 0.05 and the frozen intersection rule requires both. Technical correction,
+weighted basis, and model selection use development donors only.
 
 The fine-type label must be backed by an exact external or development-donor-cross-fitted annotation
-receipt whose ordered RNA features are disjoint from the frozen target panel. Marker-list exclusion
-or an independence boolean alone cannot open H-CELL.
+receipt whose ordered RNA features are disjoint from the frozen target panel. Its training-label
+ontology must independently establish zero target dependence; reproducing target-derived labels with
+gene-disjoint classifier inputs is insufficient. Marker-list exclusion or an independence boolean
+alone cannot open H-CELL.
 
-Authorization: a pass across the five locked donors is an internal go/no-go result supporting
-progression to external confirmation. It is not population-level validation, external
-generalization, or H&E-only deployment.
+Authorization: a pass on a genuinely unexposed, preregistered internal cohort is an internal go/no-go
+result supporting progression to external confirmation. It is not population-level validation,
+external generalization, or H&E-only deployment.
+
+The five historically designated HEST test donors (`THD0008`, `THD0011`, `TILD117`, `VUILD78`, and
+`VUILD96`) are not eligible for that authorization. Their molecular and image outcomes were
+materialized and the test artifact was reloaded at commit `28c6fff`. No endpoint report or tuning
+evidence was found, so the hypothesis remains untested rather than failed; these donors may support
+only explicitly retrospective internal/exploratory analysis.
 
 Section and batch indicators are fitted only as development-fold controls. New locked-section and
 locked-batch categories do not have estimable development coefficients, so their inclusion cannot
@@ -78,6 +98,14 @@ All 18 prespecified direct contrasts are tested together with an exact donor sig
 family. The allowed conclusions include nucleus dominant, cell dominant, context dominant, mixed
 intrinsic and contextual information, multiple sources without incremental combination, and no
 morphology-specific information. A strongest-comparator diagnostic cannot authorize a claim.
+
+Each G3 effect is also reported in best, intermediate, and near-threshold registration-quality
+strata. Nucleus- or cell-local evidence must clear the frozen effect threshold in the best-registration
+subset and be noninferior to the all-row and fully supported near-threshold estimates within the
+prespecified 0.01 delta-R2 margin. The same rule applies to the full-context-versus-target-removed
+incremental intrinsic contrasts required for a mixed conclusion. Context-only effects remain
+stratified diagnostics because their hypothesized source is outside the registered target cell. A
+signal appearing only near the registration limit cannot support an intrinsic claim.
 
 ## H-REF — matched-reference utility
 
@@ -114,7 +142,9 @@ coverage/calibration/external degradation may be included in validated HEIR.
 Question: Does the frozen primary effect replicate in a different study, donor population, acquisition
 batch, and preferably institution?
 
-HEST and HESCAPE share GSE250346 and cannot jointly test H-EXT. Cohort selection is based on declared
+HEST and HESCAPE share GSE250346 and cannot jointly test H-EXT. The previously designated five HEST
+test donors are also prospectively ineligible because their outcomes were already materialized.
+Cohort selection is based on declared
 suitability before image–RNA outcomes are inspected. No external retuning or gene reselection is
 permitted.
 
@@ -123,5 +153,7 @@ Authorization: a pass permits a general morphology–state claim within the lock
 ## Frozen encoder hierarchy
 
 The H-CELL primary encoder is UNI2-h. H-Optimus-1 is replication 1 when its gated checkpoint is
-available, and H0-mini is replication 2 when available. These labels are preregistered and may not
-be reassigned after any locked molecular outcome is observed.
+available, and H0-mini is replication 2 when available. These are frozen design-template labels,
+not evidence of a valid historical preregistration: the existing HEST outcomes were already
+materialized. They may not be reassigned in a future pristine study after any confirmatory molecular
+outcome is observed.

@@ -266,7 +266,7 @@ def _validate_protocol(protocol: Mapping[str, object]) -> None:
     exact = {
         "schema": "heir.hescape_regional_protocol.v3",
         "scientific_scope": "regional_pseudospot_exploratory",
-        "analysis_scope": "development_donors_only_hest_lock_unopened",
+        "analysis_scope": "development_donors_only_reserved_outcomes_previously_materialized",
         "authorization_ceiling": "regional_pseudospot_only_no_cell_or_nucleus_claims",
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
@@ -309,7 +309,7 @@ def _validate_protocol(protocol: Mapping[str, object]) -> None:
     if set(development) & set(reserved) or set(development + reserved) != set(true_donors.values()):
         raise ValueError("HESCAPE development and reserved donors are not disjoint and exhaustive")
     roles = {donor: "development" for donor in development} | {
-        donor: "reserved_unopened" for donor in reserved
+        donor: "excluded_previously_materialized" for donor in reserved
     }
     if any(
         len({roles[true_donors[section]] for section in sections}) != 1
@@ -453,7 +453,9 @@ def _validate_donor_partitions(
     if len(development) != 10 or len(reserved) != 5:
         raise ValueError("HESCAPE design must contain 10 development and 5 reserved donors")
     section_roles = {
-        section: "development" if row.donor_id in development else "reserved_unopened"
+        section: (
+            "development" if row.donor_id in development else "excluded_previously_materialized"
+        )
         for section, row in sections.items()
     }
     for donor in observed:
@@ -1501,7 +1503,8 @@ def _validate_source_payload(payload: Mapping[str, object]) -> None:
     ):
         raise ValueError("HESCAPE regional source schema is incompatible with preparation")
     if (
-        np.asarray(payload["analysis_scope"]).item() != "development_donors_only_hest_lock_unopened"
+        np.asarray(payload["analysis_scope"]).item()
+        != "development_donors_only_reserved_outcomes_previously_materialized"
         or tuple(np.asarray(payload["reserved_hest_locked_donors"]).astype(str))
         != RESERVED_HEST_LOCKED_DONORS
         or bool(np.asarray(payload["reserved_donor_outcomes_loaded"]).item())
@@ -2197,7 +2200,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "outcome_access": (
                     "development"
                     if sections[section].donor_id in set(development_donors)
-                    else "reserved_unopened"
+                    else "excluded_previously_materialized"
                 ),
             }
             for section in sorted(sections)

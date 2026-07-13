@@ -8,7 +8,7 @@
     "H-INTRINSIC"
   ],
   "git_commit": "",
-  "analysis_plan_sha256": "329d8570b61458f6e7cb88b42e8d382eba928dc39e78ad276324e240cfafb8d2",
+  "analysis_plan_sha256": "ae86925c981e098664a4dbf2442687967e73875790d4e8bc1fb9e338ba535405",
   "container_digest": "",
   "dataset": {
     "repository": "MahmoodLab/hest",
@@ -46,8 +46,8 @@
       "nucleus_overlapping_transcripts",
       "whole_cell_assigned_transcripts"
     ],
-    "broad_type_field": "final_lineage",
-    "fine_type_field": "final_CT",
+    "broad_type_field": "broad_lineage",
+    "fine_type_field": "fine_type",
     "supported_fine_type_ids": [],
     "supported_fine_type_ids_sha256": null
   },
@@ -84,8 +84,11 @@
       "VUILD96",
       "TILD117"
     ],
-    "prior_outcome_access_confirmed_false": true,
-    "hescape_analysis_scope": "development_donors_only_hest_lock_unopened",
+    "prior_outcome_access_confirmed_false": false,
+    "prior_outcome_access_status": "molecular_outcomes_materialized_pre_registration",
+    "prior_outcome_exposure_receipt_sha256": "7c9dd840968ec45f2bce4b2e9f6ae315688834da9a17acb94daf24060e24804b",
+    "prospective_lock_eligible": false,
+    "hescape_analysis_scope": "development_donors_only_reserved_outcomes_previously_materialized",
     "hescape_allowed_donor_ids": [
       "VUILD91",
       "TILD175",
@@ -116,6 +119,30 @@
     "annotation_training_scope": "unknown_pending_provenance",
     "annotation_training_donor_ids": [],
     "annotation_training_donor_ids_sha256": null,
+    "training_label_ontology_source": "pending",
+    "training_label_provenance_receipt_sha256": null,
+    "training_label_target_gene_overlap_count": null,
+    "training_labels_establish_target_independence": false,
+    "annotation_quality_contract": {
+          "minimum_fine_type_macro_f1": 0.7,
+          "calibration_metric": "multiclass_expected_calibration_error",
+          "calibration_binning": "equal_width_confidence_bins",
+          "calibration_bin_count": 10,
+          "maximum_calibration_error": 0.1,
+          "minimum_major_class_sensitivity": 0.5,
+          "minimum_prediction_coverage_fraction": 0.8,
+          "abstention_method": "maximum_probability_below_threshold",
+          "confidence_threshold": 0.5,
+          "abstain_label": "__ABSTAIN__",
+          "tie_breaking": "ordered_fine_type_ids",
+          "probability_sum_tolerance": 0.000001,
+          "per_validation_donor_metrics_required": true,
+          "validation_designs_by_evidence_kind": {
+            "external_gene_disjoint_annotation": "external_donor_held_out",
+            "development_donor_cross_fitted_gene_disjoint_annotation": "leave_one_development_donor_out",
+            "orthogonal_modality_annotation": "orthogonal_modality_validation"
+          }
+        },
     "locked_donors_used_for_training": null,
     "same_cohort_annotation": true,
     "cross_fitting_method": "pending",
@@ -169,9 +196,17 @@
     "unit": "donor_x_fine_type_x_spatial_roi"
   },
   "primary_endpoint": {
-    "name": "donor_macro_residual_coordinate_r2",
-    "minimum_effect": 0.05,
-    "condition_on": "final_CT"
+    "name": "joint_donor_type_and_donor_section_type_macro_residual_coordinate_r2",
+    "condition_on": "fine_type",
+    "decision_rule": "both_endpoints_must_meet_frozen_minimum",
+    "donor_type_macro": {
+      "metric": "donor_equal_type_equal_residual_coordinate_r2",
+      "minimum_effect": 0.05
+    },
+    "donor_section_type_macro": {
+      "metric": "donor_equal_section_equal_type_equal_residual_coordinate_r2",
+      "minimum_effect": 0.05
+    }
   },
   "secondary_endpoints": [
     "whole_cell_target_variant",
@@ -191,8 +226,8 @@
     "maximum_reference_evaluation_categorical_total_variation": 0.25
   },
   "decision_thresholds": {
-    "maximum_affine_registration_residual_p95_um": 40.0,
-    "maximum_annotation_nucleus_distance_p95_um": 35.0,
+    "maximum_affine_registration_residual_p95_um": 8.0,
+    "maximum_annotation_nucleus_distance_p95_um": 8.0,
     "maximum_registration_outlier_fraction": 0.05,
     "maximum_crop_padding_fraction": 0.5,
     "minimum_shuffled_delta_r2": 0.03,
@@ -225,6 +260,8 @@
     "maximum_cell_nucleus_p95_um": 8.0,
     "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
     "maximum_registration_nearest_neighbor_ratio_p95": 0.5,
+    "best_registration_quality_max_fraction_of_limit": 0.25,
+    "intermediate_registration_quality_max_fraction_of_limit": 0.6,
     "maximum_registration_outlier_fraction": 0.05,
     "maximum_nucleus_outside_cell_fraction": 0.01,
     "minimum_nucleus_cell_area_ratio": 0.05,

@@ -1,23 +1,55 @@
 {
-  "schema": "heir.morphology_ridge_readiness.v4",
+  "schema": "heir.morphology_ridge_readiness.v5",
   "assessment_date": "2026-07-13",
-  "status": "data_ready_scientific_lock_blocked",
+  "status": "development_measurement_preparation_blocked_and_prospective_h_cell_cohort_missing",
   "benchmark_executed": false,
+  "benchmark_executed_scope": "current_H_MEAS_through_H_EXT_protocol_historical_snPATHO_excluded",
+  "scientific_hypothesis_status": "untested_not_failed",
+  "hypothesis_execution": {
+    "H-MEAS": "blocked_protected_development_annotation_and_independent_label_provenance_missing",
+    "H-REGIONAL": "blocked_HESCAPE_release_incomplete_and_executable_endpoint_not_locked",
+    "H-CELL": "blocked_H_MEAS_not_passed_and_fresh_pristine_registered_cell_cohort_missing",
+    "H-INTRINSIC": "blocked_H_CELL_not_testable",
+    "H-REF": "blocked_external_morphology_evidence_and_matched_reference_bank_missing",
+    "H-END2END": "blocked_external_morphology_evidence_and_independent_HE_type_routing_missing",
+    "H-COMP": "blocked_predecessor_hypotheses_not_passed",
+    "H-EXT": "blocked_independent_registered_cell_cohort_not_registered"
+  },
   "full_heir_development_authorized": false,
   "scientific_lock_state": {
     "h_meas_executed": false,
     "h_cell_lock_authorized": false,
-    "locked_hest_donors_may_be_opened": false,
+    "historical_hest_test_split_prospectively_eligible": false,
+    "fresh_pristine_confirmatory_cohort_required": true,
+    "independent_external_h_ext_cohort_available": false,
     "blockers": [
-      "development_only_annotation_export_missing",
+      "protected_development_only_annotation_export_missing",
       "development_only_h_meas_receipt_missing",
       "exact_gene_disjoint_label_annotation_receipt_missing",
-      "post_h_meas_confirmatory_design_binding_missing",
-      "h_meas_donor_section_type_calibration_topology_binding_missing",
-      "authorizing_truth_matrix_calibration_runner_missing",
-      "authorizing_per_trial_gate_report_attestation_missing",
-      "authorizing_exact_gate_calibration_receipt_missing"
+      "target_independent_training_label_provenance_missing",
+      "independent_label_steward_attestation_and_annotation_model_lineage_missing",
+      "post_h_meas_outcome_free_donor_section_type_topology_missing",
+      "literal_60000_full_gate_calibration_design_computationally_infeasible",
+      "authorizing_six_condition_exact_gate_calibration_receipt_missing",
+      "fresh_pristine_registered_cell_resolved_confirmatory_cohort_missing",
+      "independent_external_registered_cell_resolved_h_ext_cohort_missing"
     ]
+  },
+  "historical_hest_lock_exposure": {
+    "audit_report": "reports/hest_lock_exposure_audit.json",
+    "audit_report_sha256": "7c9dd840968ec45f2bce4b2e9f6ae315688834da9a17acb94daf24060e24804b",
+    "run_directory": "/mnt/seagate/HEIR_runs/mr_hescape_uni2h_28c6fff_1783921182",
+    "source_commit": "28c6fff081973e003c914b6d5d0f0491cb0a6fdc",
+    "affected_donor_ids": ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"],
+    "molecular_outcomes_materialized": true,
+    "image_features_materialized": true,
+    "locked_artifact_reloaded": true,
+    "endpoint_report_found": false,
+    "metric_viewing_or_tuning_evidence_found": false,
+    "prospective_lock_valid": false,
+    "prospective_eligibility_can_be_restored": false,
+    "permitted_role": "retrospective_internal_exploratory_only",
+    "scientific_interpretation": "materialization_invalidates_the_prospective_lock_but_no_endpoint_result_was_found_so_the_hypothesis_is_untested_not_failed"
   },
   "historical_execution_audit": {
     "cohort": "snPATHO_4066_4399_4411",
@@ -37,12 +69,14 @@
     "official_hescape_split_is_donor_safe": false,
     "cross_split_true_donors": ["TILD117", "VUILD78", "VUILD96"],
     "train_validation_repeated_donor": "VUILD91",
-    "frozen_true_donor_split": {
+    "historical_donor_grouping": {
       "development": [
         "TILD175", "VUHD069", "VUHD116", "VUILD102", "VUILD105",
         "VUILD106", "VUILD107", "VUILD110", "VUILD115", "VUILD91"
       ],
-      "locked_test": ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"]
+      "previously_designated_test_now_exposed": [
+        "THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"
+      ]
     }
   },
   "regional_candidate": {
@@ -50,15 +84,22 @@
     "config": "human-lung-healthy-panel",
     "dataset_revision": "a9abd572aa2c740e6f9abee4e197d66b652c6532",
     "local_path": "/mnt/seagate/HnE/HESCAPE/hescape-pyarrow",
-    "parquet_shards": 195,
-    "rows": 56689,
-    "genes": 343,
+    "expected_parquet_shards": 195,
+    "locally_present_parquet_files": 5,
+    "locally_complete_parquet_shards": 4,
+    "locally_truncated_parquet_shards": 1,
+    "expected_parquet_bytes": 97181626515,
+    "locally_present_parquet_bytes": 2079493610,
+    "missing_parquet_bytes": 95102132905,
+    "local_release_complete": false,
+    "local_inventory_method": "filename_and_byte_size_comparison_to_frozen_manifest_no_outcome_content_access",
     "observation_level": "55um_pseudo_visium_spot",
     "target_construction": "sum_pooled_xenium_transcripts",
     "eligible_role": "development_donor_regional_exploratory_only_not_validation",
-    "evidence_scope": "development_cross_validation_only",
+    "evidence_scope": "development_cross_validation_only_after_download_completion",
     "authorizes_validated_regional_association": false,
     "blockers": [
+      "local_release_has_only_4_complete_and_1_truncated_of_195_expected_parquet_shards",
       "rows_are_pseudo_spots_not_cells_or_nuclei",
       "official_pseudo_patient_split_leaks_true_source_donors",
       "development_donors_only_no_independent_holdout"
@@ -76,13 +117,17 @@
     "has_cellvit_boundaries": true,
     "has_nucleus_assigned_transcripts": true,
     "has_rna_derived_oracle_broad_lineage": true,
+    "rna_label_target_independence": "pending_unresolved_annotation_and_training_label_provenance",
     "oracle_lineages": ["Endothelial", "Epithelial", "Immune", "Mesenchymal"],
-    "eligible_role": "five_locked_donor_internal_go_no_go_gate",
-    "evidence_scope": "within_GSE250346_internal_falsification_only",
-    "locked_donor_count": 5,
+    "eligible_role": "development_and_retrospective_internal_exploration_only",
+    "evidence_scope": "within_GSE250346_nonauthorizing_retrospective_analysis",
+    "historically_designated_test_donor_count": 5,
+    "prospectively_eligible_test_donor_count": 0,
     "supports_population_inference": false,
     "supports_external_generalization": false,
     "not_eligible_for": [
+      "prospective_h_cell_confirmation",
+      "prospective_h_intrinsic_confirmation",
       "independent_external_confirmation",
       "personalized_matched_snrna_reference_gate"
     ],
@@ -92,7 +137,85 @@
       "spaceranger": "not_applicable_to_xenium"
     }
   },
-  "encoder_hierarchy_frozen_before_locked_outcomes": true,
+  "external_candidate_metadata_audit": {
+    "cohort": "HEST_GSE315411_NCBI885_to_NCBI888",
+    "payload_downloaded": false,
+    "biological_outcomes_inspected": false,
+    "assay_records": 4,
+    "physical_serial_slides": 3,
+    "underlying_individual_donor_cores": 17,
+    "same_section_duplicate_assay_records": ["NCBI886", "NCBI887"],
+    "donor_unit": "underlying_TMA_core_not_NCBI_assay_record",
+    "upstream_core_membership_available": true,
+    "upstream_core_membership_source": "GSE315411_cell_stats.tar.gz",
+    "potential_role": "fresh_registered_cell_candidate_for_one_preregistered_cohort_role",
+    "ready_for_H_EXT": false,
+    "blockers": [
+      "upstream_core_to_donor_routing_not_locally_materialized_or_frozen",
+      "independent_type_annotation_not_available",
+      "biological_payload_not_downloaded",
+      "study_not_preregistered"
+    ],
+    "primary_source": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12803277/",
+    "source_study": "GSE315411"
+  },
+  "development_h_meas_contract": {
+    "protected_development_only_annotation_export_available": false,
+    "annotation_features_target_disjoint": "pending",
+    "training_label_ontology_target_independent": "pending",
+    "repository_receipts_alone_establish_independent_provenance": false,
+    "independent_steward_or_upstream_label_source_available": false,
+    "exact_annotation_model_artifact_lineage_available": false,
+    "outcome_free_donor_section_type_topology_available": false,
+    "target_panel_primary": "common_reliable_panel_across_all_supported_fine_types",
+    "minimum_common_reliable_genes": 6,
+    "fallback": "new_study_version_with_type_specific_panels_or_prespecified_programs_after_development_h_meas_failure_only",
+    "confirmatory_outcomes_may_select_fallback": false,
+    "confirmatory_registration_p95_micrometers": {
+      "annotation_to_nucleus": 8,
+      "annotation_to_cell": 12,
+      "native_cell_to_nucleus": 8
+    },
+    "maximum_annotation_distance_fraction_of_median_nucleus_diameter": 0.5,
+    "maximum_annotation_distance_fraction_of_median_nearest_neighbor_distance": 0.5
+  },
+  "confirmatory_gate_contract": {
+    "g2_required_macro_endpoints": [
+      "donor_type_balanced_residual_coordinate_r2",
+      "donor_section_type_balanced_residual_coordinate_r2"
+    ],
+    "locked_reliability_outputs": [
+      "donor_type_reliability",
+      "donor_section_type_reliability",
+      "worst_section_reliability",
+      "planned_donor_section_type_pass_fraction"
+    ],
+    "g3_registration_quality_strata": ["best", "intermediate", "near_threshold"],
+    "intrinsic_effect_only_near_threshold_is_authorizing": false,
+    "exact_six_condition_production_dgp_structurally_implemented": true,
+    "calibration_uses_shared_production_measurement_and_balance_reports": true,
+    "calibration_full_transcript_library_normalization_implemented": true,
+    "trial_level_familywise_false_decision_union_control_implemented": true,
+    "smoke_mode_authorizing": false,
+    "per_trial_actual_gate_report_hash_attestation_implemented": true,
+    "post_h_meas_design_and_topology_binding_complete": false,
+    "calibration_conditions": [
+      "global_null", "g2_boundary", "nucleus_only", "cell_only", "context_only", "mixed"
+    ],
+    "stress_family_count": 10,
+    "minimum_complete_trials_per_condition_and_stress_family": 1000,
+    "literal_minimum_full_gate_executions": 60000,
+    "literal_design_computationally_feasible_as_currently_specified": false,
+    "literal_design_executed": false,
+    "sequential_alternative_requirements": [
+      "preregistered_before_confirmatory_opening",
+      "exact_gate_retained",
+      "simultaneous_confidence_bounds",
+      "nonopportunistic_stopping"
+    ],
+    "authorizing_calibration_receipt_available": false,
+    "per_trial_actual_gate_reports_required": true
+  },
   "encoders": {
     "primary": {
       "repo": "MahmoodLab/UNI2-h",
@@ -114,11 +237,12 @@
       "revision": "5b5cc0505d19ae558270045eb0df8c34df4d9609",
       "status": "checkpoint_not_materialized",
       "feature_width": 768
-    }
+    },
+    "same_exposed_hest_cohort_replications_are_independent_confirmation": false
   },
   "nuisance_control_interpretation": {
     "section_and_batch_indicators": "development_fold_controls_only",
-    "fully_adjust_unseen_locked_categories": false,
+    "fully_adjust_unseen_confirmatory_categories": false,
     "required_held_out_evidence": [
       "measured_stain_and_image_quality",
       "continuous_spatial_features",
@@ -128,5 +252,5 @@
       "alternate_reference_splits"
     ]
   },
-  "claim": "UNI2-h plus development-only HESCAPE cannot validate a regional association because encoder strength cannot repair pseudo-spot ground truth or create an independent holdout. UNI2-h plus raw HEST can run a five-donor internal cell-level go/no-go gate on the same source study, but cannot establish population-level confirmation, external generalization, or matched-snRNA specificity."
+  "claim": "No prospective morphology-to-state benchmark has been completed. HESCAPE is locally incomplete at 4 complete and 1 truncated of 195 expected shards, with 95,102,132,905 bytes missing, and can provide only development-stage pseudo-spot sensitivity after completion. The five historical HEST test donors were exposed through outcome materialization and are retrospective internal/exploratory only. Their exposure does not constitute a negative result; the hypothesis remains untested. A protected H-MEAS workflow and a fresh pristine registered cell-resolved cohort are required before prospective H-CELL validation."
 }

@@ -8,8 +8,10 @@ import pytest
 from heir.evaluation.control_models import feature_family_registry
 from heir.evaluation.hierarchical_metrics import (
     donor_dominance,
+    donor_section_type_macro_r2,
     exact_paired_randomization,
 )
+from heir.evaluation.morphology_gate import _g2_section_balanced_companion
 from heir.evaluation.power import validate_calibration_receipt
 from heir.evaluation.residual_targets import correct_residuals, fit_type_technical_effects
 from heir.evaluation.weighted_basis import donor_weights, weighted_standardization
@@ -55,6 +57,62 @@ def test_exact_donor_randomization_and_dominance_are_deterministic() -> None:
     dominance = donor_dominance(effects)
     assert dominance["largest_positive_donor"] == "D3"
     assert dominance["largest_positive_share"] == pytest.approx(0.5)
+
+
+def test_section_balanced_r2_weights_types_sections_and_donors_equally() -> None:
+    truth = np.asarray([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0])[:, None]
+    prediction = np.asarray([-1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 1.0, 0.0, 0.0])[:, None]
+    donors = np.asarray(["D1"] * 10 + ["D2"] * 2)
+    sections = np.asarray(["S1"] * 8 + ["S2"] * 2 + ["S3"] * 2)
+    labels = np.asarray([0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0])
+
+    macro, rows, donor_macro, donor_section_macro = donor_section_type_macro_r2(
+        truth,
+        prediction,
+        donors,
+        sections,
+        labels,
+        minimum_support=2,
+    )
+
+    assert donor_section_macro == {"D1": {"S1": 0.5, "S2": 1.0}, "D2": {"S3": 0.0}}
+    assert donor_macro == {"D1": 0.75, "D2": 0.0}
+    assert macro == pytest.approx(0.375)
+    assert len(rows) == 4
+    assert all(row["evaluable"] is True for row in rows)
+
+
+def test_g2_section_balanced_companion_fails_closed_without_section_support() -> None:
+    endpoint = _g2_section_balanced_companion(
+        np.asarray([[-1.0], [1.0], [0.0]]),
+        np.asarray([[-1.0], [1.0], [0.0]]),
+        np.asarray(["D1", "D1", "D1"]),
+        np.asarray(["supported", "supported", "unsupported"]),
+        np.asarray([0, 0, 0]),
+        minimum_support=2,
+        minimum_macro_r2=0.05,
+    )
+
+    assert endpoint["available"] is False
+    assert endpoint["pass"] is False
+    assert endpoint["meets_minimum_effect"] is False
+    assert "no evaluable type support" in endpoint["reason"]
+
+
+def test_g2_section_balanced_companion_uses_frozen_macro_threshold() -> None:
+    endpoint = _g2_section_balanced_companion(
+        np.asarray([[-1.0], [1.0]]),
+        np.zeros((2, 1)),
+        np.asarray(["D1", "D1"]),
+        np.asarray(["S1", "S1"]),
+        np.asarray([0, 0]),
+        minimum_support=2,
+        minimum_macro_r2=0.05,
+    )
+
+    assert endpoint["available"] is True
+    assert endpoint["donor_equal_section_equal_type_macro_r2"] == pytest.approx(0.0)
+    assert endpoint["pass"] is False
 
 
 def test_calibration_receipt_fails_closed_for_final_inference(

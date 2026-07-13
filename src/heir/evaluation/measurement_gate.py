@@ -25,6 +25,10 @@ from heir.utils import sha256_file
 MEASUREMENT_GATE_SCHEMA = "heir.measurement_gate.v1"
 PRIMARY_TARGET_VARIANT = "nucleus_overlapping_transcripts"
 SECONDARY_TARGET_VARIANT = "whole_cell_assigned_transcripts"
+REGISTRATION_QUALITY_DEFINITION = (
+    "max(annotation_nucleus_error/section_median_nucleus_diameter/diameter_limit,"
+    "annotation_nucleus_error/section_median_nearest_neighbor_distance/neighbor_limit)"
+)
 PathLike = Union[str, Path]
 
 
@@ -68,6 +72,7 @@ class MeasurementThresholds:
     minimum_reliable_development_donor_fraction: float
     minimum_within_fine_type_reliability: float
     minimum_reliability_rows: int
+    minimum_common_reliable_genes: int
     target_basis_rank: int
     minimum_reliable_development_donors: int
     minimum_reliable_donors_per_fine_type: int
@@ -109,6 +114,7 @@ class MeasurementThresholds:
             "minimum_reliable_development_donor_fraction",
             "minimum_within_fine_type_reliability",
             "minimum_reliability_rows",
+            "minimum_common_reliable_genes",
             "target_basis_rank",
             "minimum_reliable_development_donors",
             "minimum_reliable_donors_per_fine_type",
@@ -193,6 +199,7 @@ class MeasurementThresholds:
             raise ValueError("reliable molecular targets require a positive donor fraction")
         positive_integers = (
             "minimum_reliability_rows",
+            "minimum_common_reliable_genes",
             "target_basis_rank",
             "minimum_reliable_development_donors",
             "minimum_reliable_donors_per_fine_type",
@@ -212,6 +219,10 @@ class MeasurementThresholds:
             or self.minimum_reliable_donors_per_fine_type < 2
         ):
             raise ValueError("donor-cross-fitted reliability requires at least two donors")
+        if self.minimum_common_reliable_genes < self.target_basis_rank:
+            raise ValueError(
+                "common reliable-gene minimum cannot be smaller than the target-basis rank"
+            )
         locked_minimum = self.minimum_locked_donors_per_fine_type
         if (
             isinstance(locked_minimum, (bool, np.bool_))
@@ -1119,7 +1130,7 @@ def evaluate_measurement_gate(
     if source_study_manifest_sha256 != study_manifest_sha256:
         raise ValueError("H-MEAS source is not bound to the measurement study manifest")
     if locked_outcomes_materialized is not False:
-        raise ValueError("H-MEAS source does not prove locked donor outcomes stayed unopened")
+        raise ValueError("H-MEAS source build materialized non-development donor outcomes")
     if split_ids is None or set(split_ids.tolist()) != {"development"}:
         raise ValueError("H-MEAS source split_ids must contain development only")
     observed_donors = set(donor_ids.tolist())
@@ -1220,10 +1231,7 @@ def evaluate_measurement_gate(
             ]
         )
         quality_strata_report = {
-            "definition": (
-                "max(error/section_median_nucleus_diameter/diameter_limit,"
-                "error/section_median_nearest_neighbor_distance/neighbor_limit)"
-            ),
+            "definition": REGISTRATION_QUALITY_DEFINITION,
             "cutoffs_fraction_of_limit": {
                 "best": thresholds.best_registration_quality_max_fraction_of_limit,
                 "intermediate": (
@@ -1968,7 +1976,7 @@ def evaluate_measurement_gate(
                 ]
                 gene_fraction = len(selected_genes) / len(gene_ids)
                 variant_pass = bool(
-                    selected_genes
+                    len(selected_genes) >= thresholds.minimum_common_reliable_genes
                     and gene_fraction >= thresholds.minimum_reliable_gene_fraction
                     and selected_programs
                     and ceiling["pass"]
@@ -2101,6 +2109,17 @@ def evaluate_measurement_gate(
             "minimum_within_fine_type_reliability": (
                 thresholds.minimum_within_fine_type_reliability
             ),
+            "primary_target_panel_strategy": (
+                "common_reliable_panel_across_all_supported_fine_types"
+            ),
+            "minimum_common_reliable_genes": thresholds.minimum_common_reliable_genes,
+            "fallback": "new_study_version_type_specific_panels_or_prespecified_programs",
+            "fallback_activation": (
+                "only_after_development_h_meas_failure_before_any_confirmatory_opening"
+            ),
+            "fallback_requires_new_h_meas_manifest": True,
+            "fallback_requires_new_calibration": True,
+            "locked_outcomes_may_inform_fallback": False,
         },
     }
     target_selection_core = {
@@ -2414,6 +2433,27 @@ def _require_target_selection_receipt(report: Mapping[str, object]) -> None:
             or receipt.get(digest_name) != _panel_sha256(values)
         ):
             raise ValueError("measurement target-selection panel is malformed")
+    reliability_contract = receipt.get("reliability_contract")
+    if not isinstance(reliability_contract, Mapping):
+        raise ValueError("measurement target-selection reliability contract is missing")
+    minimum_common_genes = reliability_contract.get("minimum_common_reliable_genes")
+    selected_genes = receipt["ordered_reliable_gene_ids"]
+    if (
+        reliability_contract.get("primary_target_panel_strategy")
+        != "common_reliable_panel_across_all_supported_fine_types"
+        or isinstance(minimum_common_genes, bool)
+        or not isinstance(minimum_common_genes, int)
+        or minimum_common_genes < 1
+        or len(selected_genes) < minimum_common_genes
+        or reliability_contract.get("fallback")
+        != "new_study_version_type_specific_panels_or_prespecified_programs"
+        or reliability_contract.get("fallback_activation")
+        != "only_after_development_h_meas_failure_before_any_confirmatory_opening"
+        or reliability_contract.get("fallback_requires_new_h_meas_manifest") is not True
+        or reliability_contract.get("fallback_requires_new_calibration") is not True
+        or reliability_contract.get("locked_outcomes_may_inform_fallback") is not False
+    ):
+        raise ValueError("measurement target-panel strategy or fallback is not frozen")
     claimed_digest = receipt.get("receipt_content_sha256")
     core = {str(name): value for name, value in receipt.items() if name != "receipt_content_sha256"}
     if claimed_digest != _mapping_sha256(core):

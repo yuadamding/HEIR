@@ -10,6 +10,13 @@ from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 from heir.data import MorphologyRidgeDatasetArtifact, StudyManifest, ordered_ids_sha256
+from heir.data.study_manifest import (
+    CONFIRMATORY_DONOR_SECTION_TYPE_METRIC,
+    CONFIRMATORY_DONOR_TYPE_METRIC,
+    CONFIRMATORY_PRIMARY_DECISION_RULE,
+    CONFIRMATORY_PRIMARY_ENDPOINT_NAME,
+    CONFIRMATORY_PRIMARY_MINIMUM_EFFECT,
+)
 from heir.evaluation import evaluate_morphology_ridge_gate, validate_experiment_identity
 from heir.evaluation.control_models import (
     HEST_CROP_CONTRACT,
@@ -19,6 +26,8 @@ from heir.evaluation.control_models import (
 )
 from heir.evaluation.measurement_gate import load_passing_measurement_receipt
 from heir.evaluation.power import (
+    canonical_sha256,
+    confirmatory_scientific_manifest_projection,
     validate_calibration_receipt,
     validate_confirmatory_design_binding,
 )
@@ -117,10 +126,22 @@ def _calibration_receipt(
     )
     if path is None or not path.is_file() or sha256_file(path) != expected:
         raise ValueError("final inference requires the exact locked calibration receipt")
-    return validate_calibration_receipt(
-        _load_json(path, "calibration receipt"),
-        required=True,
+    receipt = _load_json(path, "calibration receipt")
+    validate_calibration_receipt(receipt, required=True)
+    settings = _mapping(
+        receipt.get("exact_gate_settings"),
+        "calibration exact_gate_settings",
+        {"confirmatory_design_binding"},
     )
+    binding = validate_confirmatory_design_binding(settings["confirmatory_design_binding"])
+    live_projection = confirmatory_scientific_manifest_projection(manifest.content)
+    if binding["scientific_manifest_projection"] != live_projection or binding[
+        "scientific_manifest_projection_sha256"
+    ] != canonical_sha256(live_projection):
+        raise ValueError(
+            "calibration scientific manifest projection differs from the live H-CELL manifest"
+        )
+    return receipt
 
 
 def _positive_numbers(value: object, name: str, *, integer: bool) -> tuple[float, ...]:
@@ -177,8 +198,35 @@ def _gate_settings(
     endpoint = _mapping(
         manifest.content["primary_endpoint"],
         "primary_endpoint",
-        {"minimum_effect"},
+        {
+            "name",
+            "condition_on",
+            "decision_rule",
+            "donor_type_macro",
+            "donor_section_type_macro",
+        },
     )
+    donor_type_endpoint = _mapping(
+        endpoint["donor_type_macro"],
+        "primary_endpoint.donor_type_macro",
+        {"metric", "minimum_effect"},
+    )
+    donor_section_type_endpoint = _mapping(
+        endpoint["donor_section_type_macro"],
+        "primary_endpoint.donor_section_type_macro",
+        {"metric", "minimum_effect"},
+    )
+    if (
+        endpoint["name"] != CONFIRMATORY_PRIMARY_ENDPOINT_NAME
+        or endpoint["condition_on"] != manifest.content["observations"]["fine_type_field"]
+        or endpoint["decision_rule"] != CONFIRMATORY_PRIMARY_DECISION_RULE
+        or donor_type_endpoint["metric"] != CONFIRMATORY_DONOR_TYPE_METRIC
+        or donor_section_type_endpoint["metric"] != CONFIRMATORY_DONOR_SECTION_TYPE_METRIC
+        or float(donor_type_endpoint["minimum_effect"]) != CONFIRMATORY_PRIMARY_MINIMUM_EFFECT
+        or float(donor_section_type_endpoint["minimum_effect"])
+        != CONFIRMATORY_PRIMARY_MINIMUM_EFFECT
+    ):
+        raise ValueError("locked primary endpoint differs from the frozen joint endpoint")
     coverage = _mapping(
         manifest.content["coverage_requirements"],
         "coverage_requirements",
@@ -257,7 +305,7 @@ def _gate_settings(
         "minimum_support": int(coverage["minimum_evaluation_cells_per_donor_section_type"]),
         "minimum_development_donors": int(coverage["minimum_development_donors_per_fine_type"]),
         "minimum_locked_donors": int(coverage["minimum_locked_donors_per_fine_type"]),
-        "minimum_macro_r2": float(endpoint["minimum_effect"]),
+        "minimum_macro_r2": float(donor_type_endpoint["minimum_effect"]),
         "minimum_shuffle_delta": float(thresholds["minimum_shuffled_delta_r2"]),
         "maximum_permutation_p": float(thresholds["maximum_empirical_p"]),
         "minimum_coordinate_delta": float(gate["minimum_coordinate_delta"]),

@@ -72,8 +72,8 @@
         "level": {"type": "string", "minLength": 1},
         "registration_method": {"type": "string", "minLength": 1},
         "target_variants": {"$ref": "#/$defs/nonemptyStrings"},
-        "broad_type_field": {"type": "string", "minLength": 1},
-        "fine_type_field": {"type": "string", "minLength": 1},
+        "broad_type_field": {"const": "broad_lineage"},
+        "fine_type_field": {"const": "fine_type"},
         "supported_fine_type_ids": {"$ref": "#/$defs/strings"},
         "supported_fine_type_ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
       }
@@ -81,6 +81,28 @@
     "candidate_target_gene_panel_sha256": {"$ref": "#/$defs/sha256"},
     "target_gene_panel_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
     "type_marker_panel_sha256": {"$ref": "#/$defs/sha256"},
+    "target_panel_strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "minimum_primary_gene_count",
+        "fallback",
+        "fallback_activation",
+        "fallback_requires_new_h_meas_manifest",
+        "fallback_requires_new_calibration",
+        "locked_outcomes_may_inform_fallback"
+      ],
+      "properties": {
+        "primary": {"const": "common_reliable_panel_across_all_supported_fine_types"},
+        "minimum_primary_gene_count": {"type": "integer", "minimum": 1},
+        "fallback": {"const": "new_study_version_type_specific_panels_or_prespecified_programs"},
+        "fallback_activation": {"const": "only_after_development_h_meas_failure_before_any_confirmatory_opening"},
+        "fallback_requires_new_h_meas_manifest": {"const": true},
+        "fallback_requires_new_calibration": {"const": true},
+        "locked_outcomes_may_inform_fallback": {"const": false}
+      }
+    },
     "encoder": {
       "type": "object",
       "additionalProperties": false,
@@ -191,6 +213,8 @@
         "maximum_cell_nucleus_p95_um",
         "maximum_registration_nucleus_diameter_ratio_p95",
         "maximum_registration_nearest_neighbor_ratio_p95",
+        "best_registration_quality_max_fraction_of_limit",
+        "intermediate_registration_quality_max_fraction_of_limit",
         "maximum_registration_outlier_fraction",
         "maximum_nucleus_outside_cell_fraction",
         "minimum_nucleus_cell_area_ratio",
@@ -207,21 +231,23 @@
         "audit_timing": {"const": "after_confirmatory_lock_before_morphology_inference"},
         "selection_changes_forbidden": {"const": true},
         "coverage_denominator": {"const": "all_h_meas_supported_fine_types_and_locked_donors"},
-        "maximum_annotation_nucleus_p95_um": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_annotation_cell_p95_um": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_cell_nucleus_p95_um": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_registration_nucleus_diameter_ratio_p95": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_registration_nearest_neighbor_ratio_p95": {"type": "number", "exclusiveMinimum": 0},
-        "maximum_registration_outlier_fraction": {"type": "number", "minimum": 0, "maximum": 1},
-        "maximum_nucleus_outside_cell_fraction": {"type": "number", "minimum": 0, "maximum": 1},
-        "minimum_nucleus_cell_area_ratio": {"type": "number", "minimum": 0, "maximum": 1},
-        "maximum_nucleus_cell_area_ratio": {"type": "number", "minimum": 0, "maximum": 1},
-        "maximum_segmentation_outlier_fraction": {"type": "number", "minimum": 0, "maximum": 1},
-        "maximum_crop_padding_p95": {"type": "number", "minimum": 0, "maximum": 1},
-        "mostly_padded_cutoff": {"type": "number", "minimum": 0, "maximum": 1},
-        "maximum_mostly_padded_fraction": {"type": "number", "minimum": 0, "maximum": 1},
-        "minimum_within_fine_type_reliability": {"type": "number", "minimum": 0, "maximum": 1},
-        "minimum_reliability_rows": {"type": "integer", "minimum": 2},
+        "maximum_annotation_nucleus_p95_um": {"const": 8.0},
+        "maximum_annotation_cell_p95_um": {"const": 12.0},
+        "maximum_cell_nucleus_p95_um": {"const": 8.0},
+        "maximum_registration_nucleus_diameter_ratio_p95": {"const": 0.5},
+        "maximum_registration_nearest_neighbor_ratio_p95": {"const": 0.5},
+        "best_registration_quality_max_fraction_of_limit": {"const": 0.25},
+        "intermediate_registration_quality_max_fraction_of_limit": {"const": 0.6},
+        "maximum_registration_outlier_fraction": {"const": 0.05},
+        "maximum_nucleus_outside_cell_fraction": {"const": 0.01},
+        "minimum_nucleus_cell_area_ratio": {"const": 0.05},
+        "maximum_nucleus_cell_area_ratio": {"const": 0.95},
+        "maximum_segmentation_outlier_fraction": {"const": 0.05},
+        "maximum_crop_padding_p95": {"const": 0.25},
+        "mostly_padded_cutoff": {"const": 0.5},
+        "maximum_mostly_padded_fraction": {"const": 0.01},
+        "minimum_within_fine_type_reliability": {"const": 0.4},
+        "minimum_reliability_rows": {"const": 40},
         "minimum_locked_donor_type_reliability_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
       }
     },
@@ -232,6 +258,9 @@
         "reserved_exclusively_for",
         "reserved_donor_ids",
         "prior_outcome_access_confirmed_false",
+        "prior_outcome_access_status",
+        "prior_outcome_exposure_receipt_sha256",
+        "prospective_lock_eligible",
         "hescape_analysis_scope",
         "hescape_allowed_donor_ids",
         "forbidden_prior_outcome_uses"
@@ -239,8 +268,20 @@
       "properties": {
         "reserved_exclusively_for": {"const": "H-CELL"},
         "reserved_donor_ids": {"$ref": "#/$defs/nonemptyStrings"},
-        "prior_outcome_access_confirmed_false": {"const": true},
-        "hescape_analysis_scope": {"const": "development_donors_only_hest_lock_unopened"},
+        "prior_outcome_access_confirmed_false": {"type": "boolean"},
+        "prior_outcome_access_status": {
+          "enum": ["unopened", "molecular_outcomes_materialized_pre_registration"]
+        },
+        "prior_outcome_exposure_receipt_sha256": {
+          "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "prospective_lock_eligible": {"type": "boolean"},
+        "hescape_analysis_scope": {
+          "enum": [
+            "development_donors_only_hest_lock_unopened",
+            "development_donors_only_reserved_outcomes_previously_materialized"
+          ]
+        },
         "hescape_allowed_donor_ids": {"$ref": "#/$defs/nonemptyStrings"},
         "forbidden_prior_outcome_uses": {"$ref": "#/$defs/nonemptyStrings"}
       }
@@ -260,6 +301,11 @@
         "annotation_training_scope",
         "annotation_training_donor_ids",
         "annotation_training_donor_ids_sha256",
+        "training_label_ontology_source",
+        "training_label_provenance_receipt_sha256",
+        "training_label_target_gene_overlap_count",
+        "training_labels_establish_target_independence",
+        "annotation_quality_contract",
         "locked_donors_used_for_training",
         "same_cohort_annotation",
         "cross_fitting_method",
@@ -293,6 +339,63 @@
         },
         "annotation_training_donor_ids": {"$ref": "#/$defs/strings"},
         "annotation_training_donor_ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "training_label_ontology_source": {
+          "enum": [
+            "pending",
+            "external_target_disjoint_ontology",
+            "de_novo_gene_disjoint_development_ontology",
+            "orthogonal_modality_ontology"
+          ]
+        },
+        "training_label_provenance_receipt_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "training_label_target_gene_overlap_count": {"oneOf": [{"const": 0}, {"type": "null"}]},
+        "training_labels_establish_target_independence": {"type": "boolean"},
+        "annotation_quality_contract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "minimum_fine_type_macro_f1",
+            "calibration_metric",
+            "calibration_binning",
+            "calibration_bin_count",
+            "maximum_calibration_error",
+            "minimum_major_class_sensitivity",
+            "minimum_prediction_coverage_fraction",
+            "abstention_method",
+            "confidence_threshold",
+            "abstain_label",
+            "tie_breaking",
+            "probability_sum_tolerance",
+            "per_validation_donor_metrics_required",
+            "validation_designs_by_evidence_kind"
+          ],
+          "properties": {
+            "minimum_fine_type_macro_f1": {"type": "number", "minimum": 0.7, "maximum": 1.0},
+            "calibration_metric": {"const": "multiclass_expected_calibration_error"},
+            "calibration_binning": {"const": "equal_width_confidence_bins"},
+            "calibration_bin_count": {"const": 10},
+            "maximum_calibration_error": {"type": "number", "minimum": 0.0, "maximum": 0.1},
+            "minimum_major_class_sensitivity": {"type": "number", "minimum": 0.5, "maximum": 1.0},
+            "minimum_prediction_coverage_fraction": {"type": "number", "minimum": 0.8, "maximum": 1.0},
+            "abstention_method": {"const": "maximum_probability_below_threshold"},
+            "confidence_threshold": {"type": "number", "minimum": 0.5, "exclusiveMaximum": 1.0},
+            "abstain_label": {"const": "__ABSTAIN__"},
+            "tie_breaking": {"const": "ordered_fine_type_ids"},
+            "probability_sum_tolerance": {
+              "type": "number",
+              "exclusiveMinimum": 0.0,
+              "maximum": 0.000001
+            },
+            "per_validation_donor_metrics_required": {"const": true},
+            "validation_designs_by_evidence_kind": {
+              "const": {
+                "external_gene_disjoint_annotation": "external_donor_held_out",
+                "development_donor_cross_fitted_gene_disjoint_annotation": "leave_one_development_donor_out",
+                "orthogonal_modality_annotation": "orthogonal_modality_validation"
+              }
+            }
+          }
+        },
         "locked_donors_used_for_training": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
         "same_cohort_annotation": {"type": "boolean"},
         "cross_fitting_method": {"enum": ["pending", "not_applicable", "leave_one_donor_out"]},
@@ -309,6 +412,7 @@
     {
       "if": {"properties": {"study_stage": {"const": "measurement_development"}}},
       "then": {
+        "required": ["target_panel_strategy"],
         "properties": {
           "hypothesis_ids": {"const": ["H-MEAS"]},
           "randomization": {
@@ -331,13 +435,61 @@
               "same_section_source_overlap_allowed": {"const": true}
             }
           },
-          "decision_thresholds": {
-            "required": ["required_opposite_pool_guard_um"],
+          "primary_endpoint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "target_variant", "authorizes_target_selection"],
             "properties": {
+              "name": {"const": "nucleus_overlap_within_fine_type_donor_cross_fitted_reliability"},
+              "target_variant": {"const": "nucleus_overlapping_transcripts"},
+              "authorizes_target_selection": {"const": true}
+            }
+          },
+          "decision_thresholds": {
+            "required": [
+              "maximum_annotation_nucleus_p95_um",
+              "maximum_annotation_cell_p95_um",
+              "maximum_cell_nucleus_p95_um",
+              "maximum_registration_nucleus_diameter_ratio_p95",
+              "maximum_registration_nearest_neighbor_ratio_p95",
+              "best_registration_quality_max_fraction_of_limit",
+              "intermediate_registration_quality_max_fraction_of_limit",
+              "maximum_registration_outlier_fraction",
+              "maximum_nucleus_outside_cell_fraction",
+              "minimum_nucleus_cell_area_ratio",
+              "maximum_nucleus_cell_area_ratio",
+              "maximum_segmentation_outlier_fraction",
+              "maximum_crop_padding_p95",
+              "mostly_padded_cutoff",
+              "maximum_mostly_padded_fraction",
+              "minimum_within_fine_type_reliability",
+              "minimum_reliability_rows",
+              "required_opposite_pool_guard_um",
+              "minimum_common_reliable_genes"
+            ],
+            "properties": {
+              "maximum_annotation_nucleus_p95_um": {"const": 8.0},
+              "maximum_annotation_cell_p95_um": {"const": 12.0},
+              "maximum_cell_nucleus_p95_um": {"const": 8.0},
+              "maximum_registration_nucleus_diameter_ratio_p95": {"const": 0.5},
+              "maximum_registration_nearest_neighbor_ratio_p95": {"const": 0.5},
+              "best_registration_quality_max_fraction_of_limit": {"const": 0.25},
+              "intermediate_registration_quality_max_fraction_of_limit": {"const": 0.6},
+              "maximum_registration_outlier_fraction": {"const": 0.05},
+              "maximum_nucleus_outside_cell_fraction": {"const": 0.01},
+              "minimum_nucleus_cell_area_ratio": {"const": 0.05},
+              "maximum_nucleus_cell_area_ratio": {"const": 0.95},
+              "maximum_segmentation_outlier_fraction": {"const": 0.05},
+              "maximum_crop_padding_p95": {"const": 0.25},
+              "mostly_padded_cutoff": {"const": 0.5},
+              "maximum_mostly_padded_fraction": {"const": 0.01},
+              "minimum_within_fine_type_reliability": {"const": 0.4},
+              "minimum_reliability_rows": {"const": 40},
               "required_opposite_pool_guard_um": {
                 "type": "number",
                 "exclusiveMinimum": 0
-              }
+              },
+              "minimum_common_reliable_genes": {"type": "integer", "minimum": 1}
             }
           }
         },
@@ -358,6 +510,40 @@
       },
       "else": {
         "properties": {
+          "primary_endpoint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "condition_on",
+              "decision_rule",
+              "donor_type_macro",
+              "donor_section_type_macro"
+            ],
+            "properties": {
+              "name": {"const": "joint_donor_type_and_donor_section_type_macro_residual_coordinate_r2"},
+              "condition_on": {"const": "fine_type"},
+              "decision_rule": {"const": "both_endpoints_must_meet_frozen_minimum"},
+              "donor_type_macro": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["metric", "minimum_effect"],
+                "properties": {
+                  "metric": {"const": "donor_equal_type_equal_residual_coordinate_r2"},
+                  "minimum_effect": {"const": 0.05}
+                }
+              },
+              "donor_section_type_macro": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["metric", "minimum_effect"],
+                "properties": {
+                  "metric": {"const": "donor_equal_section_equal_type_equal_residual_coordinate_r2"},
+                  "minimum_effect": {"const": 0.05}
+                }
+              }
+            }
+          },
           "coverage_requirements": {
             "required": [
               "maximum_reference_evaluation_absolute_smd",
@@ -378,7 +564,43 @@
           "hyperparameter_grid",
           "morphology_gate",
           "locked_measurement_audit"
-        ]
+        ],
+        "not": {"required": ["target_panel_strategy"]}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "study_stage": {"const": "measurement_development"},
+          "status": {"enum": ["locked", "opened"]}
+        },
+        "required": ["study_stage", "status"]
+      },
+      "then": {
+        "properties": {
+          "label_target_independence": {
+            "properties": {
+              "evidence_kind": {
+                "enum": [
+                  "external_gene_disjoint_annotation",
+                  "development_donor_cross_fitted_gene_disjoint_annotation",
+                  "orthogonal_modality_annotation"
+                ]
+              },
+              "annotation_receipt_sha256": {"$ref": "#/$defs/sha256"},
+              "ordered_annotation_feature_ids": {"$ref": "#/$defs/nonemptyStrings"},
+              "ordered_annotation_feature_ids_sha256": {"$ref": "#/$defs/sha256"},
+              "ordered_target_gene_ids": {"$ref": "#/$defs/nonemptyStrings"},
+              "ordered_target_gene_ids_sha256": {"$ref": "#/$defs/sha256"},
+              "annotation_target_overlap_count": {"const": 0},
+              "training_label_provenance_receipt_sha256": {"$ref": "#/$defs/sha256"},
+              "training_label_target_gene_overlap_count": {"const": 0},
+              "training_labels_establish_target_independence": {"const": true},
+              "locked_donors_used_for_training": {"const": false},
+              "establishes_full_target_independence": {"const": true}
+            }
+          }
+        }
       }
     },
     {
@@ -406,6 +628,9 @@
               "ordered_target_gene_ids": {"$ref": "#/$defs/nonemptyStrings"},
               "ordered_target_gene_ids_sha256": {"$ref": "#/$defs/sha256"},
               "annotation_target_overlap_count": {"const": 0},
+              "training_label_provenance_receipt_sha256": {"$ref": "#/$defs/sha256"},
+              "training_label_target_gene_overlap_count": {"const": 0},
+              "training_labels_establish_target_independence": {"const": true},
               "locked_donors_used_for_training": {"const": false},
               "establishes_full_target_independence": {"const": true}
             },

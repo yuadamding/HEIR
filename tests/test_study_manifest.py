@@ -13,6 +13,10 @@ from heir.data import (
     open_manifest_content,
     ordered_ids_sha256,
 )
+from heir.data.study_manifest import (
+    DEFAULT_ANNOTATION_QUALITY_CONTRACT,
+    FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS,
+)
 from heir.utils import atomic_json_dump
 
 
@@ -45,8 +49,8 @@ def _draft() -> dict[str, object]:
                 "nucleus_overlapping_transcripts",
                 "whole_cell_assigned_transcripts",
             ],
-            "broad_type_field": "final_lineage",
-            "fine_type_field": "final_CT",
+            "broad_type_field": "broad_lineage",
+            "fine_type_field": "fine_type",
             "supported_fine_type_ids": ["ft1", "ft2"],
             "supported_fine_type_ids_sha256": ordered_ids_sha256(["ft1", "ft2"]),
         },
@@ -72,6 +76,9 @@ def _draft() -> dict[str, object]:
             "reserved_exclusively_for": "H-CELL",
             "reserved_donor_ids": ["d4", "d5", "d6"],
             "prior_outcome_access_confirmed_false": True,
+            "prior_outcome_access_status": "unopened",
+            "prior_outcome_exposure_receipt_sha256": None,
+            "prospective_lock_eligible": True,
             "hescape_analysis_scope": "development_donors_only_hest_lock_unopened",
             "hescape_allowed_donor_ids": ["d1", "d2", "d3"],
             "forbidden_prior_outcome_uses": ["HESCAPE_locked_regional_outcomes"],
@@ -90,6 +97,11 @@ def _draft() -> dict[str, object]:
             "annotation_training_scope": "development_donors_only",
             "annotation_training_donor_ids": ["d1", "d2", "d3"],
             "annotation_training_donor_ids_sha256": ordered_ids_sha256(["d1", "d2", "d3"]),
+            "training_label_ontology_source": "de_novo_gene_disjoint_development_ontology",
+            "training_label_provenance_receipt_sha256": "9" * 64,
+            "training_label_target_gene_overlap_count": 0,
+            "training_labels_establish_target_independence": True,
+            "annotation_quality_contract": copy.deepcopy(DEFAULT_ANNOTATION_QUALITY_CONTRACT),
             "locked_donors_used_for_training": False,
             "same_cohort_annotation": True,
             "cross_fitting_method": "leave_one_donor_out",
@@ -101,7 +113,19 @@ def _draft() -> dict[str, object]:
         "controls": ["coordinate_only", "stain_only", "context_only"],
         "hyperparameter_grid": {"rank": [2, 4], "ridge": [0.1, 1.0]},
         "randomization": {"permutations": 999, "nulls": ["local", "regional"]},
-        "primary_endpoint": {"metric": "equal_donor_equal_fine_type_r2"},
+        "primary_endpoint": {
+            "name": "joint_donor_type_and_donor_section_type_macro_residual_coordinate_r2",
+            "condition_on": "fine_type",
+            "decision_rule": "both_endpoints_must_meet_frozen_minimum",
+            "donor_type_macro": {
+                "metric": "donor_equal_type_equal_residual_coordinate_r2",
+                "minimum_effect": 0.05,
+            },
+            "donor_section_type_macro": {
+                "metric": "donor_equal_section_equal_type_equal_residual_coordinate_r2",
+                "minimum_effect": 0.05,
+            },
+        },
         "secondary_endpoints": [],
         "coverage_requirements": {
             "minimum_fraction": 0.8,
@@ -138,6 +162,8 @@ def _draft() -> dict[str, object]:
             "maximum_cell_nucleus_p95_um": 8.0,
             "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
             "maximum_registration_nearest_neighbor_ratio_p95": 0.5,
+            "best_registration_quality_max_fraction_of_limit": 0.25,
+            "intermediate_registration_quality_max_fraction_of_limit": 0.6,
             "maximum_registration_outlier_fraction": 0.05,
             "maximum_nucleus_outside_cell_fraction": 0.01,
             "minimum_nucleus_cell_area_ratio": 0.05,
@@ -171,6 +197,11 @@ def _pending_independence() -> dict[str, object]:
         "annotation_training_scope": "unknown_pending_provenance",
         "annotation_training_donor_ids": [],
         "annotation_training_donor_ids_sha256": None,
+        "training_label_ontology_source": "pending",
+        "training_label_provenance_receipt_sha256": None,
+        "training_label_target_gene_overlap_count": None,
+        "training_labels_establish_target_independence": False,
+        "annotation_quality_contract": copy.deepcopy(DEFAULT_ANNOTATION_QUALITY_CONTRACT),
         "locked_donors_used_for_training": None,
         "same_cohort_annotation": True,
         "cross_fitting_method": "pending",
@@ -379,6 +410,16 @@ def test_study_manifest_rejects_donor_overlap(tmp_path: Path) -> None:
         StudyManifest.load(path)
 
 
+def test_hest_manifest_rejects_legacy_target_derived_label_fields(tmp_path: Path) -> None:
+    draft = _draft()
+    draft["observations"]["broad_type_field"] = "final_lineage"
+    draft["observations"]["fine_type_field"] = "final_CT"
+    draft["primary_endpoint"]["condition_on"] = "final_CT"
+
+    with pytest.raises(ValueError, match="receipt-bound independent"):
+        _write(tmp_path / "legacy-label-fields.json", draft)
+
+
 def test_confirmatory_draft_cannot_lock_before_measurement_and_independence(tmp_path: Path) -> None:
     draft = _draft()
     draft["target_gene_panel_sha256"] = None
@@ -418,6 +459,9 @@ def test_confirmatory_lock_cannot_be_authorized_by_boolean_only(tmp_path: Path) 
         ("locked_training_id", "include locked donors"),
         ("missing_cross_fit", "requires development-only donor cross-fitting"),
         ("missing_receipt", "requires a receipt"),
+        ("training_label_overlap", "training-label ontology is not proven"),
+        ("boolean_training_label_overlap", "training-label ontology is not proven"),
+        ("missing_training_label_receipt", "training-label ontology is not proven"),
         ("cohort_kind_conflict", "conflicts with same-cohort annotation scope"),
     ),
 )
@@ -445,6 +489,12 @@ def test_confirmatory_independence_evidence_fails_closed(
         contract["cross_fitting_receipt_sha256"] = None
     elif mutation == "missing_receipt":
         contract["annotation_receipt_sha256"] = None
+    elif mutation == "training_label_overlap":
+        contract["training_label_target_gene_overlap_count"] = 1
+    elif mutation == "boolean_training_label_overlap":
+        contract["training_label_target_gene_overlap_count"] = False
+    elif mutation == "missing_training_label_receipt":
+        contract["training_label_provenance_receipt_sha256"] = None
     elif mutation == "cohort_kind_conflict":
         contract["same_cohort_annotation"] = False
         contract["annotation_training_scope"] = "orthogonal_no_rna_training"
@@ -456,7 +506,39 @@ def test_confirmatory_independence_evidence_fails_closed(
         _write(tmp_path / (mutation + ".json"), draft)
 
 
-def test_measurement_plan_is_separate_and_has_no_morphology_fields(tmp_path: Path) -> None:
+def test_previously_materialized_confirmatory_donors_cannot_be_relocked(
+    tmp_path: Path,
+) -> None:
+    draft = _draft()
+    protection = draft["lock_protection"]
+    protection["prior_outcome_access_confirmed_false"] = False
+    protection["prior_outcome_access_status"] = "molecular_outcomes_materialized_pre_registration"
+    protection["prior_outcome_exposure_receipt_sha256"] = "0" * 64
+    protection["prospective_lock_eligible"] = False
+    protection["hescape_analysis_scope"] = (
+        "development_donors_only_reserved_outcomes_previously_materialized"
+    )
+
+    manifest = _write(tmp_path / "exposed-draft.json", draft)
+    assert manifest.status == "draft"
+    with pytest.raises(ValueError, match="previously materialized donor outcomes"):
+        freeze_manifest_content(
+            draft,
+            git_commit="a" * 40,
+            container_digest="sha256:" + "b" * 64,
+        )
+
+
+def test_known_gse250346_exposure_cannot_be_declared_pristine(tmp_path: Path) -> None:
+    draft = _draft()
+    draft["partitions"]["locked_test_donors"] = ["THD0008", "d5", "d6"]
+    draft["lock_protection"]["reserved_donor_ids"] = ["THD0008", "d5", "d6"]
+
+    with pytest.raises(ValueError, match="known GSE250346 donor exposure cannot be reset"):
+        _write(tmp_path / "false-pristine.json", draft)
+
+
+def _measurement_draft() -> dict[str, object]:
     draft = _draft()
     draft["study_id"] = "hest_measurement_v1"
     draft["study_stage"] = "measurement_development"
@@ -477,6 +559,11 @@ def test_measurement_plan_is_separate_and_has_no_morphology_fields(tmp_path: Pat
     draft["observations"].pop("supported_fine_type_ids")
     draft["observations"].pop("supported_fine_type_ids_sha256")
     draft["label_target_independence"] = _pending_independence()
+    draft["primary_endpoint"] = {
+        "name": "nucleus_overlap_within_fine_type_donor_cross_fitted_reliability",
+        "target_variant": "nucleus_overlapping_transcripts",
+        "authorizes_target_selection": True,
+    }
     draft["randomization"] = {
         "transcript_split_salt": "measurement-test-salt",
         "donor_cross_fit_seed": 17,
@@ -492,11 +579,93 @@ def test_measurement_plan_is_separate_and_has_no_morphology_fields(tmp_path: Pat
         "maximum_reference_evaluation_block_overlap": 0,
         "same_section_source_overlap_allowed": True,
     }
-    draft["decision_thresholds"] = {"required_opposite_pool_guard_um": 20.0}
+    draft["decision_thresholds"] = {
+        **FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS,
+        "required_opposite_pool_guard_um": 20.0,
+        "minimum_common_reliable_genes": 2,
+    }
+    draft["target_panel_strategy"] = {
+        "primary": "common_reliable_panel_across_all_supported_fine_types",
+        "minimum_primary_gene_count": 2,
+        "fallback": "new_study_version_type_specific_panels_or_prespecified_programs",
+        "fallback_activation": (
+            "only_after_development_h_meas_failure_before_any_confirmatory_opening"
+        ),
+        "fallback_requires_new_h_meas_manifest": True,
+        "fallback_requires_new_calibration": True,
+        "locked_outcomes_may_inform_fallback": False,
+    }
+    return draft
+
+
+@pytest.mark.parametrize(
+    "study_stage,contract_name",
+    (
+        ("confirmatory_morphology", "locked_measurement_audit"),
+        ("measurement_development", "decision_thresholds"),
+    ),
+)
+@pytest.mark.parametrize("field", tuple(sorted(FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS)))
+def test_shared_h_meas_measurement_thresholds_fail_closed(
+    tmp_path: Path, study_stage: str, contract_name: str, field: str
+) -> None:
+    draft = _draft() if study_stage == "confirmatory_morphology" else _measurement_draft()
+    expected = FROZEN_H_MEAS_SHARED_MEASUREMENT_THRESHOLDS[field]
+    draft[contract_name][field] = expected + 1 if isinstance(expected, int) else expected + 0.01
+
+    with pytest.raises(ValueError, match="must equal the frozen H-MEAS value"):
+        _write(tmp_path / (study_stage + "-" + field + ".json"), draft)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("missing_section_endpoint", "primary_endpoint is incomplete"),
+        ("donor_type_threshold", "donor_type_macro.minimum_effect must equal"),
+        ("section_threshold", "donor_section_type_macro.minimum_effect must equal"),
+        ("decision_rule", "differs from the frozen joint endpoint"),
+    ),
+)
+def test_confirmatory_joint_primary_endpoint_fails_closed(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    draft = _draft()
+    endpoint = draft["primary_endpoint"]
+    if mutation == "missing_section_endpoint":
+        endpoint.pop("donor_section_type_macro")
+    elif mutation == "donor_type_threshold":
+        endpoint["donor_type_macro"]["minimum_effect"] = 0.049
+    elif mutation == "section_threshold":
+        endpoint["donor_section_type_macro"]["minimum_effect"] = 0.049
+    else:
+        endpoint["decision_rule"] = "either_endpoint_may_pass"
+
+    with pytest.raises(ValueError, match=message):
+        _write(tmp_path / (mutation + ".json"), draft)
+
+
+def test_measurement_plan_is_separate_and_has_no_morphology_fields(tmp_path: Path) -> None:
+    draft = _measurement_draft()
     manifest = _write(tmp_path / "measurement.json", draft)
     assert manifest.study_stage == "measurement_development"
     assert manifest.hypothesis_ids == ("H-MEAS",)
     assert draft["coverage_requirements"]["minimum_locked_donors_per_fine_type"] == 0
+    with pytest.raises(ValueError, match="H-MEAS cannot lock.*provenance is pending"):
+        freeze_manifest_content(
+            draft,
+            git_commit="a" * 40,
+            container_digest="sha256:" + "b" * 64,
+        )
+
+    resolved = copy.deepcopy(draft)
+    resolved["candidate_target_gene_panel_sha256"] = ordered_ids_sha256(["TARGET_A", "TARGET_B"])
+    resolved["label_target_independence"] = copy.deepcopy(_draft()["label_target_independence"])
+    locked = freeze_manifest_content(
+        resolved,
+        git_commit="a" * 40,
+        container_digest="sha256:" + "b" * 64,
+    )
+    assert _write(tmp_path / "measurement-locked.json", dict(locked)).status == "locked"
 
     invalid = copy.deepcopy(draft)
     invalid["coverage_requirements"]["minimum_locked_donors_per_fine_type"] = 1

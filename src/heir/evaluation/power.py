@@ -9,14 +9,16 @@ import os
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
-CALIBRATION_RECEIPT_SCHEMA = "heir.morphology_gate_calibration.v3"
-CALIBRATION_ENGINE = "heir.actual_morphology_gate.v3"
+CALIBRATION_RECEIPT_SCHEMA = "heir.morphology_gate_calibration.v5"
+CALIBRATION_ENGINE = "heir.actual_morphology_gate.v5"
 ACTUAL_GATE_ENTRYPOINT = "heir.evaluation.morphology_gate.evaluate_morphology_ridge_gate"
 ACTUAL_GATE_REPORT_SCHEMA = "heir.morphology_ridge_evaluation.v5"
-CALIBRATION_EVIDENCE_SCHEMA = "heir.actual_morphology_gate_calibration_evidence.v3"
-CALIBRATION_RUN_CONTRACT_SCHEMA = "heir.morphology_gate_calibration_run_contract.v3"
-CALIBRATION_DGP_SPEC_SCHEMA = "heir.morphology_gate_calibration_dgp.v3"
-CALIBRATION_GENERATOR_VERSION = "heir.synthetic_morphology_gate_generator.v3"
+CALIBRATION_EVIDENCE_SCHEMA = "heir.actual_morphology_gate_calibration_evidence.v5"
+CALIBRATION_RUN_CONTRACT_SCHEMA = "heir.morphology_gate_calibration_run_contract.v5"
+CALIBRATION_DGP_SPEC_SCHEMA = "heir.morphology_gate_calibration_dgp.v5"
+CALIBRATION_GENERATOR_VERSION = "heir.synthetic_morphology_gate_generator.v5"
+CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA = "heir.calibration_trial_report_manifest.v2"
+CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT = "sha256_attested_trial_report_v2"
 GLOBAL_NULL_CONDITION = "global_null"
 PRELIMINARY_ALTERNATIVE_CONDITION = "preliminary_full_shared_latent"
 PENDING_DESIGN_BINDING_STATUS = "pending_pre_h_meas"
@@ -42,6 +44,7 @@ REQUIRED_COMPLETE_GATE_CHECKS = (
     "primary_claim_is_explicit_local_context",
     "matched_macro_r2",
     "macro_donor_type_r2",
+    "macro_donor_section_type_r2",
     "local_roi_null_separates",
     "spatial_block_null_separates",
     "every_required_null_separates",
@@ -80,12 +83,25 @@ BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS = {
     for decision_id in REQUIRED_HYPOTHESIS_DECISIONS
 }
 BOUNDARY_EXPECTED_SOURCE_CONCLUSION = {
-    "G2_local_context": "multiple_sources_without_incremental_combination",
+    # The G2 boundary deliberately carries the same weak signal in every
+    # non-blank morphology arm.  It tests the local-context gate without
+    # manufacturing evidence for a particular morphology source.
+    "G2_local_context": "no_morphology_specific_information",
     "G3_nucleus_intrinsic": "nucleus_dominant",
     "G3_cell_intrinsic": "cell_dominant",
     "G3_context_only": "context_dominant",
     "G3_mixed_intrinsic_context": "mixed_intrinsic_and_contextual_information",
 }
+
+# Quantitative population boundaries for the authorizing synthetic DGP.  A
+# single-source condition has five percent target variance attributable to its
+# prespecified morphology component.  The mixed condition has two orthogonal
+# five-percent components, so each source adds five percentage points and the
+# combined arm explains ten percent.  With unit residual variance, the listed
+# latent coefficient is sqrt(r2 / (1 - total_r2)); this makes the boundary a
+# population quantity rather than an arbitrary raw feature amplitude.
+AUTHORITATIVE_BOUNDARY_COMPONENT_R2 = 0.05
+AUTHORITATIVE_MIXED_TOTAL_R2 = 0.10
 
 REQUIRED_CROP_FAMILY_IDS = (
     "crop_112um",
@@ -242,6 +258,33 @@ REQUIRED_GATE_PARAMETERS = {
     "donor_bootstrap_seed": 17,
     "prespecified_fixed_hyperparameters": False,
 }
+REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT = {
+    "audit_timing": "after_confirmatory_lock_before_morphology_inference",
+    "selection_changes_forbidden": True,
+    "coverage_denominator": "all_h_meas_supported_fine_types_and_locked_donors",
+    "maximum_annotation_nucleus_p95_um": 8.0,
+    "maximum_annotation_cell_p95_um": 12.0,
+    "maximum_cell_nucleus_p95_um": 8.0,
+    "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
+    "maximum_registration_nearest_neighbor_ratio_p95": 0.5,
+    "best_registration_quality_max_fraction_of_limit": 0.25,
+    "intermediate_registration_quality_max_fraction_of_limit": 0.6,
+    "maximum_registration_outlier_fraction": 0.05,
+    "maximum_nucleus_outside_cell_fraction": 0.01,
+    "minimum_nucleus_cell_area_ratio": 0.05,
+    "maximum_nucleus_cell_area_ratio": 0.95,
+    "maximum_segmentation_outlier_fraction": 0.05,
+    "maximum_crop_padding_p95": 0.25,
+    "mostly_padded_cutoff": 0.5,
+    "maximum_mostly_padded_fraction": 0.01,
+    "minimum_within_fine_type_reliability": 0.4,
+    "minimum_reliability_rows": 40,
+    "minimum_locked_donor_type_reliability_fraction": 0.8,
+}
+REQUIRED_REFERENCE_EVALUATION_BALANCE_CONTRACT = {
+    "maximum_reference_evaluation_absolute_smd": 0.25,
+    "maximum_reference_evaluation_categorical_total_variation": 0.25,
+}
 
 
 def canonical_sha256(value: object) -> str:
@@ -254,6 +297,37 @@ def canonical_sha256(value: object) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def calibration_trial_seed(
+    base_seed: int,
+    scenario: str,
+    condition: str,
+    trial_index: int,
+    *,
+    ordered_conditions: Sequence[str],
+) -> int:
+    """Return the frozen unique seed assigned to one truth-matrix slot."""
+
+    if scenario not in REQUIRED_CALIBRATION_SCENARIOS:
+        raise ValueError("unknown morphology calibration scenario: %s" % scenario)
+    conditions = tuple(str(value) for value in ordered_conditions)
+    if condition not in conditions or len(conditions) != len(set(conditions)):
+        raise ValueError("unknown or duplicated morphology calibration condition")
+    if (
+        isinstance(base_seed, bool)
+        or not isinstance(base_seed, int)
+        or isinstance(trial_index, bool)
+        or not isinstance(trial_index, int)
+        or trial_index < 0
+    ):
+        raise ValueError("calibration trial seed inputs are malformed")
+    return int(
+        base_seed
+        + REQUIRED_CALIBRATION_SCENARIOS.index(scenario) * 10_000_000
+        + conditions.index(condition) * 1_000_000
+        + trial_index
+    )
 
 
 def _source_file_sha256(path: Path) -> str:
@@ -393,7 +467,12 @@ def validate_confirmatory_design_binding(
         return value
     required = {
         "status",
+        "scientific_manifest_projection",
         "scientific_manifest_projection_sha256",
+        "locked_measurement_audit_contract",
+        "locked_measurement_audit_contract_sha256",
+        "reference_evaluation_balance_contract",
+        "reference_evaluation_balance_contract_sha256",
         "measurement_receipt_sha256",
         "ordered_target_gene_ids",
         "target_panel_sha256",
@@ -415,6 +494,8 @@ def validate_confirmatory_design_binding(
         raise ValueError("completed confirmatory design binding is incomplete or contains extras")
     for name in (
         "scientific_manifest_projection_sha256",
+        "locked_measurement_audit_contract_sha256",
+        "reference_evaluation_balance_contract_sha256",
         "measurement_receipt_sha256",
         "target_panel_sha256",
         "supported_fine_type_ids_sha256",
@@ -422,6 +503,85 @@ def validate_confirmatory_design_binding(
         "planned_donor_type_support_pattern_sha256",
     ):
         _sha256(value[name], "confirmatory_design_binding.%s" % name)
+    projection = value["scientific_manifest_projection"]
+    if (
+        not isinstance(projection, Mapping)
+        or set(projection) != set(_SCIENTIFIC_MANIFEST_PROJECTION_FIELDS)
+        or canonical_sha256(projection) != value["scientific_manifest_projection_sha256"]
+    ):
+        raise ValueError("completed binding differs from its scientific manifest projection")
+    audit_contract = value["locked_measurement_audit_contract"]
+    if (
+        not isinstance(audit_contract, Mapping)
+        or audit_contract != projection.get("locked_measurement_audit")
+        or canonical_sha256(audit_contract) != value["locked_measurement_audit_contract_sha256"]
+    ):
+        raise ValueError("locked measurement audit differs from the manifest projection")
+    required_audit_fields = {
+        "audit_timing",
+        "selection_changes_forbidden",
+        "coverage_denominator",
+        "maximum_annotation_nucleus_p95_um",
+        "maximum_annotation_cell_p95_um",
+        "maximum_cell_nucleus_p95_um",
+        "maximum_registration_nucleus_diameter_ratio_p95",
+        "maximum_registration_nearest_neighbor_ratio_p95",
+        "best_registration_quality_max_fraction_of_limit",
+        "intermediate_registration_quality_max_fraction_of_limit",
+        "maximum_registration_outlier_fraction",
+        "maximum_nucleus_outside_cell_fraction",
+        "minimum_nucleus_cell_area_ratio",
+        "maximum_nucleus_cell_area_ratio",
+        "maximum_segmentation_outlier_fraction",
+        "maximum_crop_padding_p95",
+        "mostly_padded_cutoff",
+        "maximum_mostly_padded_fraction",
+        "minimum_within_fine_type_reliability",
+        "minimum_reliability_rows",
+        "minimum_locked_donor_type_reliability_fraction",
+    }
+    if (
+        set(audit_contract) != required_audit_fields
+        or dict(audit_contract) != REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT
+    ):
+        raise ValueError("locked measurement audit contract differs from frozen H-CELL criteria")
+    if (
+        audit_contract["audit_timing"] != "after_confirmatory_lock_before_morphology_inference"
+        or audit_contract["selection_changes_forbidden"] is not True
+        or audit_contract["coverage_denominator"]
+        != "all_h_meas_supported_fine_types_and_locked_donors"
+        or _integer(
+            audit_contract["minimum_reliability_rows"],
+            "locked audit minimum reliability rows",
+            minimum=2,
+        )
+        < 2
+    ):
+        raise ValueError("locked measurement audit contract timing or population differs")
+    balance_contract = value["reference_evaluation_balance_contract"]
+    coverage_contract = projection.get("coverage_requirements")
+    expected_balance_contract = (
+        {
+            "maximum_reference_evaluation_absolute_smd": coverage_contract.get(
+                "maximum_reference_evaluation_absolute_smd"
+            ),
+            "maximum_reference_evaluation_categorical_total_variation": coverage_contract.get(
+                "maximum_reference_evaluation_categorical_total_variation"
+            ),
+        }
+        if isinstance(coverage_contract, Mapping)
+        else None
+    )
+    if (
+        not isinstance(balance_contract, Mapping)
+        or balance_contract != expected_balance_contract
+        or dict(balance_contract) != REQUIRED_REFERENCE_EVALUATION_BALANCE_CONTRACT
+        or canonical_sha256(balance_contract)
+        != value["reference_evaluation_balance_contract_sha256"]
+    ):
+        raise ValueError("reference/evaluation balance differs from the manifest projection")
+    for name, threshold in balance_contract.items():
+        _finite_probability(threshold, "reference/evaluation balance %s" % name)
     target_gene_count = _integer(value["target_gene_count"], "target_gene_count", minimum=1)
     target_genes = _unique_strings(value["ordered_target_gene_ids"], "ordered_target_gene_ids")
     if target_gene_count < 6:
@@ -570,8 +730,8 @@ def build_confirmatory_design_binding(
     ]
     binding = {
         "status": COMPLETE_DESIGN_BINDING_STATUS,
-        "scientific_manifest_projection_sha256": canonical_sha256(
-            confirmatory_scientific_manifest_projection(manifest_content)
+        "scientific_manifest_projection": confirmatory_scientific_manifest_projection(
+            manifest_content
         ),
         "measurement_receipt_sha256": receipt_sha,
         "ordered_target_gene_ids": list(genes),
@@ -600,6 +760,26 @@ def build_confirmatory_design_binding(
             canonical_sha256(support_pattern) if topology_supplied else None
         ),
     }
+    binding["scientific_manifest_projection_sha256"] = canonical_sha256(
+        binding["scientific_manifest_projection"]
+    )
+    binding["locked_measurement_audit_contract"] = dict(
+        binding["scientific_manifest_projection"]["locked_measurement_audit"]
+    )
+    binding["locked_measurement_audit_contract_sha256"] = canonical_sha256(
+        binding["locked_measurement_audit_contract"]
+    )
+    binding["reference_evaluation_balance_contract"] = {
+        "maximum_reference_evaluation_absolute_smd": coverage[
+            "maximum_reference_evaluation_absolute_smd"
+        ],
+        "maximum_reference_evaluation_categorical_total_variation": coverage[
+            "maximum_reference_evaluation_categorical_total_variation"
+        ],
+    }
+    binding["reference_evaluation_balance_contract_sha256"] = canonical_sha256(
+        binding["reference_evaluation_balance_contract"]
+    )
     return validate_confirmatory_design_binding(binding)
 
 
@@ -743,11 +923,18 @@ def validate_calibration_run_contract(
         "max_cpu_threads",
         "maximum_process_rss_gib",
         "maximum_address_space_gib",
+        "trial_report_manifest_schema",
+        "trial_report_storage_layout",
     }
     if set(value) != required or value.get("schema") != CALIBRATION_RUN_CONTRACT_SCHEMA:
         raise ValueError("calibration run_contract is incomplete or contains extras")
     if value["actual_gate_entrypoint"] != ACTUAL_GATE_ENTRYPOINT:
         raise ValueError("calibration run_contract does not use the actual gate entrypoint")
+    if (
+        value["trial_report_manifest_schema"] != CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA
+        or value["trial_report_storage_layout"] != CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT
+    ):
+        raise ValueError("calibration run_contract lacks the frozen trial-report attestation")
     if _sha256(value["exact_gate_settings_sha256"], "run exact settings") != _sha256(
         expected_settings_sha256,
         "expected exact settings",
@@ -837,6 +1024,11 @@ def validate_calibration_run_contract(
         for decision_id in REQUIRED_HYPOTHESIS_DECISIONS:
             condition_id = str(boundary_ids[decision_id])
             expected_true = {"G2_local_context", decision_id}
+            if decision_id == "G3_mixed_intrinsic_context":
+                # Mixed information is logically impossible unless at least
+                # one intrinsic source and context are also detected.  The
+                # frozen DGP uses nucleus as that intrinsic source.
+                expected_true.update({"G3_nucleus_intrinsic", "G3_context_only"})
             observed_true = {name for name, flag in normalized_truth[condition_id].items() if flag}
             if observed_true != expected_true:
                 raise ValueError("authorizing boundary truth must isolate one G3 decision over G2")
@@ -880,6 +1072,54 @@ def validate_calibration_run_contract(
                 condition_definitions[boundary_ids[name]]
             ):
                 raise ValueError("hypothesis boundary hash differs from its quantitative DGP")
+        effect_definition = dgp["effect_definition"]
+        if (
+            effect_definition.get("schema") != "heir.quantitative_morphology_boundary.v1"
+            or effect_definition.get("unit_variance_molecular_residual") is not True
+            or effect_definition.get("crop_feature_noise_sd") != 0.08
+            or effect_definition.get("crop_family_multiplicity_signal_scale_range") != [0.94, 1.06]
+            or effect_definition.get("independent_standard_normal_components")
+            != [
+                "shared_local_context",
+                "nucleus_intrinsic",
+                "cell_intrinsic",
+                "extrinsic_context",
+            ]
+            or effect_definition.get("population_boundary_parameterization")
+            != "coefficient=sqrt(component_r2/(1-total_morphology_r2))"
+        ):
+            raise ValueError("authorizing calibration lacks the frozen quantitative DGP")
+        expected_components = {
+            "G2_local_context": {"shared_local_context": AUTHORITATIVE_BOUNDARY_COMPONENT_R2},
+            "G3_nucleus_intrinsic": {"nucleus_intrinsic": AUTHORITATIVE_BOUNDARY_COMPONENT_R2},
+            "G3_cell_intrinsic": {"cell_intrinsic": AUTHORITATIVE_BOUNDARY_COMPONENT_R2},
+            "G3_context_only": {"extrinsic_context": AUTHORITATIVE_BOUNDARY_COMPONENT_R2},
+            "G3_mixed_intrinsic_context": {
+                "nucleus_intrinsic": AUTHORITATIVE_BOUNDARY_COMPONENT_R2,
+                "extrinsic_context": AUTHORITATIVE_BOUNDARY_COMPONENT_R2,
+            },
+        }
+        null_definition = condition_definitions[null_id]
+        if (
+            null_definition.get("boundary_kind") != "global_null"
+            or null_definition.get("target_component_population_r2") != {}
+            or null_definition.get("target_component_coefficients") != {}
+            or null_definition.get("total_morphology_population_r2") != 0.0
+        ):
+            raise ValueError("authorizing calibration changes the global-null DGP")
+        for decision_id, components in expected_components.items():
+            definition = condition_definitions[boundary_ids[decision_id]]
+            total_r2 = sum(components.values())
+            coefficients = {
+                name: math.sqrt(component_r2 / (1.0 - total_r2))
+                for name, component_r2 in components.items()
+            }
+            if (
+                definition.get("target_component_population_r2") != components
+                or definition.get("target_component_coefficients") != coefficients
+                or definition.get("total_morphology_population_r2") != total_r2
+            ):
+                raise ValueError("authorizing calibration changes a quantitative boundary")
     elif boundary_hashes:
         raise ValueError("preliminary calibration cannot claim hypothesis boundary hashes")
     elif alternative_id != PRELIMINARY_ALTERNATIVE_CONDITION:
@@ -928,11 +1168,11 @@ def validate_calibration_run_contract(
 
 
 def required_simultaneous_confidence_level() -> float:
-    """Bonferroni level for complete, decision, and source-classification bounds."""
+    """Bonferroni level including trial-level hypothesis-family error bounds."""
 
     conditions = 1 + len(REQUIRED_HYPOTHESIS_DECISIONS)
     tested_rates = (
-        len(REQUIRED_CALIBRATION_SCENARIOS) * conditions * (2 + len(REQUIRED_HYPOTHESIS_DECISIONS))
+        len(REQUIRED_CALIBRATION_SCENARIOS) * conditions * (3 + len(REQUIRED_HYPOTHESIS_DECISIONS))
     )
     return 1.0 - (0.05 / tested_rates)
 
@@ -1064,6 +1304,196 @@ def exact_gate_settings_fingerprint(settings: object) -> str:
     return canonical_sha256(validate_exact_gate_settings(settings))
 
 
+def actual_gate_trial_outcome(
+    report: object,
+    *,
+    exact_gate_settings: Mapping[str, object],
+    expected_trial_identity: Mapping[str, object],
+    expected_run_contract_sha256: str,
+    expected_decision_truth: Mapping[str, bool],
+) -> Mapping[str, object]:
+    """Verify one preserved actual-gate report and derive its calibration outcome.
+
+    This is the single attestation routine shared by the executor and receipt
+    compiler.  Aggregate pass counts are never authoritative: they can be
+    reproduced only from reports that embed the complete frozen settings,
+    exercise both exact permutation streams, and suppress every biological
+    authorization flag.
+    """
+
+    settings = validate_exact_gate_settings(exact_gate_settings)
+    settings_sha256 = canonical_sha256(settings)
+    if not isinstance(report, Mapping) or report.get("schema_version") != (
+        ACTUAL_GATE_REPORT_SCHEMA
+    ):
+        raise ValueError("actual morphology gate returned an unsupported report schema")
+    identity = report.get("calibration_trial_identity")
+    if (
+        not isinstance(expected_trial_identity, Mapping)
+        or set(expected_trial_identity) != {"scenario", "condition", "trial_index", "trial_seed"}
+        or identity != expected_trial_identity
+    ):
+        raise ValueError("actual-gate report differs from its frozen trial identity")
+    _sha256(expected_run_contract_sha256, "expected_run_contract_sha256")
+    if report.get("calibration_run_contract_sha256") != expected_run_contract_sha256:
+        raise ValueError("actual-gate report differs from its calibration run contract")
+    development_artifact_sha256 = _sha256(
+        report.get("calibration_development_artifact_sha256"),
+        "calibration_development_artifact_sha256",
+    )
+    locked_artifact_sha256 = _sha256(
+        report.get("calibration_locked_artifact_sha256"),
+        "calibration_locked_artifact_sha256",
+    )
+    trial_realization_sha256 = canonical_sha256(
+        {
+            "calibration_trial_identity": dict(expected_trial_identity),
+            "calibration_run_contract_sha256": expected_run_contract_sha256,
+            "development_artifact_sha256": development_artifact_sha256,
+            "locked_artifact_sha256": locked_artifact_sha256,
+        }
+    )
+    if report.get("calibration_trial_realization_sha256") != trial_realization_sha256:
+        raise ValueError("actual-gate report differs from its deterministic trial realization")
+    if (
+        report.get("synthetic_calibration_execution") is not True
+        or report.get("final_inference") is not True
+        or report.get("scientific_authorization_suppressed") is not True
+    ):
+        raise ValueError("synthetic calibration report did not suppress scientific authorization")
+    authorization_flags = (
+        "authorizes_full_heir",
+        "authorizes_population_inference",
+        "authorizes_external_generalization",
+        "authorizes_validated_regional_association",
+        "authorizes_nucleus_intrinsic_claim",
+        "authorizes_cell_intrinsic_claim",
+    )
+    if any(report.get(name) is not False for name in authorization_flags):
+        raise ValueError("synthetic calibration report contains scientific authorization")
+    if (
+        report.get("calibration_exact_gate_settings_sha256") != settings_sha256
+        or report.get("calibration_exact_gate_settings") != settings
+    ):
+        raise ValueError("actual-gate trial report differs from the frozen settings")
+    checks = report.get("checks")
+    decisions = report.get("hypothesis_decisions")
+    if not isinstance(checks, Mapping) or not set(REQUIRED_COMPLETE_GATE_CHECKS).issubset(checks):
+        raise ValueError("actual-gate trial report lacks required complete-gate checks")
+    if any(not isinstance(value, bool) for value in checks.values()):
+        raise ValueError("actual-gate trial report contains a malformed gate check")
+    recomputed_component_pass = bool(checks and all(checks.values()))
+    if (
+        not isinstance(report.get("component_pass"), bool)
+        or report["component_pass"] != recomputed_component_pass
+    ):
+        raise ValueError("actual-gate component outcome differs from its reported checks")
+    if not isinstance(decisions, Mapping) or not set(REQUIRED_HYPOTHESIS_DECISIONS).issubset(
+        decisions
+    ):
+        raise ValueError("actual-gate trial report lacks required hypothesis decisions")
+    decision_passes = {}
+    if (
+        not isinstance(expected_decision_truth, Mapping)
+        or set(expected_decision_truth) != set(REQUIRED_HYPOTHESIS_DECISIONS)
+        or any(not isinstance(value, bool) for value in expected_decision_truth.values())
+    ):
+        raise ValueError("actual-gate trial lacks the frozen hypothesis truth row")
+    for name in REQUIRED_HYPOTHESIS_DECISIONS:
+        decision = decisions[name]
+        if not isinstance(decision, Mapping) or not isinstance(decision.get("pass"), bool):
+            raise ValueError("actual-gate trial hypothesis decision is malformed: %s" % name)
+        if name in {"G3_nucleus_intrinsic", "G3_cell_intrinsic"}:
+            sensitivity = decision.get("registration_quality_sensitivity")
+            sensitivity_pass = decision.get("registration_quality_sensitivity_pass")
+            if not isinstance(sensitivity, Mapping) or not isinstance(sensitivity_pass, bool):
+                raise ValueError(
+                    "actual-gate intrinsic decision lacks registration-quality sensitivity"
+                )
+            if decision["pass"] and sensitivity_pass is not True:
+                raise ValueError(
+                    "actual-gate intrinsic decision bypasses registration-quality sensitivity"
+                )
+        if name == "G3_mixed_intrinsic_context":
+            sensitivity = decision.get("incremental_intrinsic_registration_quality_sensitivity")
+            sensitivity_pass = decision.get(
+                "incremental_intrinsic_registration_quality_sensitivity_pass"
+            )
+            if not isinstance(sensitivity, Mapping) or not isinstance(sensitivity_pass, bool):
+                raise ValueError(
+                    "actual-gate mixed decision lacks incremental registration-quality sensitivity"
+                )
+            if decision["pass"] and sensitivity_pass is not True:
+                raise ValueError(
+                    "actual-gate mixed decision bypasses incremental registration-quality "
+                    "sensitivity"
+                )
+        decision_passes[name] = bool(decision["pass"])
+    source_conclusion = report.get("morphology_source_conclusion")
+    if source_conclusion not in CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES:
+        raise ValueError("actual-gate trial lacks a frozen morphology-source conclusion")
+    local = report.get("permutation_control")
+    spatial = report.get("spatial_block_permutation_control")
+    if not isinstance(local, Mapping) or not isinstance(spatial, Mapping):
+        raise ValueError("actual-gate trial report lacks both permutation nulls")
+    expected_total = int(settings["permutations_per_null"])
+    if (
+        _integer(local.get("total_permutations"), "local total_permutations") != expected_total
+        or _integer(spatial.get("total_permutations"), "spatial total_permutations")
+        != expected_total
+    ):
+        raise ValueError("actual-gate trial differs from the exact frozen permutation total")
+    expected_seeds = tuple(int(value) for value in settings["permutation_seeds"])
+    expected_per_seed = int(settings["permutations_per_seed"])
+
+    def seed_counts(null_report: Mapping[str, object], name: str) -> Mapping[str, int]:
+        rows = null_report.get("seeds")
+        if not isinstance(rows, list) or len(rows) != len(expected_seeds):
+            raise ValueError("actual-gate %s null lacks exact seed-stream evidence" % name)
+        counts = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError("actual-gate %s seed row is malformed" % name)
+            seed = _integer(row.get("seed"), "%s seed" % name)
+            required = _integer(
+                row.get("required_unique_permutations"),
+                "%s required permutations" % name,
+            )
+            generated = _integer(
+                row.get("generated_unique_permutations"),
+                "%s generated permutations" % name,
+            )
+            if seed in counts or required != expected_per_seed or generated != expected_per_seed:
+                raise ValueError("actual-gate %s seed stream differs from frozen counts" % name)
+            counts[str(seed)] = generated
+        if set(counts) != {str(seed) for seed in expected_seeds}:
+            raise ValueError("actual-gate %s seed identities differ from frozen streams" % name)
+        return counts
+
+    return {
+        "calibration_trial_identity": dict(expected_trial_identity),
+        "calibration_run_contract_sha256": expected_run_contract_sha256,
+        "calibration_development_artifact_sha256": development_artifact_sha256,
+        "calibration_locked_artifact_sha256": locked_artifact_sha256,
+        "calibration_trial_realization_sha256": trial_realization_sha256,
+        "component_pass": recomputed_component_pass,
+        "actual_report_sha256": canonical_sha256(report),
+        "exact_gate_settings_sha256": settings_sha256,
+        "required_checks_present": True,
+        "hypothesis_decision_passes": decision_passes,
+        "any_false_hypothesis_decision": any(
+            decision_passes[name] and not expected_decision_truth[name]
+            for name in REQUIRED_HYPOTHESIS_DECISIONS
+        ),
+        "morphology_source_conclusion": source_conclusion,
+        "scientific_authorization_suppressed": True,
+        "local_roi_permutations": expected_total,
+        "spatial_block_permutations": expected_total,
+        "local_roi_seed_counts": seed_counts(local, "local ROI"),
+        "spatial_block_seed_counts": seed_counts(spatial, "spatial block"),
+    }
+
+
 def _validate_condition(
     value: object,
     *,
@@ -1087,6 +1517,9 @@ def _validate_condition(
         "hypothesis_decision_passes",
         "hypothesis_decision_pass_fractions",
         "hypothesis_decision_pass_confidence_bounds",
+        "any_false_hypothesis_decision_passes",
+        "any_false_hypothesis_decision_pass_fraction",
+        "any_false_hypothesis_decision_pass_upper_confidence_bound",
         "morphology_source_conclusion_counts",
         "expected_morphology_source_conclusion",
         "morphology_source_conclusion_correct_count",
@@ -1094,6 +1527,7 @@ def _validate_condition(
         "morphology_source_conclusion_correct_lower_confidence_bound",
         "actual_gate_executions",
         "trial_report_set_sha256",
+        "trial_realization_set_sha256",
         "all_trial_reports_use_exact_settings",
         "all_trial_reports_include_required_checks",
         "permutation_nulls",
@@ -1152,6 +1586,34 @@ def _validate_condition(
         )
         if abs(decision_expected_bound - decision_observed_bound) > 1.0e-12:
             raise ValueError("calibration decision confidence bound differs")
+    familywise_false_passes = _integer(
+        value["any_false_hypothesis_decision_passes"],
+        "%s.any_false_hypothesis_decision_passes" % name,
+    )
+    if familywise_false_passes > trials:
+        raise ValueError("calibration familywise decision false-pass count exceeds trials")
+    familywise_fraction = _finite_probability(
+        value["any_false_hypothesis_decision_pass_fraction"],
+        "%s.any_false_hypothesis_decision_pass_fraction" % name,
+    )
+    if abs(familywise_fraction - familywise_false_passes / trials) > 1.0e-12:
+        raise ValueError("calibration familywise decision false-pass count is inconsistent")
+    familywise_bound = binomial_upper_confidence_bound(
+        familywise_false_passes,
+        trials,
+        confidence_level=confidence_level,
+    )
+    if (
+        abs(
+            _finite_probability(
+                value["any_false_hypothesis_decision_pass_upper_confidence_bound"],
+                "%s.any_false_hypothesis_decision_pass_upper_confidence_bound" % name,
+            )
+            - familywise_bound
+        )
+        > 1.0e-12
+    ):
+        raise ValueError("calibration familywise decision confidence bound differs")
     conclusion_counts = value["morphology_source_conclusion_counts"]
     if not isinstance(conclusion_counts, Mapping) or set(conclusion_counts) != set(
         CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES
@@ -1197,6 +1659,10 @@ def _validate_condition(
     if _integer(value["actual_gate_executions"], "%s.actual_gate_executions" % name) != trials:
         raise ValueError("calibration evidence did not execute the actual gate for every trial")
     _sha256(value["trial_report_set_sha256"], "%s.trial_report_set_sha256" % name)
+    _sha256(
+        value["trial_realization_set_sha256"],
+        "%s.trial_realization_set_sha256" % name,
+    )
     if (
         value["all_trial_reports_use_exact_settings"] is not True
         or value["all_trial_reports_include_required_checks"] is not True
@@ -1255,6 +1721,9 @@ def validate_calibration_receipt(
         "exact_gate_settings_sha256",
         "run_contract",
         "run_contract_sha256",
+        "trial_report_manifest_sha256",
+        "trial_report_reference_count",
+        "trial_report_unique_count",
         "generator_version",
         "generator_source_sha256",
         "gate_source_sha256",
@@ -1275,6 +1744,8 @@ def validate_calibration_receipt(
         "maximum_complete_gate_false_pass_upper_confidence_bound",
         "maximum_hypothesis_decision_false_pass_probability",
         "maximum_hypothesis_decision_false_pass_upper_confidence_bound",
+        "maximum_familywise_hypothesis_decision_false_pass_probability",
+        "maximum_familywise_hypothesis_decision_false_pass_upper_confidence_bound",
         "power_at_quantitatively_frozen_boundary",
         "minimum_power_lower_confidence_bound",
         "minimum_hypothesis_decision_power_at_quantitatively_frozen_boundary",
@@ -1319,6 +1790,10 @@ def validate_calibration_receipt(
     run_contract_sha = canonical_sha256(run_contract)
     if _sha256(receipt["run_contract_sha256"], "run_contract_sha256") != run_contract_sha:
         raise ValueError("calibration receipt run-contract hash differs")
+    _sha256(
+        receipt["trial_report_manifest_sha256"],
+        "trial_report_manifest_sha256",
+    )
     for name in (
         "generator_version",
         "generator_source_sha256",
@@ -1339,6 +1814,21 @@ def validate_calibration_receipt(
     decision_truth = dgp["decision_truth_by_condition"]
     expected_conclusions = dgp["expected_source_conclusion_by_condition"]
     expected_trials = int(run_contract["trials_per_condition"])
+    expected_report_references = (
+        len(REQUIRED_CALIBRATION_SCENARIOS) * len(condition_ids) * expected_trials
+    )
+    report_references = _integer(
+        receipt["trial_report_reference_count"],
+        "trial_report_reference_count",
+        minimum=1,
+    )
+    unique_reports = _integer(
+        receipt["trial_report_unique_count"],
+        "trial_report_unique_count",
+        minimum=1,
+    )
+    if report_references != expected_report_references or unique_reports != report_references:
+        raise ValueError("calibration receipt does not attest every actual-gate trial report")
     thresholds = receipt["thresholds"]
     if not isinstance(thresholds, Mapping) or set(thresholds) != {
         "maximum_false_pass_upper_confidence_bound",
@@ -1388,6 +1878,8 @@ def validate_calibration_receipt(
     null_decision_upper_bounds = []
     effect_decision_rates = []
     effect_decision_lower_bounds = []
+    familywise_decision_false_pass_rates = []
+    familywise_decision_false_pass_upper_bounds = []
     null_conclusion_correct_lower_bounds = []
     alternative_conclusion_correct_lower_bounds = []
     for scenario in scenarios:
@@ -1419,6 +1911,12 @@ def validate_calibration_receipt(
             )
         for condition_id in condition_ids:
             condition = validated[condition_id]
+            familywise_decision_false_pass_rates.append(
+                float(condition["any_false_hypothesis_decision_pass_fraction"])
+            )
+            familywise_decision_false_pass_upper_bounds.append(
+                float(condition["any_false_hypothesis_decision_pass_upper_confidence_bound"])
+            )
             for decision_id in REQUIRED_HYPOTHESIS_DECISIONS:
                 rate = float(condition["hypothesis_decision_pass_fractions"][decision_id])
                 bound = float(condition["hypothesis_decision_pass_confidence_bounds"][decision_id])
@@ -1453,6 +1951,14 @@ def validate_calibration_receipt(
             "maximum_hypothesis_decision_false_pass_upper_confidence_bound",
             max(null_decision_upper_bounds),
         ),
+        (
+            "maximum_familywise_hypothesis_decision_false_pass_probability",
+            max(familywise_decision_false_pass_rates),
+        ),
+        (
+            "maximum_familywise_hypothesis_decision_false_pass_upper_confidence_bound",
+            max(familywise_decision_false_pass_upper_bounds),
+        ),
         ("power_at_quantitatively_frozen_boundary", min(effect_rates)),
         ("minimum_power_lower_confidence_bound", min(effect_lower_bounds)),
         (
@@ -1481,6 +1987,9 @@ def validate_calibration_receipt(
         "exact_gate_settings_sha256": settings_sha256,
         "thresholds_sha256": receipt["thresholds_sha256"],
         "run_contract_sha256": run_contract_sha,
+        "trial_report_manifest_sha256": receipt["trial_report_manifest_sha256"],
+        "trial_report_reference_count": report_references,
+        "trial_report_unique_count": unique_reports,
         "scenario_results": results,
     }
     if _sha256(receipt["simulation_sha256"], "simulation_sha256") != canonical_sha256(
@@ -1502,6 +2011,7 @@ def validate_calibration_receipt(
         or receipt["locked_outcomes_used"] is not False
         or max(null_upper_bounds) > maximum_false_pass
         or max(null_decision_upper_bounds) > maximum_false_pass
+        or max(familywise_decision_false_pass_upper_bounds) > maximum_false_pass
         or min(effect_lower_bounds) < minimum_power
         or min(effect_decision_lower_bounds) < minimum_power
         or min(null_conclusion_correct_lower_bounds) < 1.0 - maximum_false_pass
@@ -1522,6 +2032,12 @@ def validate_calibration_receipt(
         "maximum_hypothesis_decision_false_pass_upper_confidence_bound": max(
             null_decision_upper_bounds
         ),
+        "maximum_familywise_hypothesis_decision_false_pass_probability": max(
+            familywise_decision_false_pass_rates
+        ),
+        "maximum_familywise_hypothesis_decision_false_pass_upper_confidence_bound": max(
+            familywise_decision_false_pass_upper_bounds
+        ),
         "power_at_quantitatively_frozen_boundary": min(effect_rates),
         "minimum_power_lower_confidence_bound": min(effect_lower_bounds),
         "minimum_hypothesis_decision_power_at_quantitatively_frozen_boundary": min(
@@ -1537,6 +2053,9 @@ def validate_calibration_receipt(
             alternative_conclusion_correct_lower_bounds
         ),
         "run_contract_sha256": run_contract_sha,
+        "trial_report_manifest_sha256": receipt["trial_report_manifest_sha256"],
+        "trial_report_reference_count": report_references,
+        "trial_report_unique_count": unique_reports,
         "generator_version": run_contract["generator_version"],
         "dgp_effect_spec_sha256": run_contract["dgp_effect_spec_sha256"],
         "locked_outcomes_used": False,
@@ -1549,6 +2068,8 @@ def validate_calibration_receipt(
 __all__ = [
     "ACTUAL_GATE_ENTRYPOINT",
     "ACTUAL_GATE_REPORT_SCHEMA",
+    "AUTHORITATIVE_BOUNDARY_COMPONENT_R2",
+    "AUTHORITATIVE_MIXED_TOTAL_R2",
     "BOUNDARY_CONDITION_IDS_BY_HYPOTHESIS",
     "BOUNDARY_EXPECTED_SOURCE_CONCLUSION",
     "CALIBRATION_MORPHOLOGY_SOURCE_OUTCOMES",
@@ -1558,6 +2079,8 @@ __all__ = [
     "CALIBRATION_GENERATOR_VERSION",
     "CALIBRATION_RECEIPT_SCHEMA",
     "CALIBRATION_RUN_CONTRACT_SCHEMA",
+    "CALIBRATION_TRIAL_REPORT_MANIFEST_SCHEMA",
+    "CALIBRATION_TRIAL_REPORT_STORAGE_LAYOUT",
     "COMPLETE_DESIGN_BINDING_STATUS",
     "G2_MULTIPLICITY_METHOD",
     "G3_MULTIPLICITY_METHOD",
@@ -1570,12 +2093,16 @@ __all__ = [
     "REQUIRED_HYPOTHESIS_DECISIONS",
     "REQUIRED_G3_CONTRAST_PAIRS",
     "REQUIRED_GATE_PARAMETERS",
+    "REQUIRED_LOCKED_MEASUREMENT_AUDIT_CONTRACT",
     "REQUIRED_MORPHOLOGY_SOURCE_CONCLUSIONS",
     "REQUIRED_NUISANCE_FAMILIES",
     "REQUIRED_PERMUTATION_TRANSFORMS",
+    "REQUIRED_REFERENCE_EVALUATION_BALANCE_CONTRACT",
+    "actual_gate_trial_outcome",
     "binomial_lower_confidence_bound",
     "binomial_upper_confidence_bound",
     "build_confirmatory_design_binding",
+    "calibration_trial_seed",
     "canonical_sha256",
     "confirmatory_scientific_manifest_projection",
     "current_calibration_executable_provenance",

@@ -166,6 +166,17 @@ def _artifact(
         scientific_scope="registered_cell_local_context_association",
         evidence_scope="internal_locked_hest",
         authorizes_nucleus_intrinsic_claim=False,
+        registration_quality_scores=np.zeros(cells, dtype=np.float64),
+        registration_quality_strata=np.repeat("best", cells),
+        registration_quality_cutoffs={
+            "best": 0.25,
+            "intermediate": 0.6,
+            "near_threshold": 1.0,
+        },
+        registration_quality_definition=(
+            "max(annotation_nucleus_error/section_median_nucleus_diameter/diameter_limit,"
+            "annotation_nucleus_error/section_median_nearest_neighbor_distance/neighbor_limit)"
+        ),
         reference_split_ids=("primary",),
         reference_means_by_split=reference_values[:, None, :],
     )
@@ -190,6 +201,90 @@ def _with_required_nuisance_features(
         boundary_features=values,
         boundary_feature_names=("boundary",),
     )
+
+
+def test_g3_registration_quality_requires_best_stratum_effect() -> None:
+    artifact = _artifact(
+        ("locked_1", "locked_2"),
+        role="locked_test",
+        source_offset=8,
+    )
+    within_type_position = np.tile(np.arange(12), 4)
+    best = within_type_position < 6
+    artifact = replace(
+        artifact,
+        registration_quality_scores=np.where(best, 0.1, 0.8),
+        registration_quality_strata=np.where(best, "best", "near_threshold"),
+    )
+    truth = np.tile(np.linspace(-1.0, 1.0, 12), 4)[:, None]
+    comparator = np.zeros_like(truth)
+
+    def sensitivity(focal: np.ndarray, *, contrast_name: str = "nucleus_test") -> dict[str, object]:
+        focal_macro, _, _ = gate_module.macro_r2(
+            truth,
+            focal,
+            artifact.donor_ids,
+            artifact.type_labels,
+            4,
+        )
+        comparator_macro, _, _ = gate_module.macro_r2(
+            truth,
+            comparator,
+            artifact.donor_ids,
+            artifact.type_labels,
+            4,
+        )
+        return dict(
+            gate_module._registration_quality_contrast_sensitivity(
+                {"focal": (focal, truth), "comparator": (comparator, truth)},
+                {contrast_name: ("focal", "comparator")},
+                {
+                    contrast_name: {
+                        "mean_delta_r2": focal_macro - comparator_macro,
+                    }
+                },
+                artifact,
+                minimum_support=4,
+                minimum_delta=0.01,
+            )
+        )
+
+    best_only_signal = np.where(best[:, None], truth, comparator)
+    robust = sensitivity(best_only_signal)
+    assert robust["contrasts"]["nucleus_test"]["pass"] is True
+    assert robust["contrasts"]["nucleus_test"][
+        "quality_noninferiority_margin_delta_r2"
+    ] == pytest.approx(0.01)
+    assert robust["contrasts"]["nucleus_test"]["best_registration_noninferior_to_all_rows"] is True
+
+    near_threshold_only_signal = np.where(best[:, None], comparator, truth)
+    suspicious = sensitivity(near_threshold_only_signal)
+    assert suspicious["contrasts"]["nucleus_test"]["pass"] is False
+    assert (
+        suspicious["contrasts"]["nucleus_test"]["effect_not_driven_only_by_near_threshold_rows"]
+        is False
+    )
+
+    incremental_name = "full_context_vs_target_removed_white"
+    incremental_quality = sensitivity(
+        near_threshold_only_signal,
+        contrast_name=incremental_name,
+    )["contrasts"][incremental_name]
+    source_flags = gate_module._g3_quality_gated_source_flags(
+        {
+            "nucleus_test": {"pass": True},
+            "context_test": {"pass": True},
+            incremental_name: {"pass": True},
+            "full_context_vs_nucleus_test": {"pass": True},
+        },
+        {
+            "nucleus_test": {"pass": True},
+            incremental_name: incremental_quality,
+        },
+    )
+    assert source_flags["full_vs_context_unstratified"] is True
+    assert source_flags["full_vs_context_quality_sensitivity_pass"] is False
+    assert source_flags["mixed_information"] is False
 
 
 def test_oracle_per_type_ridge_uses_supplied_matched_reference_means() -> None:
@@ -538,6 +633,12 @@ def test_synthetic_calibration_rejects_rows_outside_the_bound_topology() -> None
     section_ids = development.section_ids.copy()
     section_ids[0] = "unplanned_section"
     development = replace(development, section_ids=section_ids)
+    trial_identity = {
+        "scenario": "spatial_autocorrelation",
+        "condition": PRELIMINARY_ALTERNATIVE_CONDITION,
+        "trial_index": 0,
+        "trial_seed": 0,
+    }
 
     with pytest.raises(ValueError, match="artifacts differ from the confirmatory design binding"):
         evaluate_morphology_ridge_gate(
@@ -551,6 +652,8 @@ def test_synthetic_calibration_rejects_rows_outside_the_bound_topology() -> None
             final_inference=True,
             confirmatory_design_binding=synthetic_completed_confirmatory_design_binding(),
             synthetic_calibration_mode=True,
+            calibration_trial_identity=trial_identity,
+            calibration_run_contract_sha256="a" * 64,
             device="cpu",
         )
 
@@ -680,6 +783,15 @@ def test_g3_intrinsic_flags_require_prespecified_direct_crop_contrasts() -> None
     assert frozen["multiplicity_method"] == G3_MULTIPLICITY_METHOD
     assert set(frozen["contrasts"]) == set(REQUIRED_G3_CONTRAST_PAIRS)
     assert all("familywise_adjusted_p" in row for row in frozen["contrasts"].values())
+    quality = report["registration_quality_sensitivity"]
+    assert quality["tested"] is True
+    assert quality["row_counts"] == {
+        "best": len(locked.observation_ids),
+        "intermediate": 0,
+        "near_threshold": 0,
+    }
+    assert set(quality["contrasts"]) == set(REQUIRED_G3_CONTRAST_PAIRS)
+    assert all("strata" in row for row in quality["contrasts"].values())
 
 
 @pytest.mark.parametrize(
