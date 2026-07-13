@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["schema", "row_fields", "matrices", "identities"],
   "properties": {
-    "schema": {"const": "heir.registered_observations.v3"},
+    "schema": {"const": "heir.registered_observations.v4"},
     "row_fields": {
       "type": "array", "uniqueItems": true,
       "items": {"enum": [
@@ -37,7 +37,8 @@
       "items": {"enum": [
         "ordered_gene_ids", "broad_type_marker_gene_ids", "fine_type_marker_gene_ids",
         "crop_ids", "crop_roles", "crop_comparison_families", "crop_effective_mpp",
-        "crop_mask_modes", "crop_fill_modes", "fine_type_annotation_provenance_json",
+        "crop_mask_modes", "crop_fill_modes", "label_target_independence_json",
+        "label_target_independence_sha256", "annotation_feature_ids",
         "reference_split_ids", "fine_type_marker_panel_sha256",
         "study_stage", "study_manifest_sha256", "source_scope",
         "locked_donor_outcomes_materialized",

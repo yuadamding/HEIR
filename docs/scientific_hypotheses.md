@@ -16,6 +16,12 @@ Primary evidence: unique cell/transcript identities, row-level registration geom
 detection and zero fractions, split-half gene/program reliability, target-basis ceiling, crop padding,
 and reference/evaluation separation.
 
+Reference and evaluation cells may share a section and source file, but they must have disjoint
+observation, cell, and spatial-block identities with a positive physical guard. Development donors
+select the target panel and supported fine types. The identical frozen measurement thresholds are
+then audited on locked rows without changing that selection; every failed or unsupported locked
+donor/section/type stratum remains in the intention-to-analyze coverage denominator.
+
 Authorization: a pass permits morphology experiments to run. It does not support a morphology claim.
 
 ## H-REGIONAL — regional H&E–expression association
@@ -26,17 +32,20 @@ beyond a donor/niche reference mean, coordinates, stain, density/composition, an
 Primary unit: biological donor. Primary crop: target-matched approximately 55 µm. The 109-µm crop
 and context-only annulus are sensitivities.
 
-Authorization: engineering confidence and a GSE250346 regional tissue-context association only.
+Authorization: development-stage engineering confidence and exploratory GSE250346 regional
+tissue-context evidence only. HESCAPE uses development-donor cross-validation and cannot authorize
+a validated regional association.
 
 ## H-CELL — registered cell-level morphology–state association
 
-Question: Given an independently derived fine RNA type and a spatially independent donor/type RNA
-reference mean, do frozen H&E features predict residual molecular state in held-out donors?
+Question: Given an independently derived fine RNA type and a spatially independent
+donor/section/type RNA reference mean, do frozen H&E features predict residual molecular state in
+held-out donors?
 
-For cell `i`, donor `d`, and fine type `t`:
+For cell `i`, donor `d`, section `s`, and fine type `t`:
 
 ```text
-r_i = y_i - mean_reference[d,t] - technical_i @ Gamma_t
+r_i = y_i - mean_reference[d,s,t] - technical_i @ Gamma_t
 z_i = B_t.T @ r_i
 z_hat_i = f_t(image_i)
 ```
@@ -45,8 +54,17 @@ The primary endpoint is residual-coordinate R² macro-averaged first over suppor
 donor and then equally across donors. Technical correction, weighted basis, and model selection use
 development donors only.
 
-Authorization: a pass supports within-source-study registered-cell context association, not external
-generalization or H&E-only deployment.
+The fine-type label must be backed by an exact external or development-donor-cross-fitted annotation
+receipt whose ordered RNA features are disjoint from the frozen target panel. Marker-list exclusion
+or an independence boolean alone cannot open H-CELL.
+
+Authorization: a pass across the five locked donors is an internal go/no-go result supporting
+progression to external confirmation. It is not population-level validation, external
+generalization, or H&E-only deployment.
+
+Section and batch indicators are fitted only as development-fold controls. New locked-section and
+locked-batch categories do not have estimable development coefficients, so their inclusion cannot
+be described as fully adjusting away arbitrary section or batch effects.
 
 ## H-INTRINSIC — cell- or nucleus-intrinsic morphology
 
@@ -56,9 +74,10 @@ cell removed?
 Required arms: nucleus mask, cell mask, 32/64/112-µm crops, context rings, target-cell-removed crop,
 blank patch, stain, coordinates, and handcrafted nucleus/cell morphometrics.
 
-Authorization depends on the pattern: nucleus-mask evidence permits a nucleus-intrinsic claim;
-cell-mask-only evidence permits a cell-morphology claim; large-crop-only evidence permits only a
-local-context claim.
+All 18 prespecified direct contrasts are tested together with an exact donor sign-flip max-statistic
+family. The allowed conclusions include nucleus dominant, cell dominant, context dominant, mixed
+intrinsic and contextual information, multiple sources without incremental combination, and no
+morphology-specific information. A strongest-comparator diagnostic cannot authorize a claim.
 
 ## H-REF — matched-reference utility
 
@@ -101,3 +120,8 @@ permitted.
 
 Authorization: a pass permits a general morphology–state claim within the locked external scope.
 
+## Frozen encoder hierarchy
+
+The H-CELL primary encoder is UNI2-h. H-Optimus-1 is replication 1 when its gated checkpoint is
+available, and H0-mini is replication 2 when available. These labels are preregistered and may not
+be reassigned after any locked molecular outcome is observed.

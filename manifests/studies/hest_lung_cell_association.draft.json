@@ -8,7 +8,7 @@
     "H-INTRINSIC"
   ],
   "git_commit": "",
-  "analysis_plan_sha256": "3a9493d6784eccfdc88abc3b7ecffbdcc5190c1e9afa6dfcae54c59c3166514c",
+  "analysis_plan_sha256": "329d8570b61458f6e7cb88b42e8d382eba928dc39e78ad276324e240cfafb8d2",
   "container_digest": "",
   "dataset": {
     "repository": "MahmoodLab/hest",
@@ -106,10 +106,22 @@
   },
   "label_target_independence": {
     "strategy": "conservative_proxy_marker_exclusion_pending_exact_annotation_provenance",
-    "marker_panel_sha256": "f5ecbda147399fe51110aa01df54c9534d1d365e25c8294de5f27ec40e8fd122",
-    "candidate_marker_target_overlap_count": 0,
+    "evidence_kind": "pending",
+    "annotation_receipt_sha256": null,
+    "ordered_annotation_feature_ids": [],
+    "ordered_annotation_feature_ids_sha256": null,
+    "ordered_target_gene_ids": [],
+    "ordered_target_gene_ids_sha256": null,
+    "annotation_target_overlap_count": null,
+    "annotation_training_scope": "unknown_pending_provenance",
+    "annotation_training_donor_ids": [],
+    "annotation_training_donor_ids_sha256": null,
+    "locked_donors_used_for_training": null,
+    "same_cohort_annotation": true,
+    "cross_fitting_method": "pending",
+    "cross_fitting_receipt_sha256": null,
     "establishes_full_target_independence": false,
-    "limitation": "Known subtype markers are excluded, but the exact final_CT annotation feature set is unavailable; this draft cannot be locked until an exact gene-disjoint marker set or independent annotation model is bound."
+    "limitation": "The original final_CT marker-selection and classifier-gene procedure is unavailable; no annotation receipt, exact ordered annotation feature set, or donor-cross-fitting receipt exists, so this protocol cannot authorize H-CELL."
   },
   "technical_covariates": [
     "log1p_library_size",
@@ -172,8 +184,8 @@
   "coverage_requirements": {
     "minimum_development_donors_per_fine_type": 3,
     "minimum_locked_donors_per_fine_type": 3,
-    "minimum_reference_cells_per_donor_type": 20,
-    "minimum_evaluation_cells_per_donor_type": 20,
+    "minimum_reference_cells_per_donor_section_type": 20,
+    "minimum_evaluation_cells_per_donor_section_type": 20,
     "minimum_positive_supported_fraction": 0.8,
     "maximum_reference_evaluation_absolute_smd": 0.25,
     "maximum_reference_evaluation_categorical_total_variation": 0.25
@@ -203,5 +215,26 @@
     "donor_bootstrap_iterations": 2000,
     "donor_bootstrap_seed": 17,
     "prespecified_fixed_hyperparameters": false
+  },
+  "locked_measurement_audit": {
+    "audit_timing": "after_confirmatory_lock_before_morphology_inference",
+    "selection_changes_forbidden": true,
+    "coverage_denominator": "all_h_meas_supported_fine_types_and_locked_donors",
+    "maximum_annotation_nucleus_p95_um": 8.0,
+    "maximum_annotation_cell_p95_um": 12.0,
+    "maximum_cell_nucleus_p95_um": 8.0,
+    "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
+    "maximum_registration_nearest_neighbor_ratio_p95": 0.5,
+    "maximum_registration_outlier_fraction": 0.05,
+    "maximum_nucleus_outside_cell_fraction": 0.01,
+    "minimum_nucleus_cell_area_ratio": 0.05,
+    "maximum_nucleus_cell_area_ratio": 0.95,
+    "maximum_segmentation_outlier_fraction": 0.05,
+    "maximum_crop_padding_p95": 0.25,
+    "mostly_padded_cutoff": 0.5,
+    "maximum_mostly_padded_fraction": 0.01,
+    "minimum_within_fine_type_reliability": 0.4,
+    "minimum_reliability_rows": 40,
+    "minimum_locked_donor_type_reliability_fraction": 0.8
   }
 }

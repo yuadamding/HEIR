@@ -68,7 +68,7 @@ def test_calibration_receipt_fails_closed_for_final_inference(
         validate_calibration_receipt(
             {
                 **calibration_receipt,
-                "power_at_minimum_meaningful_effect": 0.79,
+                "power_at_quantitatively_frozen_boundary": 0.79,
             },
             required=True,
         )

@@ -18,18 +18,25 @@ import os
 import re
 import struct
 import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from heir.data.study_manifest import StudyManifest
+from heir.data.study_manifest import (
+    LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS,
+    StudyManifest,
+)
 from heir.features import EncoderManifest, FrozenPatchEncoder, create_frozen_encoder
 from heir.features import load_encoder_manifest as _load_encoder_manifest
 
-PROTOCOL_SCHEMA = "heir.hest_xenium_cell_protocol.v3"
-SOURCE_SCHEMA = "heir.registered_observations.v3"
+PROTOCOL_SCHEMA = "heir.hest_xenium_cell_protocol.v4"
+SOURCE_SCHEMA = "heir.registered_observations.v4"
+ANNOTATION_RECEIPT_SCHEMA = "heir.independent_annotation_receipt.v1"
+ANNOTATION_CROSS_FIT_SCHEMA = "heir.annotation_cross_fitting_receipt.v1"
+ANNOTATION_PREDICTION_COLUMNS = ("hest_id", "cell_id", "broad_lineage", "fine_type")
 DATASET_REPO = "MahmoodLab/hest"
 DATASET_REVISION = "7e8d5a0b0aace41d8c8ec0f6ecea80e4ad2a61ec"
 SOURCE_MPP = 0.2125
@@ -94,6 +101,103 @@ def _canonical_sha256(value: object) -> str:
 
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _section_scoped_cell_id(sample_id: str, raw_cell_id: str) -> str:
+    """Return the globally unique identity of a section-local Xenium cell."""
+
+    section = str(sample_id).strip()
+    cell = str(raw_cell_id).strip()
+    if not section or not cell or ":" in section:
+        raise ValueError("HEST section and raw cell identities must be nonempty and unambiguous")
+    return section + ":" + cell
+
+
+def _validate_protocol_independence_contract(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or set(value) != LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS:
+        raise ValueError("HEST label-target independence protocol is incomplete")
+    raw_annotation_ids = value["ordered_annotation_feature_ids"]
+    raw_training_donor_ids = value["annotation_training_donor_ids"]
+    if not isinstance(raw_annotation_ids, list) or not isinstance(raw_training_donor_ids, list):
+        raise ValueError("HEST annotation feature/training IDs must be lists")
+    annotation_ids = tuple(str(item) for item in raw_annotation_ids)
+    training_donor_ids = tuple(str(item) for item in raw_training_donor_ids)
+    if (
+        len(set(annotation_ids)) != len(annotation_ids)
+        or len(set(training_donor_ids)) != len(training_donor_ids)
+        or any(not item.strip() for item in annotation_ids)
+        or any(not item.strip() for item in training_donor_ids)
+        or not isinstance(value["same_cohort_annotation"], bool)
+        or not isinstance(value["establishes_full_target_independence"], bool)
+        or not str(value["strategy"]).strip()
+        or not str(value["limitation"]).strip()
+    ):
+        raise ValueError("HEST label-target independence protocol is malformed")
+    evidence_kind = str(value["evidence_kind"])
+    if evidence_kind == "pending":
+        if (
+            value["annotation_receipt_sha256"] is not None
+            or annotation_ids
+            or value["ordered_annotation_feature_ids_sha256"] is not None
+            or value["annotation_training_scope"] != "unknown_pending_provenance"
+            or training_donor_ids
+            or value["annotation_training_donor_ids_sha256"] is not None
+            or value["locked_donors_used_for_training"] is not None
+            or value["cross_fitting_method"] != "pending"
+            or value["cross_fitting_receipt_sha256"] is not None
+            or value["establishes_full_target_independence"] is not False
+        ):
+            raise ValueError("pending HEST label-target evidence overstates independence")
+        return value
+    if evidence_kind not in {
+        "external_gene_disjoint_annotation",
+        "development_donor_cross_fitted_gene_disjoint_annotation",
+        "orthogonal_modality_annotation",
+    }:
+        raise ValueError("HEST label-target evidence kind is unsupported")
+    if (
+        not _is_sha256(value["annotation_receipt_sha256"])
+        or not annotation_ids
+        or value["ordered_annotation_feature_ids_sha256"] != _canonical_sha256(list(annotation_ids))
+        or value["locked_donors_used_for_training"] is not False
+        or value["establishes_full_target_independence"] is not True
+    ):
+        raise ValueError("HEST label-target evidence is not receipt- and feature-bound")
+    if value["same_cohort_annotation"] is True:
+        if (
+            evidence_kind != "development_donor_cross_fitted_gene_disjoint_annotation"
+            or value["annotation_training_scope"] != "development_donors_only"
+            or not training_donor_ids
+            or value["annotation_training_donor_ids_sha256"]
+            != _canonical_sha256(list(training_donor_ids))
+            or value["cross_fitting_method"] != "leave_one_donor_out"
+            or not _is_sha256(value["cross_fitting_receipt_sha256"])
+        ):
+            raise ValueError("same-cohort HEST annotation is not donor-cross-fitted")
+    elif evidence_kind == "external_gene_disjoint_annotation":
+        if (
+            value["annotation_training_scope"] != "external_donors_only"
+            or not training_donor_ids
+            or value["annotation_training_donor_ids_sha256"]
+            != _canonical_sha256(list(training_donor_ids))
+            or value["cross_fitting_method"] != "not_applicable"
+            or value["cross_fitting_receipt_sha256"] is not None
+        ):
+            raise ValueError("external HEST annotation training scope is invalid")
+    elif evidence_kind == "orthogonal_modality_annotation":
+        if (
+            value["annotation_training_scope"] != "orthogonal_no_rna_training"
+            or training_donor_ids
+            or value["annotation_training_donor_ids_sha256"] is not None
+            or value["cross_fitting_method"] != "not_applicable"
+            or value["cross_fitting_receipt_sha256"] is not None
+        ):
+            raise ValueError("orthogonal HEST annotation training scope is invalid")
+    else:
+        raise ValueError(
+            "HEST label-target evidence kind conflicts with same-cohort annotation scope"
+        )
+    return value
 
 
 def _read_json(path: Path) -> Mapping[str, object]:
@@ -284,6 +388,14 @@ class InputFile:
 
 
 @dataclass(frozen=True)
+class ScopedAnnotationExport:
+    file: InputFile
+    row_count: int
+    sample_ids: Tuple[str, ...]
+    source_annotation_sha256: str
+
+
+@dataclass(frozen=True)
 class Sample:
     sample_id: str
     donor_id: str
@@ -296,6 +408,31 @@ class Sample:
     cellvit_seg: Optional[InputFile]
 
 
+def _frozen_ita_stratum_ids(
+    samples: Sequence[Sample], supported_fine_types: Sequence[str]
+) -> tuple[str, ...]:
+    """Freeze donor/section/type coverage without consulting observed RNA labels."""
+
+    roster = tuple((str(sample.donor_id), str(sample.sample_id)) for sample in samples)
+    fine_types = tuple(str(value) for value in supported_fine_types)
+    if (
+        not roster
+        or not fine_types
+        or len(set(roster)) != len(roster)
+        or len(set(fine_types)) != len(fine_types)
+        or any(not value.strip() or "|" in value for pair in roster for value in pair)
+        or any(not value.strip() or "|" in value for value in fine_types)
+    ):
+        raise ValueError("frozen ITA donor/section/type population is malformed")
+    return tuple(
+        sorted(
+            "%s|%s|%s" % (donor_id, sample_id, fine_type)
+            for donor_id, sample_id in roster
+            for fine_type in fine_types
+        )
+    )
+
+
 def _parse_file(value: object, label: str) -> InputFile:
     if not isinstance(value, Mapping):
         raise ValueError("HEST %s file declaration is missing" % label)
@@ -305,6 +442,46 @@ def _parse_file(value: object, label: str) -> InputFile:
     if not relative or candidate.is_absolute() or ".." in candidate.parts or not _is_sha256(digest):
         raise ValueError("HEST %s file identity is unsafe or unpinned" % label)
     return InputFile(relative, str(digest))
+
+
+def _parse_development_annotation_export(
+    value: object,
+    expected_sample_ids: Sequence[str],
+) -> ScopedAnnotationExport:
+    fields = {
+        "path",
+        "sha256",
+        "row_count",
+        "sample_ids",
+        "sample_ids_sha256",
+        "source_annotation_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError(
+            "HEST measurement development requires a frozen development-only annotation export"
+        )
+    declaration = _parse_file(value, "development-only annotation export")
+    sample_ids_value = value["sample_ids"]
+    if not isinstance(sample_ids_value, list):
+        raise ValueError("HEST development-only annotation sample IDs must be a list")
+    sample_ids = tuple(str(sample_id) for sample_id in sample_ids_value)
+    expected = tuple(str(sample_id) for sample_id in expected_sample_ids)
+    row_count = value["row_count"]
+    if (
+        sample_ids != expected
+        or value["sample_ids_sha256"] != _canonical_sha256(list(sample_ids))
+        or value["source_annotation_sha256"] != ANNOTATION_SHA256
+        or not isinstance(row_count, int)
+        or isinstance(row_count, bool)
+        or row_count < 1
+    ):
+        raise ValueError("HEST development-only annotation export receipt is malformed")
+    return ScopedAnnotationExport(
+        file=declaration,
+        row_count=row_count,
+        sample_ids=sample_ids,
+        source_annotation_sha256=str(value["source_annotation_sha256"]),
+    )
 
 
 def _parse_samples(protocol: Mapping[str, object]) -> Tuple[Sample, ...]:
@@ -430,7 +607,7 @@ def _validate_protocol(
             raise ValueError("every HEST type needs RNA-only markers")
         flattened.extend(genes)
     fine_markers = tuple(str(value) for value in protocol.get("fine_type_marker_gene_ids", ()))
-    annotation_provenance = protocol.get("fine_type_annotation_provenance")
+    _validate_protocol_independence_contract(protocol.get("label_target_independence"))
     gene_ids = tuple(str(value) for value in protocol.get("gene_ids", ()))
     if (
         len(flattened) != len(set(flattened))
@@ -448,20 +625,11 @@ def _validate_protocol(
         )
     ):
         raise ValueError("HEST broad/fine marker and evaluation genes must be unique and disjoint")
-    if (
-        not isinstance(annotation_provenance, Mapping)
-        or annotation_provenance.get("source_field") != "final_CT"
-        or annotation_provenance.get("source_export") != "GSE250346_corrected_Seurat_metadata"
-        or annotation_provenance.get("exclusion_policy") != "conservative_predeclared_proxy"
-        or annotation_provenance.get("exact_annotation_marker_panel_available") is not False
-        or annotation_provenance.get("establishes_full_target_independence") is not False
-    ):
-        raise ValueError("HEST fine-type annotation provenance is incomplete or overstated")
     for name in (
         "minimum_transcripts_per_cell",
         "minimum_transcript_qv",
-        "minimum_reference_cells_per_donor_type",
-        "minimum_evaluation_cells_per_donor_type",
+        "minimum_reference_cells_per_donor_section_type",
+        "minimum_evaluation_cells_per_donor_section_type",
         "spatial_block_um",
         "spatial_roi_um",
         "opposite_pool_guard_um",
@@ -480,10 +648,10 @@ def _validate_protocol(
     if block <= 2 * guard or roi <= 0 or block < roi:
         raise ValueError("HEST spatial block/ROI/guard design is invalid")
     if (
-        int(protocol["minimum_reference_cells_per_donor_type"]) < 1
-        or int(protocol["minimum_evaluation_cells_per_donor_type"]) < 1
+        int(protocol["minimum_reference_cells_per_donor_section_type"]) < 1
+        or int(protocol["minimum_evaluation_cells_per_donor_section_type"]) < 1
     ):
-        raise ValueError("HEST donor/type source support minima must be positive")
+        raise ValueError("HEST donor/section/type source support minima must be positive")
     for name in (
         "maximum_registration_outlier_fraction",
         "maximum_crop_padding_fraction",
@@ -540,6 +708,12 @@ def _validate_protocol(
     annotation = _parse_file(protocol.get("annotation_export"), "GSE250346 annotation export")
     if annotation.sha256 != ANNOTATION_SHA256:
         raise ValueError("HEST GSE250346 annotation export differs from the pinned SHA-256")
+    development_annotation = protocol.get("measurement_development_annotation_export")
+    if development_annotation is not None:
+        _parse_development_annotation_export(
+            development_annotation,
+            tuple(sample.sample_id for sample in samples if sample.split_id == "development"),
+        )
     cellvit_classes = tuple(str(value) for value in protocol.get("cellvit_class_names", ()))
     uses_cellvit = any(sample.cellvit_seg is not None for sample in samples)
     if uses_cellvit and (
@@ -682,8 +856,182 @@ class AnnotationCell:
     percent_negative_or_unassigned: float
 
 
+@dataclass(frozen=True)
+class IndependentAnnotationArtifacts:
+    """Verified, row-ordered labels produced by the frozen independent annotator."""
+
+    receipt_path: Path
+    receipt_sha256: str
+    predictions_path: Path
+    predictions_sha256: str
+    prediction_row_count: int
+
+
+_ANNOTATION_RECEIPT_FIELDS = {
+    "schema",
+    "evidence_kind",
+    "prediction_export_sha256",
+    "prediction_row_count",
+    "prediction_columns",
+    "row_order",
+    "ordered_annotation_feature_ids",
+    "ordered_annotation_feature_ids_sha256",
+    "annotation_training_scope",
+    "annotation_training_donor_ids",
+    "annotation_training_donor_ids_sha256",
+    "locked_donors_used_for_training",
+    "same_cohort_annotation",
+    "cross_fitting_method",
+    "cross_fitting_receipt",
+}
+
+
+def _read_independent_annotation_receipt(path: Path) -> Mapping[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("independent annotation receipt is not valid JSON") from error
+    if not isinstance(value, Mapping) or set(value) != _ANNOTATION_RECEIPT_FIELDS:
+        raise ValueError("independent annotation receipt has an incomplete or extra field set")
+    return value
+
+
+def _verify_cross_fitting_receipt(
+    receipt: object,
+    contract: Mapping[str, object],
+    prediction_donor_ids: Sequence[str],
+) -> None:
+    if contract["same_cohort_annotation"] is not True:
+        if receipt is not None or contract["cross_fitting_receipt_sha256"] is not None:
+            raise ValueError("non-cross-fitted independent annotation cannot carry a fold receipt")
+        return
+    if (
+        not isinstance(receipt, Mapping)
+        or set(receipt) != {"schema", "folds"}
+        or receipt.get("schema") != ANNOTATION_CROSS_FIT_SCHEMA
+        or not isinstance(receipt.get("folds"), list)
+        or _canonical_sha256(receipt) != contract["cross_fitting_receipt_sha256"]
+    ):
+        raise ValueError("independent annotation cross-fitting receipt differs from the lock")
+    training_donors = tuple(str(value) for value in contract["annotation_training_donor_ids"])
+    expected_prediction_donors = tuple(str(value) for value in prediction_donor_ids)
+    folds: dict[str, tuple[str, ...]] = {}
+    for raw_fold in receipt["folds"]:
+        if not isinstance(raw_fold, Mapping) or set(raw_fold) != {
+            "prediction_donor_id",
+            "training_donor_ids",
+        }:
+            raise ValueError("independent annotation cross-fitting fold is malformed")
+        prediction_donor = str(raw_fold["prediction_donor_id"])
+        raw_training = raw_fold["training_donor_ids"]
+        if not isinstance(raw_training, list):
+            raise ValueError("independent annotation cross-fitting donor IDs must be a list")
+        fold_training = tuple(str(value) for value in raw_training)
+        if (
+            not prediction_donor
+            or prediction_donor in folds
+            or not fold_training
+            or len(set(fold_training)) != len(fold_training)
+        ):
+            raise ValueError("independent annotation cross-fitting fold is malformed")
+        folds[prediction_donor] = fold_training
+    if set(folds) != set(expected_prediction_donors):
+        raise ValueError(
+            "independent annotation cross-fitting folds do not cover prediction donors"
+        )
+    for prediction_donor in expected_prediction_donors:
+        expected_training = tuple(donor for donor in training_donors if donor != prediction_donor)
+        if folds[prediction_donor] != expected_training:
+            raise ValueError(
+                "independent annotation fold is not donor-held-out from frozen development training"
+            )
+
+
+def _verify_independent_annotation_artifacts(
+    receipt_path: Path,
+    predictions_path: Path,
+    contract: Mapping[str, object],
+    *,
+    prediction_donor_ids: Sequence[str],
+) -> IndependentAnnotationArtifacts:
+    """Bind the actual label export to the frozen non-pending evidence contract."""
+
+    receipt_path = receipt_path.expanduser().resolve()
+    predictions_path = predictions_path.expanduser().resolve()
+    if (
+        receipt_path == predictions_path
+        or not receipt_path.is_file()
+        or not predictions_path.is_file()
+    ):
+        raise ValueError(
+            "independent annotation receipt and prediction export must be distinct files"
+        )
+    if contract.get("evidence_kind") == "pending":
+        raise ValueError("pending label-target evidence cannot materialize independent labels")
+    receipt_sha256 = _sha256_file(receipt_path)
+    if receipt_sha256 != contract.get("annotation_receipt_sha256"):
+        raise ValueError("independent annotation receipt differs from the frozen SHA-256")
+    receipt = _read_independent_annotation_receipt(receipt_path)
+    contract_fields = {
+        "evidence_kind",
+        "ordered_annotation_feature_ids",
+        "ordered_annotation_feature_ids_sha256",
+        "annotation_training_scope",
+        "annotation_training_donor_ids",
+        "annotation_training_donor_ids_sha256",
+        "locked_donors_used_for_training",
+        "same_cohort_annotation",
+        "cross_fitting_method",
+    }
+    if receipt["schema"] != ANNOTATION_RECEIPT_SCHEMA or any(
+        receipt[name] != contract.get(name) for name in contract_fields
+    ):
+        raise ValueError("independent annotation receipt differs from the frozen evidence contract")
+    if (
+        tuple(str(value) for value in receipt["prediction_columns"])
+        != (ANNOTATION_PREDICTION_COLUMNS)
+        or receipt["row_order"] != "filtered_annotation_export_order"
+    ):
+        raise ValueError("independent annotation prediction layout is not frozen")
+    prediction_count = receipt["prediction_row_count"]
+    if (
+        not isinstance(prediction_count, int)
+        or isinstance(prediction_count, bool)
+        or prediction_count < 1
+    ):
+        raise ValueError("independent annotation prediction row count must be positive")
+    predictions_sha256 = _sha256_file(predictions_path)
+    if predictions_sha256 != receipt["prediction_export_sha256"]:
+        raise ValueError("independent annotation predictions differ from their receipt")
+    _verify_cross_fitting_receipt(
+        receipt["cross_fitting_receipt"],
+        contract,
+        prediction_donor_ids,
+    )
+    return IndependentAnnotationArtifacts(
+        receipt_path=receipt_path,
+        receipt_sha256=receipt_sha256,
+        predictions_path=predictions_path,
+        predictions_sha256=predictions_sha256,
+        prediction_row_count=prediction_count,
+    )
+
+
+def _open_annotation_predictions(path: Path):
+    with path.open("rb") as handle:
+        compressed = handle.read(2) == b"\x1f\x8b"
+    if compressed:
+        return gzip.open(path, "rt", encoding="utf-8", newline="")
+    return path.open("r", encoding="utf-8", newline="")
+
+
 def _read_annotations(
-    path: Path, *, allowed_sample_ids: Optional[Sequence[str]] = None
+    path: Path,
+    *,
+    allowed_sample_ids: Optional[Sequence[str]] = None,
+    independent_artifacts: Optional[IndependentAnnotationArtifacts] = None,
+    expected_row_count: int = ANNOTATION_ROWS,
+    strict_sample_scope: bool = False,
 ) -> Dict[str, Dict[str, AnnotationCell]]:
     required = {
         "hest_id",
@@ -695,14 +1043,14 @@ def _read_annotations(
         "disease_status",
         "tma",
         "run",
-        "final_CT",
-        "final_lineage",
         "x_centroid",
         "y_centroid",
         "nCount_RNA",
         "nFeature_RNA",
         "perc_negcontrolorunassigned",
     }
+    if independent_artifacts is None:
+        required.update(("final_CT", "final_lineage"))
     allowed = (
         set(SECTION_IDENTITIES)
         if allowed_sample_ids is None
@@ -712,26 +1060,56 @@ def _read_annotations(
         raise ValueError("HEST annotation sample scope is empty or unknown")
     result: Dict[str, Dict[str, AnnotationCell]] = {sample_id: {} for sample_id in allowed}
     rows = 0
+    prediction_context = (
+        nullcontext(None)
+        if independent_artifacts is None
+        else _open_annotation_predictions(independent_artifacts.predictions_path)
+    )
+    prediction_rows = 0
     try:
-        with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
+        with (
+            gzip.open(path, "rt", encoding="utf-8", newline="") as handle,
+            prediction_context as prediction_handle,
+        ):
             reader = csv.DictReader(handle, delimiter="\t")
             if not required <= set(reader.fieldnames or ()):
                 raise ValueError("HEST GSE250346 annotation schema is incomplete")
+            prediction_reader = None
+            if prediction_handle is not None:
+                prediction_reader = csv.DictReader(prediction_handle, delimiter="\t")
+                if tuple(prediction_reader.fieldnames or ()) != ANNOTATION_PREDICTION_COLUMNS:
+                    raise ValueError(
+                        "independent annotation prediction columns differ from receipt"
+                    )
             for row in reader:
                 sample_id = row["hest_id"]
                 if sample_id not in SECTION_IDENTITIES:
                     raise ValueError("HEST annotation contains an unknown section")
+                if strict_sample_scope and sample_id not in allowed:
+                    raise ValueError("development-only annotation export contains a locked section")
                 expected_donor, expected_source_sample = SECTION_IDENTITIES[sample_id]
                 if row["patient"] != expected_donor or row["sample"] != expected_source_sample:
                     raise ValueError("HEST annotation differs from corrected donor identities")
                 rows += 1
-                # Locked-donor molecular outcomes must not be parsed or materialized while
-                # constructing the measurement-development source. The combined public
-                # export is streamed only far enough to identify and skip those rows.
                 if sample_id not in allowed:
                     continue
-                lineage = row["final_lineage"]
-                fine_type = row["final_CT"].strip()
+                if prediction_reader is None:
+                    lineage = row["final_lineage"]
+                    fine_type = row["final_CT"].strip()
+                else:
+                    prediction = next(prediction_reader, None)
+                    if prediction is None:
+                        raise ValueError("independent annotation predictions end before metadata")
+                    prediction_rows += 1
+                    if (
+                        prediction["hest_id"] != sample_id
+                        or prediction["cell_id"] != row["cell_id"]
+                    ):
+                        raise ValueError(
+                            "independent annotation predictions differ from frozen metadata order"
+                        )
+                    lineage = prediction["broad_lineage"]
+                    fine_type = prediction["fine_type"].strip()
                 disease = row["disease_status"].strip()
                 site_id = row["sample_type"].strip()
                 tma = row["tma"].strip()
@@ -770,9 +1148,16 @@ def _read_annotations(
                     nfeature_rna=nfeature,
                     percent_negative_or_unassigned=negative,
                 )
+            if prediction_reader is not None:
+                if next(prediction_reader, None) is not None:
+                    raise ValueError("independent annotation predictions contain extra rows")
+                if prediction_rows != independent_artifacts.prediction_row_count:
+                    raise ValueError(
+                        "independent annotation prediction count differs from its receipt"
+                    )
     except (OSError, UnicodeError, csv.Error) as error:
         raise ValueError("HEST GSE250346 annotation export cannot be read") from error
-    if rows != ANNOTATION_ROWS or any(not values for values in result.values()):
+    if rows != expected_row_count or any(not values for values in result.values()):
         raise ValueError("HEST annotation must contain the pinned cohort and every allowed section")
     return result
 
@@ -1137,6 +1522,12 @@ def _update_transcript_identity_manifest(
 ) -> int:
     """Hash section-qualified eligible target IDs without materializing them in memory."""
 
+    prefix = str(section_id) + ":"
+    scoped_cell_ids = tuple(str(value) for value in cell_ids)
+    if any(not value.startswith(prefix) or len(value) == len(prefix) for value in scoped_cell_ids):
+        raise ValueError("HEST transcript receipt cell identities are not section-scoped")
+    raw_cell_ids = tuple(value[len(prefix) :] for value in scoped_cell_ids)
+
     try:
         import duckdb
         import pyarrow as pa
@@ -1145,9 +1536,7 @@ def _update_transcript_identity_manifest(
     connection = duckdb.connect(database=":memory:")
     count = 0
     try:
-        connection.register(
-            "retained_cells", pa.table({"cell_id": tuple(str(value) for value in cell_ids)})
-        )
+        connection.register("retained_cells", pa.table({"cell_id": raw_cell_ids}))
         result = connection.execute(
             """
             SELECT DISTINCT CAST(t.transcript_id AS VARCHAR) AS transcript_id
@@ -1198,12 +1587,14 @@ def _block_role(sample_id: str, block_x: int, block_y: int, salt: str) -> str:
 
 def _reference_split_matrix(
     donors: np.ndarray,
+    section_ids: np.ndarray,
     fine_type_labels: np.ndarray,
     block_ids: np.ndarray,
     primary_roles: np.ndarray,
     split_protocol: Mapping[str, object],
     *,
     minimum_reference: int,
+    full_support_donors: Sequence[str],
 ) -> tuple[tuple[str, ...], np.ndarray]:
     """Freeze alternate reference-block subsets while keeping evaluation rows fixed."""
 
@@ -1216,46 +1607,69 @@ def _reference_split_matrix(
     roles[:, 0] = primary_roles.astype(str)
     primary_evaluation = primary_roles.astype(str) == "evaluation"
     primary_reference = primary_roles.astype(str) == "reference"
+    full_support = set(str(value) for value in full_support_donors)
     for split_index, declaration in enumerate(alternates, start=1):
         salt = str(declaration["salt"])
         retention = float(declaration["initial_reference_retention_fraction"])
         roles[primary_evaluation, split_index] = "evaluation"
-        for donor in sorted(set(donors.astype(str).tolist())):
-            donor_reference = primary_reference & (donors.astype(str) == donor)
-            candidate_blocks = sorted(set(block_ids[donor_reference].astype(str).tolist()))
-            scores = {
-                block: int.from_bytes(
-                    hashlib.sha256((donor + "\0" + block + "\0" + salt).encode("utf-8")).digest()[
-                        :8
-                    ],
-                    "big",
+        donor_values = donors.astype(str)
+        section_values = section_ids.astype(str)
+        block_values = block_ids.astype(str)
+        for donor in sorted(set(donor_values.tolist())):
+            for section_id in sorted(set(section_values[donor_values == donor].tolist())):
+                stratum_reference = (
+                    primary_reference & (donor_values == donor) & (section_values == section_id)
                 )
-                / 2**64
-                for block in candidate_blocks
-            }
-            selected = {block for block in candidate_blocks if scores[block] < retention}
-            donor_types = sorted(set(fine_type_labels[donor_reference].tolist()))
+                candidate_blocks = sorted(set(block_values[stratum_reference].tolist()))
+                scores = {
+                    block: int.from_bytes(
+                        hashlib.sha256(
+                            (donor + "\0" + section_id + "\0" + block + "\0" + salt).encode("utf-8")
+                        ).digest()[:8],
+                        "big",
+                    )
+                    / 2**64
+                    for block in candidate_blocks
+                }
+                selected = {block for block in candidate_blocks if scores[block] < retention}
+                section_types = sorted(set(fine_type_labels[stratum_reference].tolist()))
+                # Development donor/section/type strata always retain full
+                # support. A locked stratum that already fails the primary
+                # minimum remains visible for ITA accounting, but alternates
+                # never make it spuriously evaluable.
+                required_by_type = {
+                    type_index: (
+                        minimum_reference
+                        if donor in full_support
+                        or np.count_nonzero(stratum_reference & (fine_type_labels == type_index))
+                        >= minimum_reference
+                        else 0
+                    )
+                    for type_index in section_types
+                }
 
-            def supported(block_selection: set[str]) -> bool:
-                selected_rows = donor_reference & np.isin(
-                    block_ids.astype(str), np.asarray(sorted(block_selection), dtype=str)
-                )
-                return all(
-                    np.count_nonzero(selected_rows & (fine_type_labels == type_index))
-                    >= minimum_reference
-                    for type_index in donor_types
-                )
+                def supported(block_selection: set[str]) -> bool:
+                    selected_rows = stratum_reference & np.isin(
+                        block_values, np.asarray(sorted(block_selection), dtype=str)
+                    )
+                    return all(
+                        np.count_nonzero(selected_rows & (fine_type_labels == type_index))
+                        >= required_by_type[type_index]
+                        for type_index in section_types
+                    )
 
-            for block in sorted(candidate_blocks, key=lambda value: (scores[value], value)):
-                if supported(selected):
-                    break
-                selected.add(block)
-            if not supported(selected):
-                raise ValueError("an alternate HEST reference split lacks donor/type support")
-            selected_rows = donor_reference & np.isin(
-                block_ids.astype(str), np.asarray(sorted(selected), dtype=str)
-            )
-            roles[selected_rows, split_index] = "reference"
+                for block in sorted(candidate_blocks, key=lambda value: (scores[value], value)):
+                    if supported(selected):
+                        break
+                    selected.add(block)
+                if not supported(selected):
+                    raise ValueError(
+                        "an alternate HEST reference split lacks donor/section/type support"
+                    )
+                selected_rows = stratum_reference & np.isin(
+                    block_values, np.asarray(sorted(selected), dtype=str)
+                )
+                roles[selected_rows, split_index] = "reference"
     if not np.all(roles[primary_evaluation, :] == "evaluation"):
         raise ValueError("alternate reference splits changed primary evaluation rows")
     return split_ids, roles
@@ -2126,6 +2540,8 @@ def build_source(
     plan_output_path: Path,
     qc_output_path: Path,
     *,
+    annotation_receipt_path: Optional[Path] = None,
+    annotation_predictions_path: Optional[Path] = None,
     device: str = "cuda",
     batch_size: int = 64,
     encoder: Optional[FrozenPatchEncoder] = None,
@@ -2139,12 +2555,31 @@ def build_source(
     output_path = output_path.expanduser().resolve()
     plan_output_path = plan_output_path.expanduser().resolve()
     qc_output_path = qc_output_path.expanduser().resolve()
-    study_manifest = StudyManifest.load(
-        study_manifest_path,
-        require_status="locked",
-        verify_runtime=True,
-        repository_root=Path(__file__).resolve().parents[1],
-    )
+    repository_root = Path(__file__).resolve().parents[1]
+    manifest_identity = StudyManifest.load(study_manifest_path)
+    if manifest_identity.study_stage == "measurement_development":
+        study_manifest = StudyManifest.load(
+            study_manifest_path,
+            require_status="locked",
+            verify_runtime=True,
+            repository_root=repository_root,
+        )
+        opening_receipt_sha256: Optional[str] = None
+    elif manifest_identity.study_stage == "confirmatory_morphology":
+        study_manifest = StudyManifest.load(
+            study_manifest_path,
+            require_status="opened",
+            verify_runtime=True,
+            require_clean_runtime=True,
+            verify_container_digest=True,
+            repository_root=repository_root,
+        )
+        opening = study_manifest.content["opening"]
+        if "H-CELL" not in opening["permitted_claims"]:
+            raise ValueError("opened study manifest does not permit the H-CELL claim")
+        opening_receipt_sha256 = str(opening["opening_receipt_sha256"])
+    else:  # StudyManifest.load already rejects this; retain a local fail-closed guard.
+        raise ValueError("unsupported HEST study stage")
     encoder_manifest = _load_encoder_manifest(encoder_manifest_path)
     crop_manifest = _load_crop_manifest(crop_manifest_path)
     protocol = _read_json(protocol_path)
@@ -2163,16 +2598,80 @@ def build_source(
         list(protocol["fine_type_marker_gene_ids"])
     ):
         raise ValueError("locked study manifest fine-type marker panel differs from the protocol")
+    if study_manifest.study_stage == "measurement_development" and float(
+        study_manifest.content["decision_thresholds"]["required_opposite_pool_guard_um"]
+    ) != float(protocol["opposite_pool_guard_um"]):
+        raise ValueError(
+            "locked measurement manifest opposite-pool guard differs from the HEST protocol"
+        )
+    protocol_independence = _validate_protocol_independence_contract(
+        protocol.get("label_target_independence")
+    )
+    manifest_independence = study_manifest.content["label_target_independence"]
+    manifest_protocol_contract = {
+        name: manifest_independence[name] for name in LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS
+    }
+    if dict(protocol_independence) != manifest_protocol_contract:
+        raise ValueError(
+            "locked study manifest label-target evidence differs from the HEST protocol"
+        )
+    independence_contract = dict(manifest_independence)
+    if study_manifest.study_stage == "confirmatory_morphology":
+        annotation_features = set(
+            str(value) for value in independence_contract["ordered_annotation_feature_ids"]
+        )
+        target_features = tuple(
+            str(value) for value in independence_contract["ordered_target_gene_ids"]
+        )
+        if (
+            not target_features
+            or not set(target_features) <= set(str(value) for value in protocol["gene_ids"])
+            or annotation_features & set(target_features)
+            or independence_contract["annotation_target_overlap_count"] != 0
+        ):
+            raise ValueError(
+                "locked label-target evidence is not disjoint from the frozen target panel"
+            )
     if study_manifest.study_stage == "measurement_development":
         samples = tuple(sample for sample in samples if sample.split_id == "development")
         source_scope = "development_donors_only"
+        frozen_supported_types: tuple[str, ...] = ()
+        planned_strata: set[str] = set()
     elif study_manifest.study_stage == "confirmatory_morphology":
         samples = tuple(samples)
-        source_scope = "development_and_locked_after_confirmatory_lock"
+        source_scope = "development_and_locked_after_confirmatory_opening"
+        observations_contract = study_manifest.content["observations"]
+        frozen_supported_types = tuple(
+            str(value) for value in observations_contract["supported_fine_type_ids"]
+        )
+        planned_strata = set(_frozen_ita_stratum_ids(samples, frozen_supported_types))
     else:  # StudyManifest.load already rejects this; retain a local fail-closed guard.
         raise ValueError("unsupported HEST study stage")
     active_donors = tuple(sorted({sample.donor_id for sample in samples}))
     active_sample_ids = tuple(sample.sample_id for sample in samples)
+    independent_artifacts: Optional[IndependentAnnotationArtifacts] = None
+    if independence_contract["evidence_kind"] == "pending":
+        if annotation_receipt_path is not None or annotation_predictions_path is not None:
+            raise ValueError("pending label-target evidence cannot accept annotation artifacts")
+    else:
+        if annotation_receipt_path is None or annotation_predictions_path is None:
+            raise ValueError(
+                "non-pending label-target evidence requires its actual receipt and predictions"
+            )
+        independent_artifacts = _verify_independent_annotation_artifacts(
+            annotation_receipt_path,
+            annotation_predictions_path,
+            independence_contract,
+            prediction_donor_ids=active_donors,
+        )
+    annotation_artifact_inputs = {
+        path
+        for path in (
+            None if independent_artifacts is None else independent_artifacts.receipt_path,
+            None if independent_artifacts is None else independent_artifacts.predictions_path,
+        )
+        if path is not None
+    }
     if (
         output_path
         in {
@@ -2185,6 +2684,7 @@ def build_source(
             plan_output_path,
             qc_output_path,
         }
+        or output_path in annotation_artifact_inputs
         or plan_output_path
         in {
             protocol_path,
@@ -2194,6 +2694,7 @@ def build_source(
             data_root,
             model_dir,
         }
+        or plan_output_path in annotation_artifact_inputs
         or qc_output_path
         in {
             protocol_path,
@@ -2204,6 +2705,7 @@ def build_source(
             model_dir,
             plan_output_path,
         }
+        or qc_output_path in annotation_artifact_inputs
         or batch_size < 1
     ):
         raise ValueError("HEST output/input identity or batch size is invalid")
@@ -2216,11 +2718,39 @@ def build_source(
     fine_marker_genes = tuple(str(value) for value in protocol["fine_type_marker_gene_ids"])
     target_genes = tuple(str(value) for value in protocol["gene_ids"])
     salt = str(protocol.get("pool_assignment_salt", "hest-xenium-v1"))
-    annotation_declaration = _parse_file(
+    full_annotation_declaration = _parse_file(
         protocol["annotation_export"], "GSE250346 annotation export"
     )
+    if study_manifest.study_stage == "measurement_development":
+        development_annotation = _parse_development_annotation_export(
+            protocol.get("measurement_development_annotation_export"),
+            active_sample_ids,
+        )
+        annotation_declaration = development_annotation.file
+        annotation_expected_rows = development_annotation.row_count
+        annotation_strict_scope = True
+    else:
+        annotation_declaration = full_annotation_declaration
+        annotation_expected_rows = ANNOTATION_ROWS
+        annotation_strict_scope = False
     annotation_path = _resolve_input(data_root, annotation_declaration)
-    annotations = _read_annotations(annotation_path, allowed_sample_ids=active_sample_ids)
+    annotations = _read_annotations(
+        annotation_path,
+        allowed_sample_ids=active_sample_ids,
+        independent_artifacts=independent_artifacts,
+        expected_row_count=annotation_expected_rows,
+        strict_sample_scope=annotation_strict_scope,
+    )
+    if independent_artifacts is None:
+        label_source_sha256 = annotation_declaration.sha256
+        label_source_kind = "gse250346_final_ct_and_lineage"
+        label_field_primary = "final_CT"
+        label_field_secondary = "final_lineage"
+    else:
+        label_source_sha256 = independent_artifacts.predictions_sha256
+        label_source_kind = "independent_annotation_prediction_export"
+        label_field_primary = "fine_type"
+        label_field_secondary = "broad_lineage"
     rows = _Rows(
         observation_ids=[],
         cell_ids=[],
@@ -2276,7 +2806,6 @@ def build_source(
         local_density=[],
     )
     resolved_provenance = []
-    planned_strata: set[str] = set()
     exclusion_counts: Dict[str, int] = {
         "native_cells_outside_high_qc_annotation": 0,
         "low_transcripts": 0,
@@ -2299,7 +2828,8 @@ def build_source(
             fine_type = annotated[cell_id].fine_type
             if "|" in fine_type:
                 raise ValueError("HEST fine type cannot contain the stratum delimiter")
-            planned_strata.add("%s|%s|%s" % (sample.donor_id, sample.sample_id, fine_type))
+            if study_manifest.study_stage == "measurement_development":
+                planned_strata.add("%s|%s|%s" % (sample.donor_id, sample.sample_id, fine_type))
         exclusion_counts["native_cells_outside_high_qc_annotation"] += len(
             (set(cell_centres) | set(nucleus_centres)) - set(annotated)
         )
@@ -2383,8 +2913,9 @@ def build_source(
             if not spatial.guard_pass:
                 exclusion_counts["spatial_guard"] += 1
                 continue
-            rows.observation_ids.append(sample.sample_id + ":" + cell_id)
-            rows.cell_ids.append(cell_id)
+            scoped_cell_id = _section_scoped_cell_id(sample.sample_id, cell_id)
+            rows.observation_ids.append(scoped_cell_id)
+            rows.cell_ids.append(scoped_cell_id)
             rows.donor_ids.append(sample.donor_id)
             rows.sample_ids.append(sample.sample_id)
             rows.split_ids.append(sample.split_id)
@@ -2557,22 +3088,34 @@ def build_source(
     fine_type_index = {name: index for index, name in enumerate(fine_type_names)}
     rows.type_labels = [fine_type_index[value] for value in rows.fine_type_ids]
     preliminary_donors = np.asarray(rows.donor_ids)
+    preliminary_sections = np.asarray(rows.sample_ids)
     preliminary_roles = np.asarray(rows.pool_roles)
+    preliminary_splits = np.asarray(rows.split_ids)
     preliminary_labels = np.asarray(rows.type_labels, dtype=np.int64)
     retained = np.ones(len(rows.observation_ids), dtype=np.bool_)
-    minimum_reference = int(protocol["minimum_reference_cells_per_donor_type"])
-    minimum_evaluation = int(protocol["minimum_evaluation_cells_per_donor_type"])
+    if study_manifest.study_stage == "confirmatory_morphology":
+        if not frozen_supported_types or not set(frozen_supported_types) <= set(fine_type_names):
+            raise ValueError("confirmatory HEST source differs from the frozen H-MEAS type set")
+        retained &= np.isin(np.asarray(rows.fine_type_ids), np.asarray(frozen_supported_types))
+    minimum_reference = int(protocol["minimum_reference_cells_per_donor_section_type"])
+    minimum_evaluation = int(protocol["minimum_evaluation_cells_per_donor_section_type"])
     for donor in sorted(set(preliminary_donors.tolist())):
         donor_mask = preliminary_donors == donor
-        for type_index in sorted(set(preliminary_labels[donor_mask].tolist())):
-            local = donor_mask & (preliminary_labels == type_index)
-            if (
-                np.count_nonzero(local & (preliminary_roles == "reference")) < minimum_reference
-                or np.count_nonzero(local & (preliminary_roles == "evaluation"))
-                < minimum_evaluation
-            ):
-                retained[local] = False
-    preliminary_splits = np.asarray(rows.split_ids)
+        for section_id in sorted(set(preliminary_sections[donor_mask].tolist())):
+            section_mask = donor_mask & (preliminary_sections == section_id)
+            for type_index in sorted(set(preliminary_labels[section_mask].tolist())):
+                local = section_mask & (preliminary_labels == type_index)
+                insufficient = (
+                    np.count_nonzero(local & (preliminary_roles == "reference")) < minimum_reference
+                    or np.count_nonzero(local & (preliminary_roles == "evaluation"))
+                    < minimum_evaluation
+                )
+                locked_stratum = bool(
+                    study_manifest.study_stage == "confirmatory_morphology"
+                    and np.all(preliminary_splits[local] == "locked_test")
+                )
+                if insufficient and not locked_stratum:
+                    retained[local] = False
     for type_index in sorted(set(preliminary_labels[retained].tolist())):
         local = retained & (preliminary_labels == type_index)
         development_support = len(
@@ -2584,11 +3127,16 @@ def build_source(
         insufficient_development = development_support < int(
             protocol["minimum_development_donors_per_fine_type"]
         )
-        insufficient_locked = (
-            study_manifest.study_stage == "confirmatory_morphology"
-            and locked_support < int(protocol["minimum_locked_donors_per_fine_type"])
-        )
-        if insufficient_development or insufficient_locked:
+        if study_manifest.study_stage == "confirmatory_morphology":
+            fine_type = fine_type_names[type_index]
+            if fine_type in frozen_supported_types and insufficient_development:
+                raise ValueError(
+                    "a frozen H-MEAS fine type lost development support before confirmation"
+                )
+            # Locked support is an audit outcome, never a post-opening population selector.
+            # Missing locked support remains in the planned denominator downstream.
+            _ = locked_support
+        elif insufficient_development:
             retained[preliminary_labels == type_index] = False
     exclusion_counts["unsupported_donor_fine_type"] = int(np.count_nonzero(~retained))
     old_sample_rows = tuple(rows.sample_rows)
@@ -2683,35 +3231,54 @@ def build_source(
     if eligible_target_transcripts != counted_eligible_targets:
         raise ValueError("HEST transcript identity receipt differs from whole-cell target counts")
     donors = np.asarray(rows.donor_ids)
+    sections = np.asarray(rows.sample_ids)
     labels = np.asarray(rows.type_labels, dtype=np.int64)
     roles = np.asarray(rows.pool_roles)
     blocks = np.asarray(rows.block_ids)
-    minimum_reference = int(protocol["minimum_reference_cells_per_donor_type"])
-    minimum_evaluation = int(protocol["minimum_evaluation_cells_per_donor_type"])
+    minimum_reference = int(protocol["minimum_reference_cells_per_donor_section_type"])
+    minimum_evaluation = int(protocol["minimum_evaluation_cells_per_donor_section_type"])
     for donor in active_donors:
         donor_mask = donors == str(donor)
-        if set(roles[donor_mask].tolist()) != {"reference", "evaluation"}:
-            raise ValueError("each HEST donor needs spatially disjoint reference/evaluation cells")
-        for type_index in sorted(set(labels[donor_mask].tolist())):
-            reference_count = np.count_nonzero(
-                donor_mask & (roles == "reference") & (labels == type_index)
-            )
-            evaluation_count = np.count_nonzero(
-                donor_mask & (roles == "evaluation") & (labels == type_index)
-            )
-            if reference_count < minimum_reference or evaluation_count < minimum_evaluation:
-                raise ValueError("a HEST donor/type lacks the frozen reference/evaluation support")
-        if set(blocks[donor_mask & (roles == "reference")]) & set(
-            blocks[donor_mask & (roles == "evaluation")]
-        ):
-            raise ValueError("HEST reference/evaluation spatial blocks overlap")
+        locked_donor = bool(
+            study_manifest.study_stage == "confirmatory_morphology"
+            and str(donor) in set(study_manifest.locked_test_donors)
+        )
+        for section_id in sorted(set(sections[donor_mask].tolist())):
+            section_mask = donor_mask & (sections == section_id)
+            if (
+                set(roles[section_mask].tolist()) != {"reference", "evaluation"}
+                and not locked_donor
+            ):
+                raise ValueError(
+                    "each development donor/section needs spatially disjoint "
+                    "reference/evaluation cells"
+                )
+            for type_index in sorted(set(labels[section_mask].tolist())):
+                reference_count = np.count_nonzero(
+                    section_mask & (roles == "reference") & (labels == type_index)
+                )
+                evaluation_count = np.count_nonzero(
+                    section_mask & (roles == "evaluation") & (labels == type_index)
+                )
+                if (
+                    reference_count < minimum_reference or evaluation_count < minimum_evaluation
+                ) and not locked_donor:
+                    raise ValueError(
+                        "a HEST donor/section/type lacks the frozen reference/evaluation support"
+                    )
+            if set(blocks[section_mask & (roles == "reference")]) & set(
+                blocks[section_mask & (roles == "evaluation")]
+            ):
+                raise ValueError("HEST reference/evaluation spatial blocks overlap")
     reference_split_ids, pool_roles_by_split = _reference_split_matrix(
         donors,
+        sections,
         labels,
         blocks,
         roles,
         protocol["reference_splits"],
         minimum_reference=minimum_reference,
+        full_support_donors=study_manifest.development_donors,
     )
 
     if encoder is None:
@@ -3067,12 +3634,48 @@ def build_source(
             rows.whole_cell_detected_target_genes,
         )
     ).astype(np.float32)
+    measurement_qc_contract = (
+        study_manifest.content["locked_measurement_audit"]
+        if study_manifest.study_stage == "confirmatory_morphology"
+        else study_manifest.content["decision_thresholds"]
+    )
+    annotation_nucleus_values = np.asarray(rows.annotation_nucleus_distances_um)
+    annotation_cell_values = np.asarray(rows.annotation_cell_distances_um)
+    nucleus_diameter_um = 2.0 * np.sqrt(nucleus_areas_um2 / np.pi)
+    nearest_neighbor_um = np.asarray(local_density_features[:, 0], dtype=np.float64)
+    section_ids_for_qc = np.asarray(rows.sample_ids).astype(str)
+    diameter_relative_values = np.full(len(rows.observation_ids), np.inf, dtype=np.float64)
+    neighbor_relative_values = np.full(len(rows.observation_ids), np.inf, dtype=np.float64)
+    for section_id in sorted(set(section_ids_for_qc.tolist())):
+        section = section_ids_for_qc == section_id
+        valid_diameter = section & np.isfinite(nucleus_diameter_um) & (nucleus_diameter_um > 0)
+        valid_neighbor = section & np.isfinite(nearest_neighbor_um) & (nearest_neighbor_um > 0)
+        if valid_diameter.any():
+            diameter_relative_values[section] = annotation_nucleus_values[section] / float(
+                np.median(nucleus_diameter_um[valid_diameter])
+            )
+        if valid_neighbor.any():
+            neighbor_relative_values[section] = annotation_nucleus_values[section] / float(
+                np.median(nearest_neighbor_um[valid_neighbor])
+            )
     registration_qc_pass = (
-        np.asarray(rows.annotation_nucleus_distances_um)
-        <= float(protocol["maximum_annotation_nucleus_distance_p95_um"])
-    ) & (
-        np.asarray(rows.affine_residual_p95_um)
-        <= float(protocol["maximum_affine_registration_residual_p95_um"])
+        annotation_nucleus_values
+        <= float(measurement_qc_contract["maximum_annotation_nucleus_p95_um"])
+    ) & (annotation_cell_values <= float(measurement_qc_contract["maximum_annotation_cell_p95_um"]))
+    registration_qc_pass &= cell_nucleus_distances_um <= float(
+        measurement_qc_contract["maximum_cell_nucleus_p95_um"]
+    )
+    registration_qc_pass &= diameter_relative_values <= float(
+        measurement_qc_contract["maximum_registration_nucleus_diameter_ratio_p95"]
+    )
+    registration_qc_pass &= neighbor_relative_values <= float(
+        measurement_qc_contract["maximum_registration_nearest_neighbor_ratio_p95"]
+    )
+    segmentation_qc_pass = np.asarray(rows.nucleus_centroid_inside_cell, dtype=np.bool_) & (
+        area_ratio >= float(measurement_qc_contract["minimum_nucleus_cell_area_ratio"])
+    )
+    segmentation_qc_pass &= area_ratio <= float(
+        measurement_qc_contract["maximum_nucleus_cell_area_ratio"]
     )
     target_qc_pass = (
         (np.asarray(rows.nucleus_library_sizes) >= int(protocol["minimum_transcripts_per_cell"]))
@@ -3080,15 +3683,21 @@ def build_source(
         & (target_counts.sum(axis=1) <= np.asarray(rows.nucleus_library_sizes))
         & (whole_cell_target_counts.sum(axis=1) <= np.asarray(rows.whole_cell_library_sizes))
     )
-    crop_qc_pass = np.max(crop_padding_fractions, axis=1) <= float(
-        protocol["maximum_crop_padding_fraction"]
+    crop_qc_pass = np.all(
+        np.isfinite(crop_padding_fractions)
+        & (crop_padding_fractions >= 0.0)
+        & (crop_padding_fractions <= float(measurement_qc_contract["maximum_crop_padding_p95"])),
+        axis=1,
     )
-    if cellvit_nearest_padding_fractions is not None:
-        crop_qc_pass &= cellvit_nearest_padding_fractions <= float(
-            protocol["maximum_crop_padding_fraction"]
-        )
-    if not target_qc_pass.all() or not crop_qc_pass.all():
-        raise ValueError("HEST target or crop QC invariant failed")
+    cellvit_crop_qc_pass = (
+        np.ones(observations, dtype=np.bool_)
+        if cellvit_nearest_padding_fractions is None
+        else cellvit_nearest_padding_fractions
+        <= float(measurement_qc_contract["maximum_crop_padding_p95"])
+    )
+    locked_measurement_qc_pass = registration_qc_pass & segmentation_qc_pass & crop_qc_pass
+    if not target_qc_pass.all():
+        raise ValueError("HEST target-count invariant failed")
     feature_name_prefix = encoder_manifest.encoder_id
     feature_space_id = "%s_%s_%d_hest_%s_v1" % (
         encoder_manifest.encoder_id,
@@ -3112,7 +3721,7 @@ def build_source(
                 "excluded_feature_prefixes",
                 "type_markers",
                 "fine_type_marker_gene_ids",
-                "fine_type_annotation_provenance",
+                "label_target_independence",
                 "spatial_block_um",
                 "spatial_roi_um",
                 "opposite_pool_guard_um",
@@ -3126,7 +3735,14 @@ def build_source(
     )
     source_file_manifest_sha256 = _canonical_sha256(
         {
-            "annotation": annotation_declaration.sha256,
+            "annotation_metadata": annotation_declaration.sha256,
+            "annotation_parent": full_annotation_declaration.sha256,
+            "label_predictions": (
+                None if independent_artifacts is None else independent_artifacts.predictions_sha256
+            ),
+            "label_receipt": (
+                None if independent_artifacts is None else independent_artifacts.receipt_sha256
+            ),
             "samples": [
                 {key: value for key, value in sample.items() if key.endswith("_sha256")}
                 for sample in resolved_provenance
@@ -3169,6 +3785,7 @@ def build_source(
         "schema": SOURCE_SCHEMA,
         "study_stage": study_manifest.study_stage,
         "study_manifest_sha256": study_manifest.sha256,
+        "opening_receipt_sha256": opening_receipt_sha256,
         "source_scope": source_scope,
         "locked_donor_outcomes_materialized": (
             study_manifest.study_stage == "confirmatory_morphology"
@@ -3184,14 +3801,21 @@ def build_source(
         "model_checkpoint_sha256": encoder_manifest.checkpoint_sha256,
         "annotation_source": "GSE250346 corrected Seurat metadata export",
         "annotation_sha256": annotation_declaration.sha256,
-        "annotation_rows": ANNOTATION_ROWS,
-        "label_field_primary": "final_CT",
-        "label_field_secondary": "final_lineage",
-        "fine_type_annotation_provenance": protocol["fine_type_annotation_provenance"],
+        "annotation_parent_sha256": full_annotation_declaration.sha256,
+        "annotation_rows": annotation_expected_rows,
+        "label_source_kind": label_source_kind,
+        "label_source_sha256": label_source_sha256,
+        "label_receipt_sha256": (
+            None if independent_artifacts is None else independent_artifacts.receipt_sha256
+        ),
+        "label_field_primary": label_field_primary,
+        "label_field_secondary": label_field_secondary,
+        "label_target_independence": independence_contract,
+        "label_target_independence_protocol": dict(protocol_independence),
         "fine_type_marker_exclusion": {
             "gene_ids": list(fine_marker_genes),
             "target_overlap": 0,
-            "exact_annotation_marker_panel_available": False,
+            "is_proxy_only": True,
             "establishes_full_target_independence": False,
         },
         "target_transcript_filters": {
@@ -3238,7 +3862,9 @@ def build_source(
         "schema_version": np.asarray(SOURCE_SCHEMA),
         "study_stage": np.asarray(study_manifest.study_stage),
         "study_manifest_sha256": np.asarray(study_manifest.sha256),
+        "opening_receipt_sha256": np.asarray(opening_receipt_sha256 or ""),
         "source_scope": np.asarray(source_scope),
+        "opposite_pool_guard_um": np.asarray(float(protocol["opposite_pool_guard_um"])),
         "locked_donor_outcomes_materialized": np.asarray(
             study_manifest.study_stage == "confirmatory_morphology"
         ),
@@ -3344,8 +3970,12 @@ def build_source(
         "broad_type_marker_gene_ids": np.asarray(marker_genes),
         "fine_type_marker_gene_ids": np.asarray(fine_marker_genes),
         "fine_type_marker_panel_sha256": np.asarray(_canonical_sha256(list(fine_marker_genes))),
-        "fine_type_annotation_provenance_json": np.asarray(
-            json.dumps(protocol["fine_type_annotation_provenance"], sort_keys=True)
+        "label_target_independence_json": np.asarray(
+            json.dumps(independence_contract, sort_keys=True, separators=(",", ":"))
+        ),
+        "label_target_independence_sha256": np.asarray(_canonical_sha256(independence_contract)),
+        "annotation_feature_ids": np.asarray(
+            independence_contract["ordered_annotation_feature_ids"], dtype=str
         ),
         "program_names": np.asarray(program_names),
         "program_gene_membership": program_gene_membership,
@@ -3409,9 +4039,18 @@ def build_source(
         "registration_qc_features": registration_qc,
         "registration_qc_feature_names": np.asarray(registration_qc_names),
         "registration_qc_pass": registration_qc_pass,
+        "segmentation_qc_pass": segmentation_qc_pass,
+        "locked_measurement_qc_pass": locked_measurement_qc_pass,
+        "locked_measurement_audit_thresholds_json": np.asarray(
+            json.dumps(measurement_qc_contract, sort_keys=True)
+        ),
+        "locked_measurement_audit_thresholds_sha256": np.asarray(
+            _canonical_sha256(measurement_qc_contract)
+        ),
         "registration_cardinality": np.ones(observations, dtype=np.int8),
         "target_qc_pass": target_qc_pass,
         "crop_qc_pass": crop_qc_pass,
+        "cellvit_crop_qc_pass": cellvit_crop_qc_pass,
         "native_nucleus_centres_he_pixels": nucleus_centres.astype(np.float32),
         "native_cell_centres_he_pixels": native_cell_centres.astype(np.float32),
         "annotation_registered_centres_he_pixels": annotation_he_centres.astype(np.float32),
@@ -3446,7 +4085,14 @@ def build_source(
         "observation_level": np.asarray(protocol["observation_level"]),
         "target_construction": np.asarray(protocol["target_construction"]),
         "secondary_target_construction": np.asarray("whole_cell_xenium_transcripts"),
-        "label_source_sha256": np.asarray(annotation_declaration.sha256),
+        "label_source_sha256": np.asarray(label_source_sha256),
+        "label_source_kind": np.asarray(label_source_kind),
+        "annotation_receipt_sha256": np.asarray(
+            "" if independent_artifacts is None else independent_artifacts.receipt_sha256
+        ),
+        "annotation_prediction_export_sha256": np.asarray(
+            "" if independent_artifacts is None else independent_artifacts.predictions_sha256
+        ),
         "source_file_manifest_sha256": np.asarray(source_file_manifest_sha256),
         "registration_source_sha256": np.asarray(registration_source_sha256),
         "registration_manifest_sha256": np.asarray(registration_source_sha256),
@@ -3514,6 +4160,7 @@ def build_source(
         "schema": "heir.morphology_ridge_preparation_plan.v1",
         "study_stage": study_manifest.study_stage,
         "study_manifest_sha256": study_manifest.sha256,
+        "opening_receipt_sha256": opening_receipt_sha256,
         "source_scope": source_scope,
         "locked_donor_outcomes_materialized": (
             study_manifest.study_stage == "confirmatory_morphology"
@@ -3550,7 +4197,7 @@ def build_source(
         "broad_type_marker_gene_ids": list(marker_genes),
         "fine_type_marker_gene_ids": list(fine_marker_genes),
         "fine_type_marker_panel_sha256": _canonical_sha256(list(fine_marker_genes)),
-        "fine_type_annotation_provenance": protocol["fine_type_annotation_provenance"],
+        "label_target_independence": independence_contract,
         "technical_covariate_names": ["log1p_library_size"],
         "full_nuisance_covariate_names": list(full_nuisance_covariate_names),
         "frozen_feature_names": [
@@ -3570,7 +4217,14 @@ def build_source(
         "encoder_manifest_sha256": encoder_manifest.sha256,
         "crop_manifest_sha256": crop_manifest.sha256,
         "molecular_space_id": molecular_space_id,
-        "label_source_sha256": annotation_declaration.sha256,
+        "label_source_sha256": label_source_sha256,
+        "label_source_kind": label_source_kind,
+        "annotation_receipt_sha256": (
+            None if independent_artifacts is None else independent_artifacts.receipt_sha256
+        ),
+        "annotation_prediction_export_sha256": (
+            None if independent_artifacts is None else independent_artifacts.predictions_sha256
+        ),
         "registration_source_sha256": registration_source_sha256,
         "exclusion_policy_sha256": exclusion_policy_sha256,
         "registration_method": str(protocol["registration_method"]),
@@ -3620,8 +4274,8 @@ def build_source(
         "planned_stratum_ids": list(planned_stratum_ids),
         "planned_stratum_manifest_sha256": planned_stratum_manifest_sha256,
         "label_hierarchy": {
-            "primary": "final_CT",
-            "secondary": "final_lineage",
+            "primary": label_field_primary,
+            "secondary": label_field_secondary,
             "fine_type_names": list(fine_type_names),
             "broad_type_names": list(broad_type_names),
         },
@@ -3678,13 +4332,17 @@ def build_source(
             "transcript_identity_manifest_sha256": (transcript_identity_hasher.hexdigest()),
         },
         "labels": {
-            "primary": "final_CT",
-            "secondary": "final_lineage",
+            "primary": label_field_primary,
+            "secondary": label_field_secondary,
             "fine_type_names": list(fine_type_names),
             "broad_type_names": list(broad_type_names),
-            "source_sha256": annotation_declaration.sha256,
+            "source_sha256": label_source_sha256,
+            "source_kind": label_source_kind,
+            "receipt_sha256": (
+                None if independent_artifacts is None else independent_artifacts.receipt_sha256
+            ),
             "fine_type_marker_gene_ids": list(fine_marker_genes),
-            "annotation_provenance": protocol["fine_type_annotation_provenance"],
+            "label_target_independence": independence_contract,
         },
         "reference_mode": "simulated_spatially_disjoint_unpaired_rna",
         "reference_pool": {
@@ -3772,6 +4430,7 @@ def build_source(
         "schema": "heir.hest_xenium_cell_qc.v1",
         "study_stage": study_manifest.study_stage,
         "study_manifest_sha256": study_manifest.sha256,
+        "opening_receipt_sha256": opening_receipt_sha256,
         "source_scope": source_scope,
         "locked_donor_outcomes_materialized": (
             study_manifest.study_stage == "confirmatory_morphology"
@@ -3856,7 +4515,7 @@ def build_source(
         "fine_type_marker_exclusion": {
             "gene_ids": list(fine_marker_genes),
             "target_overlap": 0,
-            "annotation_provenance": protocol["fine_type_annotation_provenance"],
+            "label_target_independence": independence_contract,
         },
         "reference_evaluation_balance": reference_evaluation_balance,
         "reference_splits": {
@@ -3900,6 +4559,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--source-output", type=Path, required=True)
     parser.add_argument("--plan-output", type=Path, required=True)
     parser.add_argument("--qc-output", type=Path, required=True)
+    parser.add_argument("--annotation-receipt", type=Path, default=None)
+    parser.add_argument("--annotation-predictions", type=Path, default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--batch-size", type=int, default=64)
     args = parser.parse_args(argv)
@@ -3913,6 +4574,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.source_output,
         args.plan_output,
         args.qc_output,
+        annotation_receipt_path=args.annotation_receipt,
+        annotation_predictions_path=args.annotation_predictions,
         device=args.device,
         batch_size=args.batch_size,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +48,7 @@ def _thresholds() -> MeasurementThresholds:
         mostly_padded_cutoff=0.5,
         maximum_mostly_padded_fraction=0.0,
         minimum_transcript_qv=20.0,
+        required_opposite_pool_guard_um=20.0,
         minimum_median_gene_reliability=0.8,
         minimum_median_program_reliability=0.8,
         minimum_target_basis_ceiling=0.8,
@@ -64,7 +66,7 @@ def _thresholds() -> MeasurementThresholds:
         minimum_locked_donors_per_fine_type=0,
         maximum_reference_evaluation_row_overlap=0,
         maximum_reference_evaluation_block_overlap=0,
-        maximum_reference_evaluation_source_file_overlap=3,
+        same_section_source_overlap_allowed=True,
     )
 
 
@@ -119,6 +121,7 @@ def _source() -> dict[str, np.ndarray]:
         "source_scope": np.asarray("development_donors_only"),
         "study_manifest_sha256": np.asarray("a" * 64),
         "locked_donor_outcomes_materialized": np.asarray(False),
+        "opposite_pool_guard_um": np.asarray(20.0),
         "observation_id": observations,
         "cell_id": np.asarray(["cell-" + value for value in observations]),
         "donor_id": donors,
@@ -160,11 +163,14 @@ def _source() -> dict[str, np.ndarray]:
     }
 
 
-def _evaluate(source: dict[str, np.ndarray]) -> dict[str, object]:
+def _evaluate(
+    source: dict[str, np.ndarray],
+    thresholds: Optional[MeasurementThresholds] = None,
+) -> dict[str, object]:
     return dict(
         evaluate_measurement_gate(
             source,
-            _thresholds(),
+            _thresholds() if thresholds is None else thresholds,
             development_donors=("d1", "d2", "d3"),
             locked_test_donors=("d4",),
             target_variants=VARIANTS,
@@ -289,6 +295,56 @@ def test_measurement_gate_reports_all_required_domains_and_passes() -> None:
     assert report["coverage"]["fraction_planned_biological_coverage_retained"] == 1.0
 
 
+def test_target_selection_uses_only_rows_passing_frozen_qc() -> None:
+    source = _source()
+    failed_rows = np.asarray([0, 8, 16])
+    source["registration_qc_pass"][failed_rows] = False
+    thresholds = replace(
+        _thresholds(),
+        maximum_registration_outlier_fraction=0.13,
+        minimum_reference_cells_per_stratum=3,
+    )
+
+    report = _evaluate(source, thresholds)
+    selection = report["target_selection_receipt"]
+    primary = report["molecular"]["target_variants"][PRIMARY_VARIANT]
+
+    assert report["registration"]["pass"] is True
+    assert selection["development_rows_before_frozen_qc"] == 24
+    assert selection["development_rows_after_frozen_nonmolecular_qc"] == 21
+    assert primary["development_rows_after_frozen_qc_and_target_presence"] == 21
+    assert report["coverage"]["rows_removed"]["registration"] == 3
+
+
+def test_same_section_source_overlap_is_allowed_only_with_disjoint_cells_and_blocks() -> None:
+    report = _evaluate(_source())
+    separation = report["reference_evaluation_separation"]
+
+    assert separation["reference_evaluation_source_file_intersection"] == 3
+    assert separation["same_source_file_overlap_allowed_by_design"] is True
+    assert separation["source_file_overlap_affects_pass"] is False
+    assert separation["reference_evaluation_observation_id_intersection"] == 0
+    assert separation["reference_evaluation_cell_id_intersection"] == 0
+    assert separation["reference_evaluation_block_id_intersection"] == 0
+    assert separation["spatial_separation_verified_by_disjoint_blocks"] is True
+    assert separation["pass"] is True
+    assert report["pass"] is True
+
+
+def test_same_section_separation_requires_the_exact_frozen_physical_guard() -> None:
+    source = _source()
+    source["opposite_pool_guard_um"] = np.asarray(
+        _thresholds().required_opposite_pool_guard_um + np.finfo(np.float64).eps * 128
+    )
+
+    report = _evaluate(source)
+
+    separation = report["reference_evaluation_separation"]
+    assert separation["opposite_pool_guard_matches_frozen_design"] is False
+    assert separation["pass"] is False
+    assert report["pass"] is False
+
+
 def test_measurement_gate_fails_duplicate_transcript_identity() -> None:
     source = _source()
     for key in (
@@ -375,6 +431,27 @@ def test_gene_must_be_reliable_in_minimum_development_donors() -> None:
 def test_program_reliability_is_residualized_and_required_within_fine_type() -> None:
     source = _compact_source()
     source["fine_type_label"] = np.tile(np.asarray(["type_a"] * 4 + ["type_b"] * 4), 3)
+    source["pool_role"] = np.tile(
+        np.asarray(
+            [
+                "reference",
+                "reference",
+                "evaluation",
+                "evaluation",
+                "reference",
+                "reference",
+                "evaluation",
+                "evaluation",
+            ]
+        ),
+        3,
+    )
+    source["block_id"] = np.asarray(
+        [
+            "%s-%s" % (section, role)
+            for section, role in zip(source["section_id"], source["pool_role"])
+        ]
+    )
     for prefix in ("nucleus", "whole_cell"):
         first = np.zeros((24, 2), dtype=np.uint32)
         second = np.zeros_like(first)
@@ -405,7 +482,14 @@ def test_program_reliability_is_residualized_and_required_within_fine_type() -> 
     source["planned_stratum_manifest_sha256"] = np.asarray(
         hashlib.sha256(json.dumps(planned, separators=(",", ":")).encode("utf-8")).hexdigest()
     )
-    report = _evaluate(source)
+    report = _evaluate(
+        source,
+        replace(
+            _thresholds(),
+            minimum_reference_cells_per_stratum=2,
+            minimum_evaluation_cells_per_stratum=2,
+        ),
+    )
     primary = report["molecular"]["target_variants"][PRIMARY_VARIANT]
     pooled = primary["reliability_by_donor"]["d1"]["programs"]["g1_program"]
     assert pooled["spearman_brown_reliability"] > 0.8
@@ -414,6 +498,45 @@ def test_program_reliability_is_residualized_and_required_within_fine_type() -> 
         within["type_a"]["features"]["g1_program"]["donor_macro_spearman_brown_reliability"] == 0.0
     )
     assert primary["ordered_reliable_program_ids"] == []
+
+
+def test_supported_fine_types_require_primary_target_qualified_pool_support() -> None:
+    source = _source()
+    source["fine_type_label"] = np.tile(np.asarray(["type_a", "type_a", "type_b", "type_b"] * 2), 3)
+    type_b_observations = set(
+        source["observation_id"][source["fine_type_label"] == "type_b"].tolist()
+    )
+    keep = np.asarray(
+        [value not in type_b_observations for value in source["transcript_observation_id"]]
+    )
+    for key in (
+        "transcript_id",
+        "transcript_observation_id",
+        "transcript_gene_id",
+        "transcript_qv",
+    ):
+        source[key] = source[key][keep]
+    source["target_variant_membership"] = source["target_variant_membership"][keep]
+    source["target_qc_pass"][source["fine_type_label"] == "type_b"] = False
+
+    report = _evaluate(
+        source,
+        replace(
+            _thresholds(),
+            minimum_reference_cells_per_stratum=2,
+            minimum_evaluation_cells_per_stratum=2,
+            minimum_coverage_fraction=0.5,
+        ),
+    )
+    selection = report["target_selection_receipt"]
+
+    assert report["pass"] is True
+    assert selection["supported_fine_type_ids"] == ["type_a"]
+    assert selection["fine_type_partition_support"]["type_b"]["supported"] is False
+    assert (
+        selection["nonmolecular_precheck_fine_type_partition_support"]["type_b"]["supported"]
+        is True
+    )
 
 
 def test_secondary_whole_cell_failure_cannot_redefine_primary_gate() -> None:
@@ -522,7 +645,7 @@ def test_manifest_threshold_parser_requires_every_explicit_decision() -> None:
             "minimum_locked_donors_per_fine_type",
             "maximum_reference_evaluation_row_overlap",
             "maximum_reference_evaluation_block_overlap",
-            "maximum_reference_evaluation_source_file_overlap",
+            "same_section_source_overlap_allowed",
         }
     }
     coverage = {key: value for key, value in _thresholds().__dict__.items() if key not in decisions}

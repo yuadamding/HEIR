@@ -7,7 +7,7 @@
     "H-MEAS"
   ],
   "git_commit": "",
-  "analysis_plan_sha256": "3a9493d6784eccfdc88abc3b7ecffbdcc5190c1e9afa6dfcae54c59c3166514c",
+  "analysis_plan_sha256": "329d8570b61458f6e7cb88b42e8d382eba928dc39e78ad276324e240cfafb8d2",
   "container_digest": "",
   "dataset": {
     "repository": "MahmoodLab/hest",
@@ -80,11 +80,23 @@
     ]
   },
   "label_target_independence": {
-    "strategy": "conservative_proxy_marker_exclusion_for_measurement_development",
-    "marker_panel_sha256": "f5ecbda147399fe51110aa01df54c9534d1d365e25c8294de5f27ec40e8fd122",
-    "candidate_marker_target_overlap_count": 0,
+    "strategy": "conservative_proxy_marker_exclusion_pending_exact_annotation_provenance",
+    "evidence_kind": "pending",
+    "annotation_receipt_sha256": null,
+    "ordered_annotation_feature_ids": [],
+    "ordered_annotation_feature_ids_sha256": null,
+    "ordered_target_gene_ids": [],
+    "ordered_target_gene_ids_sha256": null,
+    "annotation_target_overlap_count": null,
+    "annotation_training_scope": "unknown_pending_provenance",
+    "annotation_training_donor_ids": [],
+    "annotation_training_donor_ids_sha256": null,
+    "locked_donors_used_for_training": null,
+    "same_cohort_annotation": true,
+    "cross_fitting_method": "pending",
+    "cross_fitting_receipt_sha256": null,
     "establishes_full_target_independence": false,
-    "limitation": "H-MEAS may measure the marker-disjoint candidate panel, but H-CELL remains blocked until exact label-target independence is established."
+    "limitation": "The original final_CT marker-selection and classifier-gene procedure is unavailable; no annotation receipt, exact ordered annotation feature set, or donor-cross-fitting receipt exists, so this protocol cannot authorize H-CELL."
   },
   "randomization": {
     "transcript_split_salt": "heir-hest-gse250346-split-half-v1",
@@ -108,7 +120,7 @@
     "minimum_locked_donors_per_fine_type": 0,
     "maximum_reference_evaluation_row_overlap": 0,
     "maximum_reference_evaluation_block_overlap": 0,
-    "maximum_reference_evaluation_source_file_overlap": 0
+    "same_section_source_overlap_allowed": true
   },
   "decision_thresholds": {
     "maximum_annotation_nucleus_p95_um": 8.0,
@@ -127,6 +139,7 @@
     "mostly_padded_cutoff": 0.5,
     "maximum_mostly_padded_fraction": 0.01,
     "minimum_transcript_qv": 20.0,
+    "required_opposite_pool_guard_um": 54.4,
     "minimum_median_gene_reliability": 0.5,
     "minimum_median_program_reliability": 0.6,
     "minimum_target_basis_ceiling": 0.5,

@@ -32,7 +32,23 @@ from .permutations import (
     donor_type_roi_permutation,
     null_stratum_activity,
 )
-from .power import validate_calibration_receipt
+from .power import (
+    ACTUAL_GATE_ENTRYPOINT,
+    G2_MULTIPLICITY_METHOD,
+    G3_MULTIPLICITY_METHOD,
+    REQUIRED_COMPLETE_GATE_CHECKS,
+    REQUIRED_G3_CONTRAST_PAIRS,
+    REQUIRED_HYPOTHESIS_DECISIONS,
+    REQUIRED_MORPHOLOGY_SOURCE_CONCLUSIONS,
+    REQUIRED_NUISANCE_FAMILIES,
+    REQUIRED_PERMUTATION_TRANSFORMS,
+    canonical_sha256,
+    exact_gate_settings_fingerprint,
+    pending_confirmatory_design_binding,
+    planned_donor_type_support_pattern_sha256,
+    validate_calibration_receipt,
+    validate_confirmatory_design_binding,
+)
 from .residual_targets import correct_residuals, endpoint_covariates
 from .ridge_probe import fit_and_score, target_coordinates
 
@@ -44,6 +60,147 @@ REGIONAL_UNI2H_COMPOSITION_FEATURES = (
     "composition_stromal",
     "composition_endothelial",
 )
+
+
+def _exact_positive_integer(value: object, name: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise ValueError("%s must be an exact positive integer" % name)
+    numeric = float(value)
+    if not np.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+        raise ValueError("%s must be an exact positive integer" % name)
+    return int(numeric)
+
+
+def _familywise_frozen_contrasts(
+    control_internal: Mapping[
+        str,
+        Tuple[
+            float,
+            Mapping[str, float],
+            int,
+            float,
+            Sequence[Mapping[str, object]],
+        ],
+    ],
+    pairs: Mapping[str, tuple[str, str]],
+    *,
+    minimum_delta: float,
+    maximum_p: float,
+) -> Mapping[str, object]:
+    """Exact max-statistic inference for a fully prespecified contrast family."""
+
+    available = {
+        name: (control_internal.get(focal), control_internal.get(comparator))
+        for name, (focal, comparator) in pairs.items()
+    }
+    missing = sorted(
+        name
+        for name, (focal, comparator) in available.items()
+        if focal is None or comparator is None
+    )
+    if missing:
+        return {
+            "tested": False,
+            "pass": False,
+            "missing_contrasts": missing,
+            "multiplicity_method": G3_MULTIPLICITY_METHOD,
+        }
+    effects = {
+        name: paired_donor_effects(focal[1], comparator[1])
+        for name, (focal, comparator) in available.items()
+        if focal is not None and comparator is not None
+    }
+    donors = tuple(sorted(next(iter(effects.values()))))
+    if any(tuple(sorted(values)) != donors for values in effects.values()):
+        raise ValueError("frozen contrast family has inconsistent donor support")
+    matrix = np.asarray(
+        [[effects[name][donor] for donor in donors] for name in pairs], dtype=np.float64
+    )
+    observed = matrix.mean(axis=1)
+    sign_patterns = np.asarray(
+        [
+            [1.0 if (pattern >> index) & 1 else -1.0 for index in range(len(donors))]
+            for pattern in range(1 << len(donors))
+        ],
+        dtype=np.float64,
+    )
+    permuted = matrix @ sign_patterns.T / max(len(donors), 1)
+    maximum_null = np.max(permuted, axis=0)
+    adjusted_p = np.mean(maximum_null[None, :] >= observed[:, None], axis=1)
+    reports = {}
+    for index, name in enumerate(pairs):
+        focal_name, comparator_name = pairs[name]
+        passes = bool(observed[index] >= minimum_delta and adjusted_p[index] <= maximum_p)
+        reports[name] = {
+            "focal_family": focal_name,
+            "comparator_family": comparator_name,
+            "donor_effects": effects[name],
+            "mean_delta_r2": float(observed[index]),
+            "minimum_delta_r2": float(minimum_delta),
+            "familywise_adjusted_p": float(adjusted_p[index]),
+            "maximum_familywise_p": float(maximum_p),
+            "pass": passes,
+        }
+    return {
+        "tested": True,
+        "multiplicity_method": G3_MULTIPLICITY_METHOD,
+        "donors": list(donors),
+        "exact_sign_patterns": int(len(sign_patterns)),
+        "contrasts": reports,
+        "pass": bool(all(report["pass"] for report in reports.values())),
+    }
+
+
+def _classify_morphology_source(
+    *,
+    intrinsic_prespecified: bool,
+    final_inference: bool,
+    familywise_tested: bool,
+    measurement_valid: bool,
+    component_pass: bool,
+    any_source_contrast_positive: bool,
+    nucleus_specific: bool,
+    cell_specific: bool,
+    context_specific: bool,
+    full_vs_context: bool,
+    full_vs_intrinsic: bool,
+) -> str:
+    """Return a fail-closed conclusion from the complete frozen G3 family.
+
+    A missing or exploratory family is not a negative biological result.  A
+    complete family with no positive source contrast reports the prespecified
+    ``no_morphology_specific_information`` outcome; this means no source arm
+    was supported, not that a biological null was proven.
+    """
+
+    if not intrinsic_prespecified or not final_inference:
+        return "not_tested"
+    if not familywise_tested:
+        return "inconclusive"
+    if not measurement_valid:
+        return "inconclusive"
+
+    intrinsic_specific = nucleus_specific or cell_specific
+    if not intrinsic_specific and not context_specific:
+        if any_source_contrast_positive:
+            return "inconclusive"
+        return "no_morphology_specific_information"
+    if not component_pass:
+        return "inconclusive"
+    mixed_information = bool(
+        context_specific and intrinsic_specific and full_vs_context and full_vs_intrinsic
+    )
+    if mixed_information:
+        return "mixed_intrinsic_and_contextual_information"
+    if nucleus_specific and not cell_specific and not context_specific:
+        return "nucleus_dominant"
+    if cell_specific and not nucleus_specific and not context_specific:
+        return "cell_dominant"
+    if context_specific and not nucleus_specific and not cell_specific:
+        return "context_dominant"
+    return "multiple_sources_without_incremental_combination"
 
 
 def _disease_adjusted_pair(
@@ -297,6 +454,7 @@ def _evaluate_permutation_null(
     alphas: Sequence[float],
     permutation_seeds: Sequence[int],
     total_permutations: int,
+    permutations_per_seed: Optional[int] = None,
     minimum_support: int,
     minimum_shuffle_delta: float,
     maximum_permutation_p: float,
@@ -312,6 +470,15 @@ def _evaluate_permutation_null(
     seeds = tuple(sorted(set(int(value) for value in permutation_seeds)))
     if not seeds or total_permutations <= 0:
         raise ValueError("permutation pool needs seeds and a positive size")
+    if permutations_per_seed is not None:
+        if permutations_per_seed < 1 or permutations_per_seed * len(seeds) != total_permutations:
+            raise ValueError("permutation pool must preserve the frozen count in every seed stream")
+        target_seed_counts = {seed: int(permutations_per_seed) for seed in seeds}
+    else:
+        quotient, remainder = divmod(total_permutations, len(seeds))
+        target_seed_counts = {
+            seed: quotient + int(index < remainder) for index, seed in enumerate(seeds)
+        }
     rank_grid = tuple(sorted(set(int(value) for value in ranks)))
     alpha_grid = tuple(sorted(set(float(value) for value in alphas)))
     fixed_model = (
@@ -327,11 +494,13 @@ def _evaluate_permutation_null(
     seed_cross_block = {seed: [] for seed in seeds}
     seen = set()
     pool_hasher = hashlib.sha256()
+    attempts_by_seed = {seed: 0 for seed in seeds}
     attempt = 0
     maximum_attempts = max(total_permutations * 500, 1000)
     while len(values) < total_permutations and attempt < maximum_attempts:
-        seed = seeds[attempt % len(seeds)]
-        stream_index = attempt // len(seeds)
+        seed = next(value for value in seeds if seed_counts[value] < target_seed_counts[value])
+        stream_index = attempts_by_seed[seed]
+        attempts_by_seed[seed] += 1
         local_seed = seed + stream_index * 104729
         attempt += 1
         if null_kind == "local_within_roi":
@@ -396,6 +565,8 @@ def _evaluate_permutation_null(
         raise ValueError(
             "%s cannot generate the prespecified number of unique active permutations" % null_kind
         )
+    if seed_counts != target_seed_counts:
+        raise AssertionError("permutation seed streams differ from their frozen counts")
     array = np.asarray(values, dtype=np.float64)
     empirical_p = float((1 + np.sum(array >= matched)) / (len(array) + 1))
     minimum_changed = float(min(changed_fractions))
@@ -410,6 +581,7 @@ def _evaluate_permutation_null(
     seed_rows = [
         {
             "seed": seed,
+            "required_unique_permutations": target_seed_counts[seed],
             "generated_unique_permutations": seed_counts[seed],
             "minimum_shuffled_fraction": (
                 float(min(seed_changed[seed])) if seed_changed[seed] else None
@@ -497,12 +669,24 @@ def evaluate_morphology_ridge_gate(
     donor_bootstrap_seed: int = 1701,
     prespecified_fixed_hyperparameters: bool = False,
     calibration_receipt: Optional[Mapping[str, object]] = None,
+    confirmatory_analysis_plan_sha256: Optional[str] = None,
+    confirmatory_design_binding: Optional[Mapping[str, object]] = None,
+    synthetic_calibration_mode: bool = False,
     device: str = "auto",
 ) -> Mapping[str, object]:
     """Run a locked-donor gate without treating observations as replicates."""
 
     development.validate_compatible(locked_test)
-    calibration = validate_calibration_receipt(calibration_receipt, required=final_inference)
+    if synthetic_calibration_mode and not final_inference:
+        raise ValueError("synthetic calibration must execute the final-inference code path")
+    synthetic_cohort = (
+        development.cohort_id == "SYNTHETIC_CALIBRATION"
+        and locked_test.cohort_id == "SYNTHETIC_CALIBRATION"
+    )
+    if synthetic_calibration_mode != synthetic_cohort:
+        raise ValueError(
+            "synthetic calibration mode accepts only explicitly synthetic calibration artifacts"
+        )
     if development.cohort_id == "HESCAPE" or locked_test.cohort_id == "HESCAPE":
         raise ValueError(
             "HESCAPE is development-only; reserved HEST donors cannot enter a locked gate"
@@ -517,6 +701,16 @@ def evaluate_morphology_ridge_gate(
     intrinsic_prespecified = "H-INTRINSIC" in development.hypothesis_ids
     regional = "H-REGIONAL" in development.hypothesis_ids
     regional_uni2h = regional and development.encoder_name == "MahmoodLab/UNI2-h"
+    family_pairs = paired_feature_families(development, locked_test)
+    if final_inference and local_context_hypothesis:
+        missing_nuisance = [
+            family for family in REQUIRED_NUISANCE_FAMILIES if family_pairs.get(family) is None
+        ]
+        if missing_nuisance:
+            raise ValueError(
+                "final H-CELL inference omits frozen nuisance families: %s"
+                % ", ".join(missing_nuisance)
+            )
     required_locked_donors = (
         minimum_locked_donors if minimum_locked_donors is not None else (4 if regional_uni2h else 5)
     )
@@ -526,13 +720,136 @@ def evaluate_morphology_ridge_gate(
         raise ValueError("too few development donors for a morphology decision")
     if len(locked_donors) < required_locked_donors:
         raise ValueError("too few locked donors for the prespecified test")
-    seeds = tuple(sorted(set(int(value) for value in permutation_seeds)))
-    if permutations_per_seed < 1 or not seeds:
+    development_type_support = {
+        development.type_names[type_index]: sum(
+            np.count_nonzero(
+                (development.donor_ids == donor) & (development.type_labels == type_index)
+            )
+            >= minimum_support
+            for donor in development_donors
+        )
+        for type_index in range(len(development.type_names))
+    }
+    locked_type_support = {
+        locked_test.type_names[type_index]: sum(
+            np.count_nonzero(
+                (locked_test.donor_ids == donor) & (locked_test.type_labels == type_index)
+            )
+            >= minimum_support
+            for donor in locked_donors
+        )
+        for type_index in range(len(locked_test.type_names))
+    }
+    if any(value < minimum_development_donors for value in development_type_support.values()):
+        raise ValueError("a frozen fine type lacks the required development-donor support")
+    if any(0 < value < required_locked_donors for value in locked_type_support.values()):
+        raise ValueError(
+            "an under-supported locked fine type entered the evaluated analysis population"
+        )
+    design_binding = (
+        validate_confirmatory_design_binding(confirmatory_design_binding)
+        if confirmatory_design_binding is not None
+        else pending_confirmatory_design_binding()
+    )
+    if design_binding.get("status") == "complete":
+        topology_complete = design_binding["planned_stratum_topology_status"] == "complete"
+        bound_planned_strata = tuple(design_binding["ordered_planned_stratum_ids"])
+        bound_development_donors = set(design_binding["development_donor_ids"])
+        bound_locked_donors = set(design_binding["locked_test_donor_ids"])
+        bound_development_strata = tuple(
+            value
+            for value in bound_planned_strata
+            if value.split("|", 1)[0] in bound_development_donors
+        )
+        bound_locked_strata = tuple(
+            value for value in bound_planned_strata if value.split("|", 1)[0] in bound_locked_donors
+        )
+
+        def observed_strata(artifact: MorphologyRidgeDatasetArtifact) -> set[str]:
+            return {
+                "%s|%s|%s" % (donor, section, artifact.type_names[int(type_index)])
+                for donor, section, type_index in zip(
+                    artifact.donor_ids,
+                    artifact.section_ids,
+                    artifact.type_labels,
+                )
+            }
+
+        development_observed_strata = observed_strata(development)
+        locked_observed_strata = observed_strata(locked_test)
+        development_coverage = len(development_observed_strata) / len(
+            development.planned_stratum_ids
+        )
+        locked_coverage = len(locked_observed_strata) / len(locked_test.planned_stratum_ids)
+        if (
+            set(design_binding["development_donor_ids"]) != set(development_donors)
+            or set(design_binding["locked_test_donor_ids"]) != set(locked_donors)
+            or list(design_binding["ordered_supported_fine_type_ids"])
+            != list(development.type_names)
+            or development.type_names != locked_test.type_names
+            or design_binding["target_gene_count"] != len(development.gene_ids)
+            or list(design_binding["ordered_target_gene_ids"]) != list(development.gene_ids)
+            or design_binding["target_panel_sha256"] != canonical_sha256(list(development.gene_ids))
+            or development.gene_ids != locked_test.gene_ids
+            or design_binding["measurement_receipt_sha256"]
+            != development.measurement_receipt_sha256
+            or design_binding["measurement_receipt_sha256"]
+            != locked_test.measurement_receipt_sha256
+            or design_binding["planned_donor_type_support_pattern_sha256"]
+            != planned_donor_type_support_pattern_sha256(
+                design_binding["development_donor_ids"],
+                design_binding["locked_test_donor_ids"],
+                design_binding["ordered_supported_fine_type_ids"],
+            )
+            or (
+                topology_complete
+                and (
+                    tuple(development.planned_stratum_ids) != bound_development_strata
+                    or tuple(locked_test.planned_stratum_ids) != bound_locked_strata
+                    or development.planned_stratum_manifest_sha256
+                    != design_binding["planned_stratum_manifest_sha256"]
+                    or locked_test.planned_stratum_manifest_sha256
+                    != design_binding["planned_stratum_manifest_sha256"]
+                    or not development_observed_strata <= set(development.planned_stratum_ids)
+                    or not locked_observed_strata <= set(locked_test.planned_stratum_ids)
+                    or not np.isclose(
+                        float(development.coverage_audit.get("retained_fraction", -1.0)),
+                        development_coverage,
+                    )
+                    or not np.isclose(
+                        float(locked_test.coverage_audit.get("retained_fraction", -1.0)),
+                        locked_coverage,
+                    )
+                    or any(
+                        int(value) != minimum_support
+                        for value in design_binding["planned_stratum_minimum_evaluation_cells"]
+                    )
+                )
+            )
+        ):
+            raise ValueError("morphology artifacts differ from the confirmatory design binding")
+        if (final_inference or synthetic_calibration_mode) and not topology_complete:
+            raise ValueError(
+                "final morphology inference requires a complete donor/section/type topology"
+            )
+    elif final_inference or synthetic_calibration_mode:
+        raise ValueError("final morphology inference requires a completed design binding")
+    if not permutation_seeds:
         raise ValueError("ridge gate requires a nonempty permutation pool")
+    normalized_seed_stream = tuple(
+        _exact_positive_integer(value, "permutation seed") for value in permutation_seeds
+    )
+    if len(set(normalized_seed_stream)) != len(normalized_seed_stream):
+        raise ValueError("ridge gate permutation seeds must be unique")
+    seeds = tuple(sorted(normalized_seed_stream))
+    permutations_per_seed = _exact_positive_integer(permutations_per_seed, "permutations_per_seed")
+    minimum_final_permutations = _exact_positive_integer(
+        minimum_final_permutations, "minimum_final_permutations"
+    )
     requested_permutations = (
-        int(total_permutations)
+        _exact_positive_integer(total_permutations, "total_permutations")
         if total_permutations is not None
-        else int(permutations_per_seed) * len(seeds)
+        else permutations_per_seed * len(seeds)
     )
     if requested_permutations < 100:
         raise ValueError("ridge gate requires at least 100 total permutations")
@@ -541,13 +858,26 @@ def evaluate_morphology_ridge_gate(
             "final morphology inference requires at least %d unique permutations"
             % minimum_final_permutations
         )
-    if (
-        not ranks
-        or not alphas
-        or any(value <= 0 for value in (*ranks, *alphas))
-        or any(int(value) > development.molecular_targets.shape[1] for value in ranks)
+    if final_inference and requested_permutations != permutations_per_seed * len(seeds):
+        raise ValueError(
+            "final morphology inference requires the frozen count in every seed stream"
+        )
+    if not ranks or not alphas:
+        raise ValueError("ridge rank and alpha grids must be positive")
+    ranks = tuple(_exact_positive_integer(value, "ridge rank") for value in ranks)
+    if len(set(ranks)) != len(ranks) or any(
+        value > development.molecular_targets.shape[1] for value in ranks
+    ):
+        raise ValueError("ridge rank grid is invalid for the frozen target panel")
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, float, np.integer, np.floating))
+        or not np.isfinite(float(value))
+        or float(value) <= 0.0
+        for value in alphas
     ):
         raise ValueError("ridge rank and alpha grids must be positive")
+    alphas = tuple(float(value) for value in alphas)
     if not (0.0 < minimum_null_shuffled_fraction <= 1.0) or not (
         0.0 < minimum_strata_coverage <= 1.0
     ):
@@ -558,6 +888,69 @@ def evaluate_morphology_ridge_gate(
         0.0 < minimum_mask_implementation_pass_fraction <= 1.0
     ):
         raise ValueError("G3 direct-contrast thresholds must be in (0, 1]")
+    expected_calibration_settings = {
+        "actual_gate_entrypoint": ACTUAL_GATE_ENTRYPOINT,
+        "actual_gate_report_schema": MORPHOLOGY_RIDGE_REPORT_SCHEMA,
+        "confirmatory_analysis_plan_sha256": confirmatory_analysis_plan_sha256,
+        "confirmatory_design_binding": dict(design_binding),
+        "development_donors": len(development_donors),
+        "evaluation_donors": len(locked_donors),
+        "crop_family_ids": list(development.crop_ids),
+        "nuisance_families": list(REQUIRED_NUISANCE_FAMILIES),
+        "g2_multiplicity_method": G2_MULTIPLICITY_METHOD,
+        "g2_nuisance_family_ids": list(REQUIRED_NUISANCE_FAMILIES),
+        "g3_multiplicity_method": G3_MULTIPLICITY_METHOD,
+        "g3_contrast_pairs": dict(REQUIRED_G3_CONTRAST_PAIRS),
+        "allowed_morphology_source_conclusions": list(REQUIRED_MORPHOLOGY_SOURCE_CONCLUSIONS),
+        "target_rank_grid": [int(value) for value in ranks],
+        "ridge_penalty_grid": [float(value) for value in alphas],
+        "reference_split_ids": list(development.reference_split_ids),
+        "permutation_transforms": list(REQUIRED_PERMUTATION_TRANSFORMS),
+        "permutation_seeds": list(seeds),
+        "permutations_per_seed": int(permutations_per_seed),
+        "permutations_per_null": requested_permutations,
+        "maximum_permutation_p": float(maximum_permutation_p),
+        "gate_parameters": {
+            "minimum_final_permutations": int(minimum_final_permutations),
+            "minimum_support": int(minimum_support),
+            "minimum_development_donors": int(minimum_development_donors),
+            "minimum_locked_donors": int(required_locked_donors),
+            "minimum_macro_r2": float(minimum_macro_r2),
+            "minimum_shuffle_delta": float(minimum_shuffle_delta),
+            "minimum_coordinate_delta": float(minimum_coordinate_delta),
+            "minimum_stain_delta": float(minimum_stain_delta),
+            "maximum_direct_contrast_p": float(maximum_direct_contrast_p),
+            "minimum_mask_implementation_pass_fraction": float(
+                minimum_mask_implementation_pass_fraction
+            ),
+            "minimum_null_shuffled_fraction": float(minimum_null_shuffled_fraction),
+            "minimum_strata_coverage": float(minimum_strata_coverage),
+            "maximum_permutation_p": float(maximum_permutation_p),
+            "minimum_positive_strata_fraction": float(minimum_positive_strata_fraction),
+            "minimum_expression_error_reduction": float(minimum_expression_error_reduction),
+            "minimum_basis_ceiling_r2": float(minimum_basis_ceiling_r2),
+            "donor_bootstrap_iterations": int(donor_bootstrap_iterations),
+            "donor_bootstrap_seed": int(donor_bootstrap_seed),
+            "prespecified_fixed_hyperparameters": bool(prespecified_fixed_hyperparameters),
+        },
+        "complete_gate_check_ids": list(REQUIRED_COMPLETE_GATE_CHECKS),
+        "hypothesis_decision_ids": list(REQUIRED_HYPOTHESIS_DECISIONS),
+        "final_inference": True,
+    }
+    synthetic_settings_sha256 = (
+        exact_gate_settings_fingerprint(expected_calibration_settings)
+        if synthetic_calibration_mode
+        else None
+    )
+    calibration = validate_calibration_receipt(
+        calibration_receipt,
+        required=bool(final_inference and not synthetic_calibration_mode),
+        expected_settings=(
+            None
+            if synthetic_calibration_mode or not final_inference
+            else expected_calibration_settings
+        ),
+    )
 
     include_composition = regional and bool(development.composition_feature_names)
     rank, alpha, selection = select_hyperparameters(
@@ -654,7 +1047,6 @@ def evaluate_morphology_ridge_gate(
         disease_adjusted_rows = rows
         disease_adjusted_donors = donor_macro
 
-    family_pairs = paired_feature_families(development, locked_test)
     control_internal: Dict[
         str,
         Tuple[
@@ -757,6 +1149,7 @@ def evaluate_morphology_ridge_gate(
         alphas=alphas,
         permutation_seeds=seeds,
         total_permutations=requested_permutations,
+        permutations_per_seed=(int(permutations_per_seed) if final_inference else None),
         minimum_support=minimum_support,
         minimum_shuffle_delta=minimum_shuffle_delta,
         maximum_permutation_p=maximum_permutation_p,
@@ -774,6 +1167,7 @@ def evaluate_morphology_ridge_gate(
         alphas=alphas,
         permutation_seeds=seeds,
         total_permutations=requested_permutations,
+        permutations_per_seed=(int(permutations_per_seed) if final_inference else None),
         minimum_support=minimum_support,
         minimum_shuffle_delta=minimum_shuffle_delta,
         maximum_permutation_p=maximum_permutation_p,
@@ -838,6 +1232,23 @@ def evaluate_morphology_ridge_gate(
         for family in nuisance_families
         if family in control_internal
     }
+    g2_nuisance_closed_tests = {}
+    for family, (family_macro, family_donors, *_) in available_nuisance.items():
+        family_effects = paired_donor_effects(donor_macro, family_donors)
+        family_randomization = exact_paired_randomization(family_effects)
+        g2_nuisance_closed_tests[family] = {
+            "matched_minus_nuisance_macro_r2": float(matched - family_macro),
+            "donor_effects": family_effects,
+            "exact_donor_paired_randomization": family_randomization,
+            "pass": bool(
+                matched - family_macro >= minimum_coordinate_delta
+                and family_randomization["one_sided_p"] <= maximum_direct_contrast_p
+            ),
+        }
+    g2_closed_test_pass = bool(
+        g2_nuisance_closed_tests
+        and all(report["pass"] for report in g2_nuisance_closed_tests.values())
+    )
     best_nuisance_name = sorted(
         available_nuisance, key=lambda family: (-available_nuisance[family][0], family)
     )[0]
@@ -912,6 +1323,38 @@ def evaluate_morphology_ridge_gate(
         minimum_pass_fraction=minimum_mask_implementation_pass_fraction,
         bootstrap_seed=donor_bootstrap_seed + 12,
         bootstrap_iterations=donor_bootstrap_iterations,
+    )
+    frozen_contrast_pairs = {
+        name: (pair[0], pair[1]) for name, pair in REQUIRED_G3_CONTRAST_PAIRS.items()
+    }
+    frozen_contrast_family = _familywise_frozen_contrasts(
+        control_internal,
+        frozen_contrast_pairs,
+        minimum_delta=minimum_coordinate_delta,
+        maximum_p=maximum_direct_contrast_p,
+    )
+    frozen_reports = frozen_contrast_family.get("contrasts", {})
+    any_source_contrast_positive = any(
+        isinstance(report, Mapping) and report.get("pass") is True
+        for report in frozen_reports.values()
+    )
+
+    def family_pass(prefix: str) -> bool:
+        selected = [report for name, report in frozen_reports.items() if name.startswith(prefix)]
+        return bool(selected and all(report.get("pass") is True for report in selected))
+
+    nucleus_specific = family_pass("nucleus_")
+    cell_specific = family_pass("cell_")
+    context_specific = family_pass("context_")
+    full_vs_context = family_pass("full_context_vs_target_removed_")
+    full_vs_nucleus = family_pass("full_context_vs_nucleus_")
+    full_vs_cell = family_pass("full_context_vs_cell_")
+    intrinsic_specific = nucleus_specific or cell_specific
+    full_vs_intrinsic = bool(
+        (not nucleus_specific or full_vs_nucleus) and (not cell_specific or full_vs_cell)
+    )
+    mixed_information = bool(
+        context_specific and intrinsic_specific and full_vs_context and full_vs_intrinsic
     )
     local_null_effects = paired_donor_effects(donor_macro, local_null["donor_null_mean_r2"])
     block_null_effects = paired_donor_effects(donor_macro, block_null["donor_null_mean_r2"])
@@ -1070,6 +1513,27 @@ def evaluate_morphology_ridge_gate(
         float(development.coverage_audit.get("retained_fraction", 0.0)),
         float(locked_test.coverage_audit.get("retained_fraction", 0.0)),
     )
+    locked_measurement_audit = locked_test.coverage_audit.get("locked_measurement_audit")
+    locked_support_audit = locked_test.coverage_audit.get("locked_support_audit")
+    if isinstance(locked_support_audit, Mapping):
+        evaluated_fine_types = [
+            fine_type
+            for fine_type in locked_test.type_names
+            if any(
+                isinstance(row, Mapping)
+                and row.get("evaluable") is True
+                and str(key).endswith("|" + fine_type)
+                for key, row in locked_support_audit.items()
+            )
+        ]
+    else:
+        evaluated_fine_types = list(locked_test.type_names)
+    unevaluable_fine_types = [
+        fine_type
+        for fine_type in locked_test.type_names
+        if fine_type not in set(evaluated_fine_types)
+    ]
+    best_nuisance_randomization = exact_paired_randomization(best_nuisance_effects)
 
     checks = {
         "primary_claim_is_explicit_local_context": local_context_hypothesis,
@@ -1102,8 +1566,7 @@ def evaluate_morphology_ridge_gate(
         "adequate_basis_ceiling": ceiling_r2 >= minimum_basis_ceiling_r2,
         "rank_direction_stable": all(row["macro_r2"] > 0 for row in rank_sensitivity),
         "reference_split_direction_stable": all(
-            row["macro_r2"] >= minimum_macro_r2
-            for row in reference_split_sensitivity
+            row["macro_r2"] >= minimum_macro_r2 for row in reference_split_sensitivity
         ),
         "planned_coverage_retained": coverage_fraction >= minimum_strata_coverage,
         "disease_inclusive_endpoint_reported": True,
@@ -1123,6 +1586,8 @@ def evaluate_morphology_ridge_gate(
                 ),
             }
         )
+    if local_context_hypothesis:
+        checks["exact_donor_paired_main_effect"] = g2_closed_test_pass
     if final_inference:
         checks["source_coverage_audit_available"] = bool(
             development.coverage_audit and locked_test.coverage_audit
@@ -1130,9 +1595,34 @@ def evaluate_morphology_ridge_gate(
         checks["reference_evaluation_balance_passes"] = all(
             row["balance_pass"] for row in reference_split_sensitivity
         )
+        checks["locked_measurement_audit_passes"] = bool(
+            isinstance(locked_measurement_audit, Mapping)
+            and locked_measurement_audit.get("pass") is True
+        )
     component_pass = all(checks.values())
-    nucleus_level = bool(intrinsic_prespecified and nucleus_contrast["tested"])
-    cell_intrinsic_tested = bool(intrinsic_prespecified and cell_contrast["tested"])
+    familywise_tested = bool(frozen_contrast_family.get("tested") is True)
+    measurement_valid = bool(
+        not final_inference
+        or (
+            isinstance(locked_measurement_audit, Mapping)
+            and locked_measurement_audit.get("pass") is True
+        )
+    )
+    morphology_conclusion = _classify_morphology_source(
+        intrinsic_prespecified=intrinsic_prespecified,
+        final_inference=final_inference,
+        familywise_tested=familywise_tested,
+        measurement_valid=measurement_valid,
+        component_pass=component_pass,
+        any_source_contrast_positive=any_source_contrast_positive,
+        nucleus_specific=nucleus_specific,
+        cell_specific=cell_specific,
+        context_specific=context_specific,
+        full_vs_context=full_vs_context,
+        full_vs_intrinsic=full_vs_intrinsic,
+    )
+    nucleus_level = bool(intrinsic_prespecified and familywise_tested)
+    cell_intrinsic_tested = bool(intrinsic_prespecified and familywise_tested)
     regional_endpoints = None
     if regional:
         regional_endpoints = {
@@ -1170,16 +1660,46 @@ def evaluate_morphology_ridge_gate(
     checks["every_seed_separates_shuffle"] = checks["every_required_null_separates"]
     return {
         "schema_version": MORPHOLOGY_RIDGE_REPORT_SCHEMA,
-        "status": "component_pass" if component_pass else "stop_or_pivot",
+        "status": (
+            "synthetic_calibration_component_pass"
+            if synthetic_calibration_mode and component_pass
+            else (
+                "synthetic_calibration_component_fail"
+                if synthetic_calibration_mode
+                else ("component_pass" if component_pass else "stop_or_pivot")
+            )
+        ),
         "component_pass": component_pass,
         "authorizes_full_heir": False,
         "final_inference": final_inference,
+        "synthetic_calibration_execution": synthetic_calibration_mode,
+        "scientific_authorization_suppressed": synthetic_calibration_mode,
+        "calibration_exact_gate_settings": (
+            expected_calibration_settings if synthetic_calibration_mode else None
+        ),
+        "calibration_exact_gate_settings_sha256": synthetic_settings_sha256,
         "calibration": calibration,
         "nucleus_hypothesis_tested": nucleus_level,
         "cell_intrinsic_hypothesis_tested": cell_intrinsic_tested,
         "local_context_hypothesis_tested": local_context_hypothesis,
         "regional_hypothesis_tested": regional,
         "scientific_scope": development.scientific_scope,
+        "evidence_scope": (
+            "synthetic_calibration_only"
+            if synthetic_calibration_mode
+            else (
+                "development_only_exploratory" if regional else "within_GSE250346_internal_go_no_go"
+            )
+        ),
+        "authorizes_population_inference": False,
+        "authorizes_external_generalization": False,
+        "authorizes_validated_regional_association": False,
+        "encoder_hierarchy": {
+            "primary": "MahmoodLab/UNI2-h",
+            "replication_1": "bioptimus/H-optimus-1",
+            "replication_2": "bioptimus/H0-mini",
+            "hierarchy_frozen_before_locked_outcomes": True,
+        },
         "crop_source_not_inferred_from_observation_level": True,
         "hypothesis_decisions": {
             "G2_local_context": {
@@ -1188,51 +1708,82 @@ def evaluate_morphology_ridge_gate(
                 "primary_crop_id": development.primary_crop_id,
                 "primary_crop_role": development.crop_roles[primary_crop_index],
                 "primary_crop_comparison_family": primary_crop_family,
+                "multiplicity_method": G2_MULTIPLICITY_METHOD,
+                "nuisance_family_tests": g2_nuisance_closed_tests,
             },
             "G3_nucleus_intrinsic": {
                 **nucleus_contrast,
+                "legacy_strongest_comparator_diagnostic": nucleus_contrast,
+                "familywise_frozen_contrasts": {
+                    name: report
+                    for name, report in frozen_reports.items()
+                    if name.startswith("nucleus_")
+                },
                 "tested": nucleus_level,
                 "pass": bool(
-                    nucleus_level
-                    and nucleus_contrast.get("pass") is True
-                    and final_inference
-                    and component_pass
+                    nucleus_level and nucleus_specific and final_inference and component_pass
                 ),
-                "requires_direct_context_contrast": True,
+                "requires_matched_artifact_contrasts": True,
             },
             "G3_cell_intrinsic": {
                 **cell_contrast,
+                "legacy_strongest_comparator_diagnostic": cell_contrast,
+                "familywise_frozen_contrasts": {
+                    name: report
+                    for name, report in frozen_reports.items()
+                    if name.startswith("cell_")
+                },
                 "tested": cell_intrinsic_tested,
                 "pass": bool(
-                    cell_intrinsic_tested
-                    and cell_contrast.get("pass") is True
-                    and final_inference
-                    and component_pass
+                    cell_intrinsic_tested and cell_specific and final_inference and component_pass
                 ),
-                "requires_direct_context_contrast": True,
+                "requires_matched_artifact_contrasts": True,
             },
             "G3_context_only": {
                 **context_contrast,
-                "tested": bool(intrinsic_prespecified and context_contrast["tested"]),
+                "legacy_strongest_comparator_diagnostic": context_contrast,
+                "familywise_frozen_contrasts": {
+                    name: report
+                    for name, report in frozen_reports.items()
+                    if name.startswith("context_")
+                },
+                "tested": bool(intrinsic_prespecified and familywise_tested),
                 "pass": bool(
                     intrinsic_prespecified
-                    and context_contrast.get("pass") is True
+                    and context_specific
                     and final_inference
                     and component_pass
                 ),
             },
+            "G3_mixed_intrinsic_context": {
+                "tested": bool(intrinsic_prespecified and familywise_tested),
+                "pass": bool(
+                    intrinsic_prespecified
+                    and mixed_information
+                    and final_inference
+                    and component_pass
+                ),
+                "full_context_vs_nucleus_pass": full_vs_nucleus,
+                "full_context_vs_cell_pass": full_vs_cell,
+                "full_context_vs_intrinsic_pass": full_vs_intrinsic,
+                "full_context_vs_context_pass": full_vs_context,
+            },
         },
+        "frozen_morphology_contrast_family": frozen_contrast_family,
+        "morphology_source_conclusion": morphology_conclusion,
         "authorizes_nucleus_intrinsic_claim": bool(
             nucleus_level
-            and nucleus_contrast.get("pass") is True
+            and nucleus_specific
             and final_inference
             and component_pass
+            and not synthetic_calibration_mode
         ),
         "authorizes_cell_intrinsic_claim": bool(
             cell_intrinsic_tested
-            and cell_contrast.get("pass") is True
+            and cell_specific
             and final_inference
             and component_pass
+            and not synthetic_calibration_mode
         ),
         "reason_full_heir_remains_blocked": (
             "HESCAPE pseudo-spots test regional image-to-expression signal, not one nucleus "
@@ -1254,6 +1805,9 @@ def evaluate_morphology_ridge_gate(
             "measurement_source_sha256": development.measurement_source_sha256,
             "ordered_gene_ids": list(development.gene_ids),
             "supported_fine_type_ids": list(development.type_names),
+            "evaluated_locked_fine_type_ids": evaluated_fine_types,
+            "unevaluable_locked_fine_type_ids": unevaluable_fine_types,
+            "claim_applies_to_all_h_meas_selected_fine_types": not unevaluable_fine_types,
         },
         "development_selection": selection,
         "baseline_hyperparameter_selection": {
@@ -1350,7 +1904,7 @@ def evaluate_morphology_ridge_gate(
             "matched_minus_stain": (
                 exact_paired_randomization(stain_effects) if stain_macro is not None else None
             ),
-            "matched_minus_best_nuisance": exact_paired_randomization(best_nuisance_effects),
+            "matched_minus_best_nuisance": best_nuisance_randomization,
         },
         "donor_dominance": {
             "matched": dominance,
@@ -1361,6 +1915,8 @@ def evaluate_morphology_ridge_gate(
             "matched_minus_best_nuisance": donor_dominance(best_nuisance_effects),
         },
         "coverage": {
+            "development_donor_support_by_fine_type": development_type_support,
+            "locked_donor_support_by_fine_type": locked_type_support,
             "locked_donor_type": coverage,
             "locked_donor_section_type": section_coverage,
             "locked_observations": len(locked_test.observation_ids),
@@ -1448,6 +2004,8 @@ def evaluate_morphology_ridge_gate(
             "nuisance_fit_weighting": "fine_type_specific_equal_donor_development_only",
             "molecular_basis_weighting": "equal_donor_within_fine_type_development_only",
             "gate_aggregation": "donor_equal_then_type_equal_with_macro_stratum_companion",
+            "section_batch_indicator_scope": "development_folds_only",
+            "unseen_locked_section_or_batch_fully_adjusted": False,
             "shared_molecular_basis_across_control_models": True,
             "prespecified_fixed_hyperparameters": prespecified_fixed_hyperparameters,
             "requested_unique_permutations_per_null": requested_permutations,

@@ -123,7 +123,9 @@
       "properties": {
         "maximum_reference_evaluation_absolute_smd": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
         "maximum_reference_evaluation_categorical_total_variation": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-        "minimum_locked_donors_per_fine_type": {"type": "integer", "minimum": 0}
+        "minimum_locked_donors_per_fine_type": {"type": "integer", "minimum": 0},
+        "minimum_reference_cells_per_donor_section_type": {"type": "integer", "minimum": 1},
+        "minimum_evaluation_cells_per_donor_section_type": {"type": "integer", "minimum": 1}
       }
     },
     "decision_thresholds": {"type": "object", "minProperties": 1},
@@ -177,6 +179,52 @@
         "prespecified_fixed_hyperparameters": {"type": "boolean"}
       }
     },
+    "locked_measurement_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_timing",
+        "selection_changes_forbidden",
+        "coverage_denominator",
+        "maximum_annotation_nucleus_p95_um",
+        "maximum_annotation_cell_p95_um",
+        "maximum_cell_nucleus_p95_um",
+        "maximum_registration_nucleus_diameter_ratio_p95",
+        "maximum_registration_nearest_neighbor_ratio_p95",
+        "maximum_registration_outlier_fraction",
+        "maximum_nucleus_outside_cell_fraction",
+        "minimum_nucleus_cell_area_ratio",
+        "maximum_nucleus_cell_area_ratio",
+        "maximum_segmentation_outlier_fraction",
+        "maximum_crop_padding_p95",
+        "mostly_padded_cutoff",
+        "maximum_mostly_padded_fraction",
+        "minimum_within_fine_type_reliability",
+        "minimum_reliability_rows",
+        "minimum_locked_donor_type_reliability_fraction"
+      ],
+      "properties": {
+        "audit_timing": {"const": "after_confirmatory_lock_before_morphology_inference"},
+        "selection_changes_forbidden": {"const": true},
+        "coverage_denominator": {"const": "all_h_meas_supported_fine_types_and_locked_donors"},
+        "maximum_annotation_nucleus_p95_um": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_annotation_cell_p95_um": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_cell_nucleus_p95_um": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_registration_nucleus_diameter_ratio_p95": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_registration_nearest_neighbor_ratio_p95": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_registration_outlier_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximum_nucleus_outside_cell_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_nucleus_cell_area_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximum_nucleus_cell_area_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximum_segmentation_outlier_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximum_crop_padding_p95": {"type": "number", "minimum": 0, "maximum": 1},
+        "mostly_padded_cutoff": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximum_mostly_padded_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_within_fine_type_reliability": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_reliability_rows": {"type": "integer", "minimum": 2},
+        "minimum_locked_donor_type_reliability_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
     "lock_protection": {
       "type": "object",
       "additionalProperties": false,
@@ -202,15 +250,53 @@
       "additionalProperties": false,
       "required": [
         "strategy",
-        "marker_panel_sha256",
-        "candidate_marker_target_overlap_count",
+        "evidence_kind",
+        "annotation_receipt_sha256",
+        "ordered_annotation_feature_ids",
+        "ordered_annotation_feature_ids_sha256",
+        "ordered_target_gene_ids",
+        "ordered_target_gene_ids_sha256",
+        "annotation_target_overlap_count",
+        "annotation_training_scope",
+        "annotation_training_donor_ids",
+        "annotation_training_donor_ids_sha256",
+        "locked_donors_used_for_training",
+        "same_cohort_annotation",
+        "cross_fitting_method",
+        "cross_fitting_receipt_sha256",
         "establishes_full_target_independence",
         "limitation"
       ],
       "properties": {
         "strategy": {"type": "string", "minLength": 1},
-        "marker_panel_sha256": {"$ref": "#/$defs/sha256"},
-        "candidate_marker_target_overlap_count": {"const": 0},
+        "evidence_kind": {
+          "enum": [
+            "pending",
+            "external_gene_disjoint_annotation",
+            "development_donor_cross_fitted_gene_disjoint_annotation",
+            "orthogonal_modality_annotation"
+          ]
+        },
+        "annotation_receipt_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "ordered_annotation_feature_ids": {"$ref": "#/$defs/strings"},
+        "ordered_annotation_feature_ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "ordered_target_gene_ids": {"$ref": "#/$defs/strings"},
+        "ordered_target_gene_ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "annotation_target_overlap_count": {"oneOf": [{"const": 0}, {"type": "null"}]},
+        "annotation_training_scope": {
+          "enum": [
+            "unknown_pending_provenance",
+            "external_donors_only",
+            "development_donors_only",
+            "orthogonal_no_rna_training"
+          ]
+        },
+        "annotation_training_donor_ids": {"$ref": "#/$defs/strings"},
+        "annotation_training_donor_ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "locked_donors_used_for_training": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
+        "same_cohort_annotation": {"type": "boolean"},
+        "cross_fitting_method": {"enum": ["pending", "not_applicable", "leave_one_donor_out"]},
+        "cross_fitting_receipt_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
         "establishes_full_target_independence": {"type": "boolean"},
         "limitation": {"type": "string", "minLength": 1}
       }
@@ -238,10 +324,20 @@
               "minimum_locked_donors_per_fine_type",
               "maximum_reference_evaluation_row_overlap",
               "maximum_reference_evaluation_block_overlap",
-              "maximum_reference_evaluation_source_file_overlap"
+              "same_section_source_overlap_allowed"
             ],
             "properties": {
-              "minimum_locked_donors_per_fine_type": {"const": 0}
+              "minimum_locked_donors_per_fine_type": {"const": 0},
+              "same_section_source_overlap_allowed": {"const": true}
+            }
+          },
+          "decision_thresholds": {
+            "required": ["required_opposite_pool_guard_um"],
+            "properties": {
+              "required_opposite_pool_guard_um": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
             }
           }
         },
@@ -255,7 +351,8 @@
             {"required": ["technical_covariates"]},
             {"required": ["controls"]},
             {"required": ["hyperparameter_grid"]},
-            {"required": ["morphology_gate"]}
+            {"required": ["morphology_gate"]},
+            {"required": ["locked_measurement_audit"]}
           ]
         }
       },
@@ -264,7 +361,9 @@
           "coverage_requirements": {
             "required": [
               "maximum_reference_evaluation_absolute_smd",
-              "maximum_reference_evaluation_categorical_total_variation"
+              "maximum_reference_evaluation_categorical_total_variation",
+              "minimum_reference_cells_per_donor_section_type",
+              "minimum_evaluation_cells_per_donor_section_type"
             ]
           }
         },
@@ -277,8 +376,71 @@
           "technical_covariates",
           "controls",
           "hyperparameter_grid",
-          "morphology_gate"
+          "morphology_gate",
+          "locked_measurement_audit"
         ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "study_stage": {"const": "confirmatory_morphology"},
+          "status": {"enum": ["locked", "opened"]}
+        },
+        "required": ["study_stage", "status"]
+      },
+      "then": {
+        "properties": {
+          "label_target_independence": {
+            "properties": {
+              "evidence_kind": {
+                "enum": [
+                  "external_gene_disjoint_annotation",
+                  "development_donor_cross_fitted_gene_disjoint_annotation",
+                  "orthogonal_modality_annotation"
+                ]
+              },
+              "annotation_receipt_sha256": {"$ref": "#/$defs/sha256"},
+              "ordered_annotation_feature_ids": {"$ref": "#/$defs/nonemptyStrings"},
+              "ordered_annotation_feature_ids_sha256": {"$ref": "#/$defs/sha256"},
+              "ordered_target_gene_ids": {"$ref": "#/$defs/nonemptyStrings"},
+              "ordered_target_gene_ids_sha256": {"$ref": "#/$defs/sha256"},
+              "annotation_target_overlap_count": {"const": 0},
+              "locked_donors_used_for_training": {"const": false},
+              "establishes_full_target_independence": {"const": true}
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {"same_cohort_annotation": {"const": true}},
+                  "required": ["same_cohort_annotation"]
+                },
+                "then": {
+                  "properties": {
+                    "evidence_kind": {"const": "development_donor_cross_fitted_gene_disjoint_annotation"},
+                    "annotation_training_scope": {"const": "development_donors_only"},
+                    "annotation_training_donor_ids": {"$ref": "#/$defs/nonemptyStrings"},
+                    "annotation_training_donor_ids_sha256": {"$ref": "#/$defs/sha256"},
+                    "cross_fitting_method": {"const": "leave_one_donor_out"},
+                    "cross_fitting_receipt_sha256": {"$ref": "#/$defs/sha256"}
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "evidence_kind": {
+                      "enum": ["external_gene_disjoint_annotation", "orthogonal_modality_annotation"]
+                    },
+                    "annotation_training_scope": {
+                      "enum": ["external_donors_only", "orthogonal_no_rna_training"]
+                    },
+                    "cross_fitting_method": {"const": "not_applicable"},
+                    "cross_fitting_receipt_sha256": {"type": "null"}
+                  }
+                }
+              }
+            ]
+          }
+        }
       }
     }
   ],

@@ -60,6 +60,7 @@ class MeasurementThresholds:
     mostly_padded_cutoff: float
     maximum_mostly_padded_fraction: float
     minimum_transcript_qv: float
+    required_opposite_pool_guard_um: float
     minimum_median_gene_reliability: float
     minimum_median_program_reliability: float
     minimum_target_basis_ceiling: float
@@ -77,7 +78,7 @@ class MeasurementThresholds:
     minimum_locked_donors_per_fine_type: int
     maximum_reference_evaluation_row_overlap: int
     maximum_reference_evaluation_block_overlap: int
-    maximum_reference_evaluation_source_file_overlap: int
+    same_section_source_overlap_allowed: bool
 
     @classmethod
     def from_study_manifest(cls, content: Mapping[str, object]) -> "MeasurementThresholds":
@@ -100,6 +101,7 @@ class MeasurementThresholds:
             "mostly_padded_cutoff",
             "maximum_mostly_padded_fraction",
             "minimum_transcript_qv",
+            "required_opposite_pool_guard_um",
             "minimum_median_gene_reliability",
             "minimum_median_program_reliability",
             "minimum_target_basis_ceiling",
@@ -119,7 +121,7 @@ class MeasurementThresholds:
             "minimum_locked_donors_per_fine_type",
             "maximum_reference_evaluation_row_overlap",
             "maximum_reference_evaluation_block_overlap",
-            "maximum_reference_evaluation_source_file_overlap",
+            "same_section_source_overlap_allowed",
         )
         missing = [name for name in decision_names if name not in decisions]
         missing += [name for name in coverage_names if name not in coverage]
@@ -145,6 +147,7 @@ class MeasurementThresholds:
             "minimum_nucleus_cell_area_ratio",
             "maximum_nucleus_cell_area_ratio",
             "minimum_transcript_qv",
+            "required_opposite_pool_guard_um",
         )
         for name in nonnegative:
             value = float(getattr(self, name))
@@ -174,8 +177,11 @@ class MeasurementThresholds:
         if (
             self.maximum_registration_nucleus_diameter_ratio_p95 <= 0
             or self.maximum_registration_nearest_neighbor_ratio_p95 <= 0
+            or self.required_opposite_pool_guard_um <= 0
         ):
-            raise ValueError("geometry-relative registration thresholds must be positive")
+            raise ValueError(
+                "geometry-relative registration and spatial-guard thresholds must be positive"
+            )
         if not (
             0
             < self.best_registration_quality_max_fraction_of_limit
@@ -216,7 +222,6 @@ class MeasurementThresholds:
         overlap_names = (
             "maximum_reference_evaluation_row_overlap",
             "maximum_reference_evaluation_block_overlap",
-            "maximum_reference_evaluation_source_file_overlap",
         )
         if any(
             isinstance(getattr(self, name), (bool, np.bool_))
@@ -225,6 +230,10 @@ class MeasurementThresholds:
             for name in overlap_names
         ):
             raise ValueError("measurement overlap thresholds must be non-negative integers")
+        if self.same_section_source_overlap_allowed is not True:
+            raise ValueError(
+                "same-section H-MEAS must allow and report shared source-file identity"
+            )
 
 
 def _first(source: Mapping[str, object], names: Sequence[str]) -> Optional[np.ndarray]:
@@ -1088,6 +1097,7 @@ def evaluate_measurement_gate(
         ("source_file_id", "source_file_ids", "source_sample_id", "source_sample_ids"),
         rows,
     )
+    spatial_guard_um = _scalar_value(source, ("opposite_pool_guard_um",))
     separation_identities = (
         donor_ids,
         section_ids,
@@ -1618,25 +1628,87 @@ def evaluate_measurement_gate(
             or not np.isfinite(technical_covariates).all()
         ):
             raise ValueError("technical covariates must be a finite row-aligned matrix")
-    development = np.isin(donor_ids, np.asarray(tuple(development_donors), dtype=str))
-    missing_development_donors = sorted(set(development_donors) - set(donor_ids.tolist()))
-    type_selection_support = {}
+    normalized_roles = np.asarray(
+        [
+            "reference"
+            if value in {"reference", "reference_pool", "ref"}
+            else "evaluation"
+            if value in {"evaluation", "evaluation_pool", "eval"}
+            else "unknown"
+            for value in pool_roles.tolist()
+        ],
+        dtype=str,
+    )
+    reference = normalized_roles == "reference"
+    evaluation = normalized_roles == "evaluation"
+    frozen_nonmolecular_qc = registration_row_pass & segmentation_row_pass & crop_row_pass
+    development_partition = np.isin(donor_ids, np.asarray(tuple(development_donors), dtype=str))
+    development = development_partition & frozen_nonmolecular_qc
+    missing_development_donors = sorted(
+        set(development_donors) - set(donor_ids[development].tolist())
+    )
     minimum_type_development_donors = max(
         thresholds.minimum_development_donors_per_fine_type,
         thresholds.minimum_reliable_donors_per_fine_type,
     )
-    for fine_type in sorted(set(fine_types[development].tolist())):
-        type_rows = fine_types == fine_type
-        development_ids = sorted(set(donor_ids[type_rows].tolist()) & set(development_donors))
-        supported = len(development_ids) >= minimum_type_development_donors
-        type_selection_support[fine_type] = {
-            "development_donor_ids": development_ids,
-            "supported": supported,
-            "selection_partition": "development_only",
-        }
-    supported_fine_types = [
-        fine_type for fine_type, support in type_selection_support.items() if support["supported"]
-    ]
+
+    def fine_type_support(
+        selection_mask: np.ndarray, *, selection_rows: str
+    ) -> tuple[dict[str, object], list[str]]:
+        reports: dict[str, object] = {}
+        for fine_type in sorted(set(fine_types[development_partition].tolist())):
+            development_ids = []
+            supporting_strata = []
+            for donor in development_donors:
+                donor_type_partition = (
+                    development_partition & (donor_ids == donor) & (fine_types == fine_type)
+                )
+                donor_supported = False
+                for section in sorted(set(section_ids[donor_type_partition].tolist())):
+                    stratum = (
+                        selection_mask
+                        & (donor_ids == donor)
+                        & (fine_types == fine_type)
+                        & (section_ids == section)
+                    )
+                    reference_rows = int(np.count_nonzero(stratum & reference))
+                    evaluation_rows = int(np.count_nonzero(stratum & evaluation))
+                    supported_stratum = bool(
+                        reference_rows >= thresholds.minimum_reference_cells_per_stratum
+                        and evaluation_rows >= thresholds.minimum_evaluation_cells_per_stratum
+                    )
+                    supporting_strata.append(
+                        {
+                            "donor_id": str(donor),
+                            "section_id": str(section),
+                            "reference_rows_after_selection_qc": reference_rows,
+                            "evaluation_rows_after_selection_qc": evaluation_rows,
+                            "supported": supported_stratum,
+                        }
+                    )
+                    donor_supported |= supported_stratum
+                if donor_supported:
+                    development_ids.append(str(donor))
+            supported = len(development_ids) >= minimum_type_development_donors
+            reports[fine_type] = {
+                "development_donor_ids": development_ids,
+                "donor_section_support": supporting_strata,
+                "supported": supported,
+                "selection_partition": "development_only",
+                "selection_rows": selection_rows,
+            }
+        supported_types = [
+            fine_type
+            for fine_type, support in reports.items()
+            if isinstance(support, Mapping) and support["supported"]
+        ]
+        return reports, supported_types
+
+    type_selection_support, supported_fine_types = fine_type_support(
+        development,
+        selection_rows="frozen_registration_segmentation_crop_qc_only_precheck",
+    )
+    preliminary_type_selection_support = type_selection_support
     primary_variant_present = PRIMARY_TARGET_VARIANT in variants
     molecular_prerequisites_pass = bool(
         duplicate_transcripts == 0
@@ -1711,13 +1783,28 @@ def evaluate_measurement_gate(
                             "whole-cell split count differs from eligible transcript receipt"
                         )
                 total = half_a + half_b
+                variant_target_present = total.sum(axis=1) > 0
+                supplied_target_qc_value = _vector(source, ("target_qc_pass",), rows)
+                supplied_target_qc_rows = (
+                    np.ones(rows, dtype=np.bool_)
+                    if supplied_target_qc_value is None
+                    else _booleans(supplied_target_qc_value, "target_qc_pass")
+                )
+                variant_development = development & variant_target_present & supplied_target_qc_rows
                 if affects_primary:
-                    molecular_row_has_target = total.sum(axis=1) > 0
+                    molecular_row_has_target = variant_target_present
+                    type_selection_support, supported_fine_types = fine_type_support(
+                        variant_development,
+                        selection_rows=(
+                            "frozen_registration_segmentation_crop_qc_and_primary_target_qc_"
+                            "and_target_presence"
+                        ),
+                    )
                 normalized_a = normalize_split_counts(half_a, library_sizes=half_a_library)
                 normalized_b = normalize_split_counts(half_b, library_sizes=half_b_library)
                 gene_report = feature_reliability(
-                    normalized_a[development],
-                    normalized_b[development],
+                    normalized_a[variant_development],
+                    normalized_b[variant_development],
                     gene_ids.tolist(),
                     minimum_rows=thresholds.minimum_reliability_rows,
                 )
@@ -1734,7 +1821,7 @@ def evaluate_measurement_gate(
                     technical_covariates,
                     donor_ids,
                     fine_types,
-                    development_mask=development,
+                    development_mask=variant_development,
                     minimum_training_donors=max(
                         1, thresholds.minimum_reliable_donors_per_fine_type - 1
                     ),
@@ -1744,7 +1831,7 @@ def evaluate_measurement_gate(
                     technical_covariates,
                     donor_ids,
                     fine_types,
-                    development_mask=development,
+                    development_mask=variant_development,
                     minimum_training_donors=max(
                         1, thresholds.minimum_reliable_donors_per_fine_type - 1
                     ),
@@ -1752,7 +1839,7 @@ def evaluate_measurement_gate(
                 if residual_a.fold_training_donors != residual_b.fold_training_donors:
                     raise RuntimeError("split-half residualization folds differ")
                 finite_program_rows = (
-                    development
+                    variant_development
                     & np.isfinite(residual_a.values).all(axis=1)
                     & np.isfinite(residual_b.values).all(axis=1)
                 )
@@ -1767,7 +1854,7 @@ def evaluate_measurement_gate(
                     normalized_b,
                     gene_ids.tolist(),
                     donor_ids,
-                    development,
+                    variant_development,
                     minimum_rows=thresholds.minimum_reliability_rows,
                 )
                 within_type_genes = _within_type_donor_macro_reliability(
@@ -1776,7 +1863,7 @@ def evaluate_measurement_gate(
                     gene_ids.tolist(),
                     donor_ids,
                     fine_types,
-                    development,
+                    variant_development,
                     minimum_rows=thresholds.minimum_reliability_rows,
                 )
                 donor_macro_programs = _donor_macro_feature_reliability(
@@ -1784,7 +1871,7 @@ def evaluate_measurement_gate(
                     residual_b.values,
                     program_names,
                     donor_ids,
-                    development,
+                    variant_development,
                     minimum_rows=thresholds.minimum_reliability_rows,
                 )
                 within_type_programs = _within_type_donor_macro_reliability(
@@ -1793,7 +1880,7 @@ def evaluate_measurement_gate(
                     program_names,
                     donor_ids,
                     fine_types,
-                    development,
+                    variant_development,
                     minimum_rows=thresholds.minimum_reliability_rows,
                 )
                 ceiling = dict(
@@ -1801,7 +1888,7 @@ def evaluate_measurement_gate(
                         normalized_a,
                         normalized_b,
                         donor_ids,
-                        development_mask=development,
+                        development_mask=variant_development,
                         rank=thresholds.target_basis_rank,
                         minimum_rows=thresholds.minimum_reliability_rows,
                         minimum_training_donors=max(
@@ -1827,7 +1914,7 @@ def evaluate_measurement_gate(
                     normalized_a,
                     normalized_b,
                     frozen_full_target,
-                    development,
+                    variant_development,
                     donor_ids,
                     fine_types,
                     supported_fine_types,
@@ -1888,11 +1975,11 @@ def evaluate_measurement_gate(
                     and ceiling_by_type["pass"]
                 )
                 reliability_by_donor = _group_reliability(
-                    normalized_a,
-                    normalized_b,
+                    normalized_a[variant_development],
+                    normalized_b[variant_development],
                     gene_ids,
                     frozen_programs,
-                    donor_ids,
+                    donor_ids[variant_development],
                     minimum_rows=thresholds.minimum_reliability_rows,
                 )
                 variant_reports[variant] = {
@@ -1907,6 +1994,12 @@ def evaluate_measurement_gate(
                     "ordered_reliable_program_ids": selected_programs,
                     "ordered_reliable_program_panel_sha256": _panel_sha256(selected_programs),
                     "reliable_gene_fraction": float(gene_fraction),
+                    "development_rows_before_frozen_qc": int(
+                        np.count_nonzero(development_partition)
+                    ),
+                    "development_rows_after_frozen_qc_and_target_presence": int(
+                        np.count_nonzero(variant_development)
+                    ),
                     "development_gene_reliability": gene_report,
                     "development_residualized_program_reliability": program_report,
                     "development_donor_macro_gene_reliability": donor_macro_genes,
@@ -1926,23 +2019,27 @@ def evaluate_measurement_gate(
                     "target_basis_measurement_ceiling": ceiling,
                     "target_basis_measurement_ceiling_by_fine_type": ceiling_by_type,
                     "per_section_distributions": _distribution_by_section(
-                        total, section_ids, library_sizes=full_library
+                        total[variant_development],
+                        section_ids[variant_development],
+                        library_sizes=(
+                            None if full_library is None else full_library[variant_development]
+                        ),
                     ),
                     "reliability_by_section": _group_reliability(
-                        normalized_a,
-                        normalized_b,
+                        normalized_a[variant_development],
+                        normalized_b[variant_development],
                         gene_ids,
                         frozen_programs,
-                        section_ids,
+                        section_ids[variant_development],
                         minimum_rows=thresholds.minimum_reliability_rows,
                     ),
                     "reliability_by_donor": reliability_by_donor,
                     "reliability_by_fine_type": _group_reliability(
-                        normalized_a,
-                        normalized_b,
+                        normalized_a[variant_development],
+                        normalized_b[variant_development],
                         gene_ids,
                         frozen_programs,
-                        fine_types,
+                        fine_types[variant_development],
                         minimum_rows=thresholds.minimum_reliability_rows,
                     ),
                     "pass": variant_pass,
@@ -1980,6 +2077,11 @@ def evaluate_measurement_gate(
         "primary_target_variant": PRIMARY_TARGET_VARIANT,
         "primary_gate_pass": primary_pass,
         "development_donor_ids": [str(value) for value in development_donors],
+        "selection_row_policy": (
+            "development_only_and_frozen_registration_segmentation_crop_qc_and_target_presence"
+        ),
+        "development_rows_before_frozen_qc": int(np.count_nonzero(development_partition)),
+        "development_rows_after_frozen_nonmolecular_qc": int(np.count_nonzero(development)),
         "ordered_reliable_gene_ids": reliable_genes,
         "ordered_reliable_gene_panel_sha256": _panel_sha256(reliable_genes),
         "ordered_reliable_program_ids": reliable_programs,
@@ -1987,6 +2089,7 @@ def evaluate_measurement_gate(
         "supported_fine_type_ids": supported_fine_types,
         "supported_fine_type_panel_sha256": _panel_sha256(supported_fine_types),
         "fine_type_partition_support": type_selection_support,
+        "nonmolecular_precheck_fine_type_partition_support": (preliminary_type_selection_support),
         "reliability_contract": {
             "minimum_development_donors": (thresholds.minimum_reliable_development_donors),
             "minimum_development_donor_fraction": (
@@ -2061,19 +2164,6 @@ def evaluate_measurement_gate(
         "pass": molecular_pass,
     }
 
-    normalized_roles = np.asarray(
-        [
-            "reference"
-            if value in {"reference", "reference_pool", "ref"}
-            else "evaluation"
-            if value in {"evaluation", "evaluation_pool", "eval"}
-            else "unknown"
-            for value in pool_roles.tolist()
-        ],
-        dtype=str,
-    )
-    reference = normalized_roles == "reference"
-    evaluation = normalized_roles == "evaluation"
     row_overlap = _intersection_count(observations[reference], observations[evaluation])
     cell_overlap = _intersection_count(cell_ids[reference], cell_ids[evaluation])
     block_overlap = _intersection_count(block_ids[reference], block_ids[evaluation])
@@ -2085,7 +2175,9 @@ def evaluate_measurement_gate(
         and row_overlap <= thresholds.maximum_reference_evaluation_row_overlap
         and cell_overlap <= thresholds.maximum_reference_evaluation_row_overlap
         and block_overlap <= thresholds.maximum_reference_evaluation_block_overlap
-        and source_overlap <= thresholds.maximum_reference_evaluation_source_file_overlap
+        and spatial_guard_um is not None
+        and np.isfinite(float(spatial_guard_um))
+        and float(spatial_guard_um) == thresholds.required_opposite_pool_guard_um
     )
     separation = {
         "reference_rows": int(reference.sum()),
@@ -2095,6 +2187,15 @@ def evaluate_measurement_gate(
         "reference_evaluation_cell_id_intersection": cell_overlap,
         "reference_evaluation_block_id_intersection": block_overlap,
         "reference_evaluation_source_file_intersection": source_overlap,
+        "same_source_file_overlap_allowed_by_design": True,
+        "source_file_overlap_affects_pass": False,
+        "opposite_pool_guard_um": float(spatial_guard_um),
+        "required_opposite_pool_guard_um": thresholds.required_opposite_pool_guard_um,
+        "opposite_pool_guard_matches_frozen_design": bool(
+            spatial_guard_um is not None
+            and np.isfinite(float(spatial_guard_um))
+            and float(spatial_guard_um) == thresholds.required_opposite_pool_guard_um
+        ),
         "spatial_separation_verified_by_disjoint_blocks": bool(
             block_overlap <= thresholds.maximum_reference_evaluation_block_overlap
         ),

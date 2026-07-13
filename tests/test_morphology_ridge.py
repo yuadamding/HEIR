@@ -5,6 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+import heir.evaluation.morphology_gate as gate_module
 import heir.evaluation.morphology_ridge as ridge_module
 from heir.data import MorphologyRidgeDatasetArtifact
 from heir.evaluation import (
@@ -15,6 +16,16 @@ from heir.evaluation import (
     validate_experiment_identity,
 )
 from heir.evaluation.control_models import HEST_CROP_CONTRACT
+from heir.evaluation.morphology_calibration_runner import (
+    build_synthetic_calibration_pair,
+    synthetic_completed_confirmatory_design_binding,
+)
+from heir.evaluation.power import (
+    G2_MULTIPLICITY_METHOD,
+    G3_MULTIPLICITY_METHOD,
+    PRELIMINARY_ALTERNATIVE_CONDITION,
+    REQUIRED_G3_CONTRAST_PAIRS,
+)
 
 
 def _artifact(
@@ -144,9 +155,11 @@ def _artifact(
         coverage_audit={
             "retained_fraction": 1.0,
             "reference_membership_sha256_by_split": {"primary": "c" * 64},
+            "locked_measurement_audit": {"pass": True},
         },
         reference_evaluation_balance={"primary": {"pass": True}},
         study_manifest_sha256="9" * 64,
+        opening_receipt_sha256="d" * 64,
         measurement_receipt_sha256="a" * 64,
         measurement_source_sha256="b" * 64,
         hypothesis_ids=("H-CELL",),
@@ -155,6 +168,27 @@ def _artifact(
         authorizes_nucleus_intrinsic_claim=False,
         reference_split_ids=("primary",),
         reference_means_by_split=reference_values[:, None, :],
+    )
+
+
+def _with_required_nuisance_features(
+    artifact: MorphologyRidgeDatasetArtifact,
+) -> MorphologyRidgeDatasetArtifact:
+    values = artifact.coordinate_features[:, :1].copy()
+    return replace(
+        artifact,
+        stain_features=values,
+        stain_feature_names=("stain",),
+        nuclear_morphometrics=values,
+        nuclear_morphometric_names=("nuclear",),
+        cell_morphometrics=values,
+        cell_morphometric_names=("cell",),
+        cellvit_context_features=values,
+        cellvit_context_feature_names=("cellvit",),
+        local_density_features=values,
+        local_density_feature_names=("density",),
+        boundary_features=values,
+        boundary_feature_names=("boundary",),
     )
 
 
@@ -304,6 +338,7 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
     assert report["authorizes_full_heir"] is False
     assert report["oracle_type_only"] is True
     assert report["nucleus_hypothesis_tested"] is False
+    assert report["morphology_source_conclusion"] == "not_tested"
     assert report["crop_source_not_inferred_from_observation_level"] is True
     assert report["hypothesis_decisions"]["G2_local_context"]["tested"] is True
     assert [row["split_id"] for row in report["reference_split_sensitivity"]] == [
@@ -317,12 +352,19 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
     assert control["unique_permutations"] is True
     assert control["one_combined_scientific_permutation_pool"] is True
     assert control["seeds_are_generation_streams_not_independent_tests"] is True
+    assert [row["required_unique_permutations"] for row in control["seeds"]] == [100] * 3
+    assert [row["generated_unique_permutations"] for row in control["seeds"]] == [100] * 3
     assert all(row["empirical_p"] < 0.01 for row in control["seeds"])
     block_control = report["spatial_block_permutation_control"]
     assert block_control["total_permutations"] == 300
     assert all(row["minimum_cross_block_fraction"] == 1.0 for row in block_control["seeds"])
     assert report["primary_metrics"]["donor_equal_type_equal_residual_coordinate_r2"] > 0.95
     assert report["checks"]["beats_coordinate_only"] is True
+    assert report["checks"]["exact_donor_paired_main_effect"] is True
+    assert (
+        report["hypothesis_decisions"]["G2_local_context"]["multiplicity_method"]
+        == G2_MULTIPLICITY_METHOD
+    )
     assert report["coverage"]["locked_donor_type"]["supported_fraction"] == 1.0
     assert report["stratification"]["section"]["available"] is True
     assert len(report["leave_one_locked_donor_out"]["matched_macro_r2"]) == 5
@@ -384,8 +426,17 @@ def test_ridge_gate_rejects_too_few_permutations_and_coordinate_only_signal() ->
     assert report["component_pass"] is False
 
 
-def test_final_inference_requires_calibration_and_999_unique_permutations(
-    calibration_receipt,
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"permutation_seeds": (17.9,)},
+        {"permutations_per_seed": 100.5},
+        {"total_permutations": 100.5},
+        {"ranks": (1.5,)},
+    ),
+)
+def test_direct_gate_rejects_nonintegral_randomization_and_rank_contract(
+    overrides: dict[str, object],
 ) -> None:
     development = _artifact(
         tuple(f"development_{index}" for index in range(5)),
@@ -397,14 +448,52 @@ def test_final_inference_requires_calibration_and_999_unique_permutations(
         role="locked_test",
         source_offset=8,
     )
+    arguments: dict[str, object] = {
+        "ranks": (1,),
+        "alphas": (1.0,),
+        "permutation_seeds": (17,),
+        "permutations_per_seed": 100,
+        "minimum_support": 8,
+        "device": "cpu",
+    }
+    arguments.update(overrides)
+
+    with pytest.raises(ValueError, match="exact positive integer"):
+        evaluate_morphology_ridge_gate(development, locked, **arguments)
+
+
+def test_final_inference_requires_calibration_and_999_unique_permutations(
+    calibration_receipt,
+) -> None:
+    development, locked = build_synthetic_calibration_pair(
+        "spatial_autocorrelation",
+        PRELIMINARY_ALTERNATIVE_CONDITION,
+        0,
+    )
+    development = replace(
+        development,
+        cohort_id="HEST",
+        cohort_release="synthetic-final-contract-fixture",
+        opening_receipt_sha256="d" * 64,
+    )
+    locked = replace(
+        locked,
+        cohort_id="HEST",
+        cohort_release="synthetic-final-contract-fixture",
+        opening_receipt_sha256="d" * 64,
+    )
+    binding = calibration_receipt["exact_gate_settings"]["confirmatory_design_binding"]
     with pytest.raises(ValueError, match="requires a calibration receipt"):
         evaluate_morphology_ridge_gate(
             development,
             locked,
             ranks=(1,),
             alphas=(1.0,),
+            permutations_per_seed=333,
             total_permutations=999,
+            minimum_support=20,
             final_inference=True,
+            confirmatory_design_binding=binding,
             device="cpu",
         )
     with pytest.raises(ValueError, match="at least 999 unique permutations"):
@@ -413,9 +502,117 @@ def test_final_inference_requires_calibration_and_999_unique_permutations(
             locked,
             ranks=(1,),
             alphas=(1.0,),
+            permutations_per_seed=333,
             total_permutations=998,
+            minimum_support=20,
             final_inference=True,
             calibration_receipt=calibration_receipt,
+            confirmatory_design_binding=binding,
+            device="cpu",
+        )
+    with pytest.raises(ValueError, match="frozen contract|rank/ridge grid"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            ranks=(1,),
+            alphas=(1.0,),
+            permutations_per_seed=333,
+            total_permutations=999,
+            minimum_support=20,
+            final_inference=True,
+            calibration_receipt=calibration_receipt,
+            confirmatory_design_binding=binding,
+            confirmatory_analysis_plan_sha256=calibration_receipt["exact_gate_settings"][
+                "confirmatory_analysis_plan_sha256"
+            ],
+            device="cpu",
+        )
+
+
+def test_synthetic_calibration_rejects_rows_outside_the_bound_topology() -> None:
+    development, locked = build_synthetic_calibration_pair(
+        "spatial_autocorrelation",
+        PRELIMINARY_ALTERNATIVE_CONDITION,
+        0,
+    )
+    section_ids = development.section_ids.copy()
+    section_ids[0] = "unplanned_section"
+    development = replace(development, section_ids=section_ids)
+
+    with pytest.raises(ValueError, match="artifacts differ from the confirmatory design binding"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            ranks=(1,),
+            alphas=(1.0,),
+            permutations_per_seed=333,
+            total_permutations=999,
+            minimum_support=20,
+            final_inference=True,
+            confirmatory_design_binding=synthetic_completed_confirmatory_design_binding(),
+            synthetic_calibration_mode=True,
+            device="cpu",
+        )
+
+
+def test_direct_final_gate_requires_every_frozen_nuisance_family() -> None:
+    development = _with_required_nuisance_features(
+        _artifact(
+            tuple(f"development_{index}" for index in range(5)),
+            role="development",
+            source_offset=4,
+        )
+    )
+    locked = _with_required_nuisance_features(
+        _artifact(
+            tuple(f"locked_{index}" for index in range(5)),
+            role="locked_test",
+            source_offset=8,
+        )
+    )
+    development = replace(
+        development,
+        cellvit_context_features=np.empty((len(development.observation_ids), 0)),
+        cellvit_context_feature_names=(),
+    )
+    locked = replace(
+        locked,
+        cellvit_context_features=np.empty((len(locked.observation_ids), 0)),
+        cellvit_context_feature_names=(),
+    )
+
+    with pytest.raises(ValueError, match="cellvit_context_only"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            final_inference=True,
+            device="cpu",
+        )
+
+
+def test_synthetic_calibration_bypass_cannot_accept_biological_artifacts() -> None:
+    development = _artifact(
+        tuple(f"development_{index}" for index in range(5)),
+        role="development",
+        source_offset=4,
+    )
+    locked = _artifact(
+        tuple(f"locked_{index}" for index in range(5)),
+        role="locked_test",
+        source_offset=8,
+    )
+    with pytest.raises(ValueError, match="only explicitly synthetic"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            final_inference=True,
+            synthetic_calibration_mode=True,
+            device="cpu",
+        )
+    with pytest.raises(ValueError, match="only explicitly synthetic"):
+        evaluate_morphology_ridge_gate(
+            replace(development, cohort_id="SYNTHETIC_CALIBRATION"),
+            replace(locked, cohort_id="SYNTHETIC_CALIBRATION"),
             device="cpu",
         )
 
@@ -478,6 +675,68 @@ def test_g3_intrinsic_flags_require_prespecified_direct_crop_contrasts() -> None
     assert nucleus["focal_family"] == "nucleus_mask_image"
     assert nucleus["strongest_comparator_family"] != "nucleus_mask_image"
     assert nucleus["pass"] is False  # exploratory runs never authorize G3
+    assert report["morphology_source_conclusion"] == "not_tested"
+    frozen = report["frozen_morphology_contrast_family"]
+    assert frozen["multiplicity_method"] == G3_MULTIPLICITY_METHOD
+    assert set(frozen["contrasts"]) == set(REQUIRED_G3_CONTRAST_PAIRS)
+    assert all("familywise_adjusted_p" in row for row in frozen["contrasts"].values())
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    (
+        ({"intrinsic_prespecified": False}, "not_tested"),
+        ({"final_inference": False}, "not_tested"),
+        ({"familywise_tested": False}, "inconclusive"),
+        ({"measurement_valid": False}, "inconclusive"),
+        ({"any_source_contrast_positive": True}, "inconclusive"),
+        ({"component_pass": False}, "no_morphology_specific_information"),
+        ({}, "no_morphology_specific_information"),
+        (
+            {"component_pass": False, "nucleus_specific": True},
+            "inconclusive",
+        ),
+        ({"nucleus_specific": True}, "nucleus_dominant"),
+        ({"cell_specific": True}, "cell_dominant"),
+        ({"context_specific": True}, "context_dominant"),
+        (
+            {
+                "nucleus_specific": True,
+                "context_specific": True,
+                "full_vs_context": True,
+                "full_vs_intrinsic": True,
+            },
+            "mixed_intrinsic_and_contextual_information",
+        ),
+        (
+            {"nucleus_specific": True, "cell_specific": True},
+            "multiple_sources_without_incremental_combination",
+        ),
+    ),
+)
+def test_morphology_source_conclusion_fails_closed(
+    overrides: dict[str, bool], expected: str
+) -> None:
+    inputs = {
+        "intrinsic_prespecified": True,
+        "final_inference": True,
+        "familywise_tested": True,
+        "measurement_valid": True,
+        "component_pass": True,
+        "any_source_contrast_positive": False,
+        "nucleus_specific": False,
+        "cell_specific": False,
+        "context_specific": False,
+        "full_vs_context": False,
+        "full_vs_intrinsic": False,
+    }
+    inputs.update(overrides)
+
+    conclusion = gate_module._classify_morphology_source(**inputs)
+
+    assert conclusion == expected
+    if expected in {"not_tested", "inconclusive"}:
+        assert conclusion != "no_morphology_specific_information"
 
 
 def test_ridge_artifact_rejects_marker_leakage_and_donor_overlap() -> None:
@@ -502,6 +761,19 @@ def test_ridge_artifact_rejects_marker_leakage_and_donor_overlap() -> None:
         )
 
 
+def test_ridge_artifact_binds_standalone_reference_means_to_primary_split() -> None:
+    artifact = _artifact(
+        tuple(f"development_{index}" for index in range(5)),
+        role="development",
+        source_offset=4,
+    )
+    drifted_by_split = artifact.reference_means_by_split.copy()
+    drifted_by_split[0, 0, 0] += 1.0
+
+    with pytest.raises(ValueError, match="primary frozen reference split"):
+        replace(artifact, reference_means_by_split=drifted_by_split).validate()
+
+
 def test_primary_identity_rejects_historical_cross_modal_encoder() -> None:
     artifact = _artifact(
         tuple(f"development_{index}" for index in range(5)),
@@ -522,6 +794,7 @@ def test_primary_identity_rejects_historical_cross_modal_encoder() -> None:
         encoder_name="bioptimus/H-optimus-1",
         crop_scale="full_context",
         cohort_id="HESCAPE",
+        opening_receipt_sha256="",
         cohort_release="human-lung-healthy-panel",
         observation_level="pseudo_spot_55um",
         target_construction="sum_pooled_xenium_transcripts",
@@ -552,6 +825,7 @@ def _regional_uni2h(artifact: MorphologyRidgeDatasetArtifact) -> MorphologyRidge
         encoder_name="MahmoodLab/UNI2-h",
         crop_scale="full_context",
         cohort_id="HESCAPE",
+        opening_receipt_sha256="",
         cohort_release="human-lung-healthy-panel",
         observation_level="pseudo_spot_55um",
         target_construction="sum_pooled_xenium_transcripts",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -19,6 +20,15 @@ STUDY_MANIFEST_SCHEMA = "heir.study_manifest.v2"
 # one-way opening receipt, and status (which changes locked->opened while the frozen
 # scientific content must stay bit-for-bit identical).
 _CONTENT_DIGEST_EXCLUDED_KEYS = ("locked_content_sha256", "opening", "status")
+_OPENING_RECEIPT_FIELDS = {
+    "locked_manifest_sha256",
+    "locked_content_sha256",
+    "opened_by_commit",
+    "opened_at",
+    "permitted_claims",
+    "adoption_for_future_models",
+    "opening_receipt_sha256",
+}
 HYPOTHESIS_IDS = {
     "H-MEAS",
     "H-REGIONAL",
@@ -28,6 +38,36 @@ HYPOTHESIS_IDS = {
     "H-END2END",
     "H-COMP",
     "H-EXT",
+}
+
+LABEL_TARGET_INDEPENDENCE_FIELDS = {
+    "strategy",
+    "evidence_kind",
+    "annotation_receipt_sha256",
+    "ordered_annotation_feature_ids",
+    "ordered_annotation_feature_ids_sha256",
+    "ordered_target_gene_ids",
+    "ordered_target_gene_ids_sha256",
+    "annotation_target_overlap_count",
+    "annotation_training_scope",
+    "annotation_training_donor_ids",
+    "annotation_training_donor_ids_sha256",
+    "locked_donors_used_for_training",
+    "same_cohort_annotation",
+    "cross_fitting_method",
+    "cross_fitting_receipt_sha256",
+    "establishes_full_target_independence",
+    "limitation",
+}
+LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS = LABEL_TARGET_INDEPENDENCE_FIELDS - {
+    "ordered_target_gene_ids",
+    "ordered_target_gene_ids_sha256",
+    "annotation_target_overlap_count",
+}
+LABEL_TARGET_INDEPENDENCE_EVIDENCE_KINDS = {
+    "external_gene_disjoint_annotation",
+    "development_donor_cross_fitted_gene_disjoint_annotation",
+    "orthogonal_modality_annotation",
 }
 
 
@@ -53,6 +93,14 @@ def _content_digest(content: Mapping[str, object]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _opening_receipt_digest(opening: Mapping[str, object]) -> str:
+    """Hash every opening field while excluding only the digest itself."""
+
+    payload = {key: value for key, value in opening.items() if key != "opening_receipt_sha256"}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _mapping(value: object, name: str, fields: set[str]) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or not fields.issubset(value):
         raise ValueError("study manifest %s is incomplete" % name)
@@ -68,6 +116,157 @@ def _strings(value: object, name: str, *, allow_empty: bool = False) -> tuple[st
     if len(set(result)) != len(result):
         raise ValueError("study manifest %s contains duplicates" % name)
     return result
+
+
+def _ordered_ids_sha256(values: Sequence[object]) -> str:
+    encoded = json.dumps(
+        [str(value) for value in values],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _optional_sha256(value: object, name: str) -> Optional[str]:
+    return None if value is None else _sha256(value, name)
+
+
+def _validate_label_target_independence(
+    content: Mapping[str, object],
+) -> Mapping[str, object]:
+    independence = _mapping(
+        content.get("label_target_independence"),
+        "label_target_independence",
+        LABEL_TARGET_INDEPENDENCE_FIELDS,
+    )
+    if set(independence) != LABEL_TARGET_INDEPENDENCE_FIELDS:
+        raise ValueError("study manifest label-target independence contract has extra fields")
+    if not str(independence["strategy"]).strip() or not str(independence["limitation"]).strip():
+        raise ValueError("study manifest label-target independence strategy is empty")
+
+    annotation_ids = _strings(
+        independence["ordered_annotation_feature_ids"],
+        "label_target_independence.ordered_annotation_feature_ids",
+        allow_empty=True,
+    )
+    target_ids = _strings(
+        independence["ordered_target_gene_ids"],
+        "label_target_independence.ordered_target_gene_ids",
+        allow_empty=True,
+    )
+    training_donor_ids = _strings(
+        independence["annotation_training_donor_ids"],
+        "label_target_independence.annotation_training_donor_ids",
+        allow_empty=True,
+    )
+    annotation_hash = _optional_sha256(
+        independence["ordered_annotation_feature_ids_sha256"],
+        "label_target_independence.ordered_annotation_feature_ids_sha256",
+    )
+    target_hash = _optional_sha256(
+        independence["ordered_target_gene_ids_sha256"],
+        "label_target_independence.ordered_target_gene_ids_sha256",
+    )
+    training_donor_hash = _optional_sha256(
+        independence["annotation_training_donor_ids_sha256"],
+        "label_target_independence.annotation_training_donor_ids_sha256",
+    )
+    annotation_receipt = _optional_sha256(
+        independence["annotation_receipt_sha256"],
+        "label_target_independence.annotation_receipt_sha256",
+    )
+    cross_fit_receipt = _optional_sha256(
+        independence["cross_fitting_receipt_sha256"],
+        "label_target_independence.cross_fitting_receipt_sha256",
+    )
+    evidence_kind = str(independence["evidence_kind"])
+    same_cohort = independence["same_cohort_annotation"]
+    establishes = independence["establishes_full_target_independence"]
+    if not isinstance(same_cohort, bool) or not isinstance(establishes, bool):
+        raise ValueError("study manifest label-target independence flags must be boolean")
+
+    if evidence_kind == "pending":
+        if (
+            annotation_receipt is not None
+            or annotation_ids
+            or annotation_hash is not None
+            or target_ids
+            or target_hash is not None
+            or independence["annotation_target_overlap_count"] is not None
+            or independence["annotation_training_scope"] != "unknown_pending_provenance"
+            or training_donor_ids
+            or training_donor_hash is not None
+            or independence["locked_donors_used_for_training"] is not None
+            or independence["cross_fitting_method"] != "pending"
+            or cross_fit_receipt is not None
+            or establishes is not False
+        ):
+            raise ValueError("pending label-target independence must not claim resolved evidence")
+        return independence
+
+    if evidence_kind not in LABEL_TARGET_INDEPENDENCE_EVIDENCE_KINDS:
+        raise ValueError("study manifest label-target independence evidence kind is unsupported")
+    if annotation_receipt is None or not annotation_ids or not target_ids:
+        raise ValueError(
+            "proven label-target independence requires a receipt and exact annotation/target IDs"
+        )
+    if annotation_hash != _ordered_ids_sha256(annotation_ids):
+        raise ValueError("ordered annotation feature IDs differ from their frozen hash")
+    if target_hash != _ordered_ids_sha256(target_ids):
+        raise ValueError("ordered target gene IDs differ from their frozen hash")
+    if target_hash != content.get("target_gene_panel_sha256"):
+        raise ValueError("independence target genes differ from the frozen H-CELL target panel")
+    overlap = set(annotation_ids) & set(target_ids)
+    if independence["annotation_target_overlap_count"] != 0 or overlap:
+        raise ValueError("annotation features overlap the frozen H-CELL target panel")
+    if independence["locked_donors_used_for_training"] is not False:
+        raise ValueError("locked donors cannot train the annotation procedure")
+    partitions = content.get("partitions")
+    if not isinstance(partitions, Mapping):
+        raise ValueError("label-target independence requires frozen donor partitions")
+    development_donors = set(str(value) for value in partitions.get("development_donors", ()))
+    locked_donors = set(str(value) for value in partitions.get("locked_test_donors", ()))
+    if set(training_donor_ids) & locked_donors:
+        raise ValueError("annotation training donor IDs include locked donors")
+    if establishes is not True:
+        raise ValueError("non-pending independence evidence must establish the frozen contract")
+
+    if same_cohort:
+        if (
+            evidence_kind != "development_donor_cross_fitted_gene_disjoint_annotation"
+            or independence["annotation_training_scope"] != "development_donors_only"
+            or not training_donor_ids
+            or set(training_donor_ids) != development_donors
+            or training_donor_hash != _ordered_ids_sha256(training_donor_ids)
+            or independence["cross_fitting_method"] != "leave_one_donor_out"
+            or cross_fit_receipt is None
+        ):
+            raise ValueError("same-cohort annotation requires development-only donor cross-fitting")
+    elif evidence_kind == "external_gene_disjoint_annotation":
+        if (
+            independence["annotation_training_scope"] != "external_donors_only"
+            or not training_donor_ids
+            or set(training_donor_ids) & development_donors
+            or training_donor_hash != _ordered_ids_sha256(training_donor_ids)
+            or independence["cross_fitting_method"] != "not_applicable"
+            or cross_fit_receipt is not None
+        ):
+            raise ValueError("external annotation has an invalid training contract")
+    elif evidence_kind == "orthogonal_modality_annotation":
+        if (
+            independence["annotation_training_scope"] != "orthogonal_no_rna_training"
+            or training_donor_ids
+            or training_donor_hash is not None
+            or independence["cross_fitting_method"] != "not_applicable"
+            or cross_fit_receipt is not None
+        ):
+            raise ValueError("orthogonal annotation has an invalid training contract")
+    else:
+        raise ValueError(
+            "label-target independence evidence kind conflicts with same-cohort annotation scope"
+        )
+    return independence
 
 
 def current_git_commit(root: PathLike) -> str:
@@ -98,7 +297,7 @@ def require_clean_worktree(root: PathLike) -> None:
     except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError("cannot inspect the Git worktree") from error
     if status.strip():
-        raise ValueError("a study cannot be locked from a dirty worktree")
+        raise ValueError("study locking or confirmatory execution requires a clean Git worktree")
 
 
 @dataclass(frozen=True)
@@ -123,6 +322,8 @@ class StudyManifest:
         *,
         require_status: Optional[str] = None,
         verify_runtime: bool = False,
+        require_clean_runtime: bool = False,
+        verify_container_digest: bool = False,
         repository_root: Optional[PathLike] = None,
     ) -> "StudyManifest":
         resolved = Path(path).expanduser().resolve()
@@ -272,29 +473,7 @@ class StudyManifest:
         ):
             raise ValueError("study manifest does not protect the HEST locked donors")
 
-        independence = _mapping(
-            content["label_target_independence"],
-            "label_target_independence",
-            {
-                "strategy",
-                "marker_panel_sha256",
-                "candidate_marker_target_overlap_count",
-                "establishes_full_target_independence",
-                "limitation",
-            },
-        )
-        if (
-            _sha256(
-                independence["marker_panel_sha256"],
-                "label_target_independence.marker_panel_sha256",
-            )
-            != content["type_marker_panel_sha256"]
-            or independence["candidate_marker_target_overlap_count"] != 0
-            or not str(independence["strategy"]).strip()
-            or not str(independence["limitation"]).strip()
-            or not isinstance(independence["establishes_full_target_independence"], bool)
-        ):
-            raise ValueError("study manifest label-target independence contract is malformed")
+        independence = _validate_label_target_independence(content)
 
         if study_stage == "measurement_development":
             morphology_only = {
@@ -307,6 +486,7 @@ class StudyManifest:
                 "hyperparameter_grid",
                 "morphology_gate",
                 "reference_splits",
+                "locked_measurement_audit",
             }
             present = sorted(morphology_only & set(content))
             if present:
@@ -329,6 +509,7 @@ class StudyManifest:
                 {
                     "minimum_development_donors_per_fine_type",
                     "minimum_locked_donors_per_fine_type",
+                    "same_section_source_overlap_allowed",
                 },
             )
             locked_minimum = measurement_coverage["minimum_locked_donors_per_fine_type"]
@@ -339,6 +520,25 @@ class StudyManifest:
             ):
                 raise ValueError(
                     "measurement-development locked donor coverage minimum must be zero"
+                )
+            if measurement_coverage["same_section_source_overlap_allowed"] is not True:
+                raise ValueError(
+                    "measurement-development must report shared same-section source identity"
+                )
+            measurement_decisions = _mapping(
+                content["decision_thresholds"],
+                "decision_thresholds",
+                {"required_opposite_pool_guard_um"},
+            )
+            required_guard = measurement_decisions["required_opposite_pool_guard_um"]
+            if (
+                isinstance(required_guard, bool)
+                or not isinstance(required_guard, (int, float))
+                or not 0 < float(required_guard) < float("inf")
+            ):
+                raise ValueError(
+                    "measurement-development required opposite-pool guard "
+                    "must be finite and positive"
                 )
         else:
             morphology_required = {
@@ -351,9 +551,25 @@ class StudyManifest:
                 "hyperparameter_grid",
                 "morphology_gate",
                 "reference_splits",
+                "locked_measurement_audit",
             }
             if not morphology_required.issubset(content):
                 raise ValueError("confirmatory morphology manifest is incomplete")
+            morphology_coverage = _mapping(
+                content["coverage_requirements"],
+                "coverage_requirements",
+                {
+                    "minimum_reference_cells_per_donor_section_type",
+                    "minimum_evaluation_cells_per_donor_section_type",
+                },
+            )
+            for name in (
+                "minimum_reference_cells_per_donor_section_type",
+                "minimum_evaluation_cells_per_donor_section_type",
+            ):
+                value = morphology_coverage[name]
+                if isinstance(value, bool) or int(value) != value or int(value) < 1:
+                    raise ValueError("confirmatory morphology %s must be positive" % name)
             encoder = _mapping(
                 content["encoder"],
                 "encoder",
@@ -519,6 +735,55 @@ class StudyManifest:
                     )
             elif calibration_sha is not None:
                 raise ValueError("exploratory morphology cannot bind a calibration receipt")
+            locked_audit = _mapping(
+                content["locked_measurement_audit"],
+                "locked_measurement_audit",
+                {
+                    "audit_timing",
+                    "selection_changes_forbidden",
+                    "coverage_denominator",
+                    "maximum_annotation_nucleus_p95_um",
+                    "maximum_annotation_cell_p95_um",
+                    "maximum_cell_nucleus_p95_um",
+                    "maximum_registration_nucleus_diameter_ratio_p95",
+                    "maximum_registration_nearest_neighbor_ratio_p95",
+                    "maximum_registration_outlier_fraction",
+                    "maximum_nucleus_outside_cell_fraction",
+                    "minimum_nucleus_cell_area_ratio",
+                    "maximum_nucleus_cell_area_ratio",
+                    "maximum_segmentation_outlier_fraction",
+                    "maximum_crop_padding_p95",
+                    "mostly_padded_cutoff",
+                    "maximum_mostly_padded_fraction",
+                    "minimum_within_fine_type_reliability",
+                    "minimum_reliability_rows",
+                    "minimum_locked_donor_type_reliability_fraction",
+                },
+            )
+            if (
+                locked_audit["audit_timing"]
+                != "after_confirmatory_lock_before_morphology_inference"
+                or locked_audit["selection_changes_forbidden"] is not True
+                or locked_audit["coverage_denominator"]
+                != "all_h_meas_supported_fine_types_and_locked_donors"
+            ):
+                raise ValueError("locked measurement audit timing or population is mutable")
+            for name in (
+                "maximum_registration_outlier_fraction",
+                "maximum_nucleus_outside_cell_fraction",
+                "minimum_nucleus_cell_area_ratio",
+                "maximum_nucleus_cell_area_ratio",
+                "maximum_segmentation_outlier_fraction",
+                "maximum_crop_padding_p95",
+                "mostly_padded_cutoff",
+                "maximum_mostly_padded_fraction",
+                "minimum_within_fine_type_reliability",
+                "minimum_locked_donor_type_reliability_fraction",
+            ):
+                if not 0 <= float(locked_audit[name]) <= 1:
+                    raise ValueError("locked_measurement_audit.%s must be in [0, 1]" % name)
+            if int(locked_audit["minimum_reliability_rows"]) < 2:
+                raise ValueError("locked measurement reliability needs at least two rows")
             if status in {"locked", "opened"} and (
                 independence["establishes_full_target_independence"] is not True
             ):
@@ -554,18 +819,48 @@ class StudyManifest:
             opening = _mapping(
                 content.get("opening"),
                 "opening",
-                {"locked_manifest_sha256", "opened_by_commit", "opened_at", "permitted_claims"},
+                _OPENING_RECEIPT_FIELDS,
             )
+            if set(opening) != _OPENING_RECEIPT_FIELDS:
+                raise ValueError("study manifest opening receipt has extra fields")
             _sha256(opening["locked_manifest_sha256"], "opening.locked_manifest_sha256")
+            opening_locked_content = _sha256(
+                opening["locked_content_sha256"], "opening.locked_content_sha256"
+            )
+            if opening_locked_content != recorded_digest:
+                raise ValueError("opening receipt does not bind the locked scientific content")
             if not re.fullmatch(r"[0-9a-f]{40}", str(opening["opened_by_commit"])):
                 raise ValueError("opened study commit is invalid")
-            _strings(opening["permitted_claims"], "opening.permitted_claims", allow_empty=True)
+            permitted_claims = _strings(
+                opening["permitted_claims"], "opening.permitted_claims", allow_empty=True
+            )
+            if not set(permitted_claims).issubset(hypotheses):
+                raise ValueError(
+                    "opening permitted claims must be a subset of the frozen hypotheses"
+                )
             if opening.get("adoption_for_future_models") is not False:
                 raise ValueError("opened locked evidence cannot become future development data")
+            opening_receipt = _sha256(
+                opening["opening_receipt_sha256"], "opening.opening_receipt_sha256"
+            )
+            if opening_receipt != _opening_receipt_digest(opening):
+                raise ValueError("opening receipt was modified after the study was opened")
         if verify_runtime:
             root = Path(repository_root or resolved.parent).expanduser().resolve()
             if current_git_commit(root) != commit:
                 raise ValueError("running commit differs from the locked study manifest")
+            if require_clean_runtime:
+                require_clean_worktree(root)
+            if verify_container_digest:
+                runtime_container = os.environ.get("HEIR_CONTAINER_DIGEST")
+                if runtime_container is None:
+                    raise ValueError("HEIR_CONTAINER_DIGEST is required for confirmatory execution")
+                if runtime_container != container:
+                    raise ValueError(
+                        "runtime container digest differs from the locked study manifest"
+                    )
+        elif require_clean_runtime or verify_container_digest:
+            raise ValueError("full runtime checks require verify_runtime=True")
         return cls(
             path=resolved,
             sha256=sha256_file(resolved),
@@ -603,6 +898,11 @@ def freeze_manifest_content(
     if draft.get("schema") != STUDY_MANIFEST_SCHEMA or draft.get("status") != "draft":
         raise ValueError("only a v2 draft study manifest can be frozen")
     if draft.get("study_stage") == "confirmatory_morphology":
+        independence = _validate_label_target_independence(draft)
+        if independence["evidence_kind"] == "pending":
+            raise ValueError(
+                "confirmatory H-CELL cannot lock before label-target independence is proven"
+            )
         prerequisites = _mapping(
             draft.get("prerequisites"),
             "prerequisites",
@@ -641,15 +941,6 @@ def freeze_manifest_content(
             != expected_type_hash
         ):
             raise ValueError("supported fine-type IDs differ from their frozen hash")
-        independence = _mapping(
-            draft.get("label_target_independence"),
-            "label_target_independence",
-            {"establishes_full_target_independence"},
-        )
-        if independence["establishes_full_target_independence"] is not True:
-            raise ValueError(
-                "confirmatory H-CELL cannot lock before label-target independence is proven"
-            )
         morphology_gate = _mapping(
             draft.get("morphology_gate"),
             "morphology_gate",
@@ -682,19 +973,33 @@ def open_manifest_content(
 
     if locked.status != "locked":
         raise ValueError("only a locked study may be opened")
+    if not re.fullmatch(r"[0-9a-f]{40}", opened_by_commit):
+        raise ValueError("opened study commit is invalid")
+    claims = tuple(str(value) for value in permitted_claims)
+    if (
+        any(not value.strip() for value in claims)
+        or len(set(claims)) != len(claims)
+        or not set(claims).issubset(locked.hypothesis_ids)
+    ):
+        raise ValueError("opening permitted claims must be a subset of the frozen hypotheses")
     value = json.loads(json.dumps(locked.content))
     value["status"] = "opened"
-    value["opening"] = {
+    opening = {
         "locked_manifest_sha256": locked.sha256,
+        "locked_content_sha256": locked.content["locked_content_sha256"],
         "opened_by_commit": opened_by_commit,
         "opened_at": opened_at or datetime.now(timezone.utc).isoformat(),
-        "permitted_claims": list(permitted_claims),
+        "permitted_claims": list(claims),
         "adoption_for_future_models": False,
     }
+    opening["opening_receipt_sha256"] = _opening_receipt_digest(opening)
+    value["opening"] = opening
     return value
 
 
 __all__ = [
+    "LABEL_TARGET_INDEPENDENCE_FIELDS",
+    "LABEL_TARGET_INDEPENDENCE_PROTOCOL_FIELDS",
     "STUDY_MANIFEST_SCHEMA",
     "StudyManifest",
     "current_git_commit",

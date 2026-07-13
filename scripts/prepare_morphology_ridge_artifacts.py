@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -20,6 +21,7 @@ from heir.evaluation.control_models import (
     REQUIRED_HEST_CROP_IDS,
 )
 from heir.evaluation.measurement_gate import load_passing_measurement_receipt
+from heir.evaluation.reliability import feature_reliability, normalize_split_counts
 from heir.utils import reject_output_input_collisions, sha256_file
 
 PLAN_SCHEMA = "heir.morphology_ridge_preparation_plan.v1"
@@ -169,6 +171,34 @@ def _target_selection(
         expected_study_manifest_sha256=measurement_study_sha,
         expected_source_sha256=expected_source_sha,
     )
+    measurement_thresholds = _mapping(report.get("thresholds"), "H-MEAS frozen thresholds", set())
+    locked_audit = _mapping(
+        manifest.content.get("locked_measurement_audit"),
+        "locked measurement audit",
+        {
+            "selection_changes_forbidden",
+            "coverage_denominator",
+            "minimum_locked_donor_type_reliability_fraction",
+        },
+    )
+    shared_thresholds = {
+        name: value
+        for name, value in locked_audit.items()
+        if name
+        not in {
+            "audit_timing",
+            "selection_changes_forbidden",
+            "coverage_denominator",
+            "minimum_locked_donor_type_reliability_fraction",
+        }
+    }
+    if (
+        any(measurement_thresholds.get(name) != value for name, value in shared_thresholds.items())
+        or locked_audit["selection_changes_forbidden"] is not True
+        or locked_audit["coverage_denominator"]
+        != "all_h_meas_supported_fine_types_and_locked_donors"
+    ):
+        raise ValueError("locked-row measurement audit differs from frozen H-MEAS thresholds")
     selection = _mapping(
         report.get("target_selection_receipt"),
         "H-MEAS target selection receipt",
@@ -348,7 +378,9 @@ def _validate_hest_source_contract(
     manifest: StudyManifest,
     archive: Mapping[str, np.ndarray],
     *,
+    plan: Mapping[str, object],
     source_gene_ids: np.ndarray,
+    selected_target_gene_ids: tuple[str, ...],
     marker_genes: tuple[str, ...],
     crop_ids: tuple[str, ...],
     crop_roles: tuple[str, ...],
@@ -356,14 +388,25 @@ def _validate_hest_source_contract(
     named: Mapping[str, tuple[np.ndarray, np.ndarray]],
     source_identity: Mapping[str, object],
 ) -> None:
+    opening = _mapping(
+        manifest.content.get("opening"),
+        "study manifest opening",
+        {"opening_receipt_sha256", "permitted_claims"},
+    )
+    opening_receipt_sha256 = _sha256(
+        opening["opening_receipt_sha256"], "opening.opening_receipt_sha256"
+    )
     if (
         str(_scalar(archive, ("study_stage",)) or "") != "confirmatory_morphology"
         or str(_scalar(archive, ("source_scope",)) or "")
-        != "development_and_locked_after_confirmatory_lock"
+        != "development_and_locked_after_confirmatory_opening"
         or bool(_scalar(archive, ("locked_donor_outcomes_materialized",))) is not True
         or str(_scalar(archive, ("study_manifest_sha256",)) or "") != manifest.sha256
+        or str(_scalar(archive, ("opening_receipt_sha256",)) or "") != opening_receipt_sha256
+        or plan.get("opening_receipt_sha256") != opening_receipt_sha256
+        or "H-CELL" not in opening["permitted_claims"]
     ):
-        raise ValueError("HEST morphology source was not built after the confirmatory lock")
+        raise ValueError("HEST morphology source was not built from the authorized opening receipt")
     encoder = _mapping(
         manifest.content.get("encoder"),
         "study manifest encoder",
@@ -391,13 +434,81 @@ def _validate_hest_source_contract(
     independence = _mapping(
         manifest.content.get("label_target_independence"),
         "study manifest label_target_independence",
-        {"marker_panel_sha256", "establishes_full_target_independence"},
+        {
+            "evidence_kind",
+            "annotation_receipt_sha256",
+            "ordered_annotation_feature_ids",
+            "ordered_annotation_feature_ids_sha256",
+            "ordered_target_gene_ids",
+            "ordered_target_gene_ids_sha256",
+            "annotation_target_overlap_count",
+            "annotation_training_scope",
+            "annotation_training_donor_ids",
+            "annotation_training_donor_ids_sha256",
+            "locked_donors_used_for_training",
+            "same_cohort_annotation",
+            "cross_fitting_method",
+            "cross_fitting_receipt_sha256",
+            "establishes_full_target_independence",
+        },
     )
+    try:
+        source_independence = json.loads(str(_scalar(archive, ("label_target_independence_json",))))
+        provenance = json.loads(str(_scalar(archive, ("provenance_json",))))
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("HEST source label-target independence provenance is malformed") from error
+    expected_independence = dict(independence)
+    source_independence_sha = hashlib.sha256(
+        json.dumps(source_independence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    annotation_ids = tuple(str(value) for value in independence["ordered_annotation_feature_ids"])
+    target_ids = tuple(str(value) for value in independence["ordered_target_gene_ids"])
+    source_annotation_ids = tuple(
+        np.asarray(_array(archive, ("annotation_feature_ids",))).astype(str).tolist()
+    )
+    source_annotation_receipt = str(_scalar(archive, ("annotation_receipt_sha256",)) or "")
+    source_annotation_predictions = str(
+        _scalar(archive, ("annotation_prediction_export_sha256",)) or ""
+    )
+    source_label_sha256 = str(_scalar(archive, ("label_source_sha256",)) or "")
+    source_label_kind = str(_scalar(archive, ("label_source_kind",)) or "")
     if (
-        independence["marker_panel_sha256"] != source_marker_panel
+        source_independence != expected_independence
+        or str(_scalar(archive, ("label_target_independence_sha256",))) != source_independence_sha
+        or not isinstance(provenance, Mapping)
+        or provenance.get("label_target_independence") != expected_independence
+        or plan.get("label_target_independence") != expected_independence
+        or source_annotation_receipt != independence["annotation_receipt_sha256"]
+        or provenance.get("label_receipt_sha256") != source_annotation_receipt
+        or plan.get("annotation_receipt_sha256") != source_annotation_receipt
+        or not re.fullmatch(r"[0-9a-f]{64}", source_annotation_predictions)
+        or provenance.get("label_source_sha256") != source_annotation_predictions
+        or plan.get("annotation_prediction_export_sha256") != source_annotation_predictions
+        or source_label_sha256 != source_annotation_predictions
+        or source_label_kind != "independent_annotation_prediction_export"
+        or provenance.get("label_source_kind") != source_label_kind
+        or plan.get("label_source_kind") != source_label_kind
+        or source_annotation_ids != annotation_ids
+        or independence["ordered_annotation_feature_ids_sha256"]
+        != ordered_ids_sha256(annotation_ids)
+        or independence["ordered_target_gene_ids_sha256"] != ordered_ids_sha256(target_ids)
+        or independence["ordered_target_gene_ids_sha256"]
+        != manifest.content["target_gene_panel_sha256"]
+        or tuple(selected_target_gene_ids) != target_ids
+        or set(annotation_ids) & set(target_ids)
+        or independence["annotation_target_overlap_count"] != 0
+        or independence["locked_donors_used_for_training"] is not False
         or independence["establishes_full_target_independence"] is not True
+        or independence["evidence_kind"] == "pending"
     ):
-        raise ValueError("HEST label-target independence was not established before lock")
+        raise ValueError(
+            "HEST source label-target independence contract differs from the locked manifest"
+        )
+    if independence["same_cohort_annotation"] is True and (
+        independence["cross_fitting_method"] != "leave_one_donor_out"
+        or independence["cross_fitting_receipt_sha256"] is None
+    ):
+        raise ValueError("HEST same-cohort labels are not donor-cross-fitted")
 
     declared_controls = manifest.content.get("controls")
     if not isinstance(declared_controls, list) or set(declared_controls) != set(
@@ -502,46 +613,50 @@ def _balance_report(
         name: 0.0 for name in ("section_ids", "disease_states", "site_ids", "batch_ids")
     }
     for donor in sorted(set(donors[evaluation].tolist())):
-        for type_index, type_name in enumerate(type_names):
-            local_reference = reference & (donors == donor) & (labels == type_index)
-            local_evaluation = evaluation & (donors == donor) & (labels == type_index)
-            if not local_reference.any() or not local_evaluation.any():
-                continue
-            differences = _standardized_mean_difference(
-                feature_matrix[local_reference], feature_matrix[local_evaluation]
-            )
-            local_maximum = float(np.max(np.abs(differences))) if len(differences) else 0.0
-            maximum = max(maximum, local_maximum)
-            if len(differences):
-                feature_maxima = np.maximum(feature_maxima, np.abs(differences))
-            local_categorical = {}
-            for name in categorical_maxima:
-                values_by_name = values[name].astype(str)
-                levels = sorted(
-                    set(values_by_name[local_reference].tolist())
-                    | set(values_by_name[local_evaluation].tolist())
+        donor_evaluation = evaluation & (donors == donor)
+        for section_id in sorted(set(values["section_ids"][donor_evaluation].astype(str).tolist())):
+            section = values["section_ids"].astype(str) == section_id
+            for type_index, type_name in enumerate(type_names):
+                local_reference = reference & (donors == donor) & section & (labels == type_index)
+                local_evaluation = evaluation & (donors == donor) & section & (labels == type_index)
+                if not local_reference.any() or not local_evaluation.any():
+                    continue
+                differences = _standardized_mean_difference(
+                    feature_matrix[local_reference], feature_matrix[local_evaluation]
                 )
-                reference_fraction = np.asarray(
-                    [np.mean(values_by_name[local_reference] == level) for level in levels]
+                local_maximum = float(np.max(np.abs(differences))) if len(differences) else 0.0
+                maximum = max(maximum, local_maximum)
+                if len(differences):
+                    feature_maxima = np.maximum(feature_maxima, np.abs(differences))
+                local_categorical = {}
+                for name in categorical_maxima:
+                    values_by_name = values[name].astype(str)
+                    levels = sorted(
+                        set(values_by_name[local_reference].tolist())
+                        | set(values_by_name[local_evaluation].tolist())
+                    )
+                    reference_fraction = np.asarray(
+                        [np.mean(values_by_name[local_reference] == level) for level in levels]
+                    )
+                    evaluation_fraction = np.asarray(
+                        [np.mean(values_by_name[local_evaluation] == level) for level in levels]
+                    )
+                    total_variation = float(
+                        0.5 * np.abs(reference_fraction - evaluation_fraction).sum()
+                    )
+                    local_categorical[name] = total_variation
+                    categorical_maxima[name] = max(categorical_maxima[name], total_variation)
+                strata.append(
+                    {
+                        "donor_id": donor,
+                        "section_id": section_id,
+                        "fine_type_id": type_name,
+                        "reference_cells": int(local_reference.sum()),
+                        "evaluation_cells": int(local_evaluation.sum()),
+                        "maximum_absolute_standardized_mean_difference": local_maximum,
+                        "categorical_total_variation": local_categorical,
+                    }
                 )
-                evaluation_fraction = np.asarray(
-                    [np.mean(values_by_name[local_evaluation] == level) for level in levels]
-                )
-                total_variation = float(
-                    0.5 * np.abs(reference_fraction - evaluation_fraction).sum()
-                )
-                local_categorical[name] = total_variation
-                categorical_maxima[name] = max(categorical_maxima[name], total_variation)
-            strata.append(
-                {
-                    "donor_id": donor,
-                    "fine_type_id": type_name,
-                    "reference_cells": int(local_reference.sum()),
-                    "evaluation_cells": int(local_evaluation.sum()),
-                    "maximum_absolute_standardized_mean_difference": local_maximum,
-                    "categorical_total_variation": local_categorical,
-                }
-            )
     categorical = {}
     for name in ("section_ids", "disease_states", "site_ids", "batch_ids"):
         array = values[name].astype(str)
@@ -582,6 +697,350 @@ def _json(value: object) -> np.ndarray:
     return np.asarray(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
+def _locked_measurement_audit_report(
+    *,
+    contract: Mapping[str, object],
+    donor_ids: np.ndarray,
+    section_ids: np.ndarray,
+    fine_type_ids: np.ndarray,
+    locked_donors: Sequence[str],
+    supported_types: Sequence[str],
+    gene_ids: Sequence[str],
+    half_a_counts: np.ndarray,
+    half_b_counts: np.ndarray,
+    half_a_library_sizes: np.ndarray,
+    half_b_library_sizes: np.ndarray,
+    source_locked_measurement_qc_pass: np.ndarray,
+    target_qc_pass: np.ndarray,
+    registration_qc_pass: np.ndarray,
+    segmentation_qc_pass: np.ndarray,
+    crop_qc_pass: np.ndarray,
+    annotation_nucleus_um: np.ndarray,
+    annotation_cell_um: np.ndarray,
+    cell_nucleus_um: np.ndarray,
+    nucleus_area_um2: np.ndarray,
+    nearest_neighbor_um: np.ndarray,
+    nucleus_inside_cell: np.ndarray,
+    cell_area_um2: np.ndarray,
+    crop_ids: Sequence[str],
+    crop_padding_fractions: np.ndarray,
+) -> Mapping[str, object]:
+    """Audit locked measurement quality without selecting genes, types, or thresholds."""
+
+    locked = np.isin(donor_ids, np.asarray(tuple(locked_donors)))
+    if not locked.any():
+        raise ValueError("confirmatory source lacks locked rows for measurement audit")
+    nucleus_diameter = 2.0 * np.sqrt(nucleus_area_um2 / np.pi)
+    area_ratio = nucleus_area_um2 / np.maximum(cell_area_um2, np.finfo(float).eps)
+    maximum_registration_outliers = float(contract["maximum_registration_outlier_fraction"])
+
+    def summarize_threshold(
+        values: np.ndarray,
+        selected: np.ndarray,
+        *,
+        maximum: float,
+        maximum_outliers: float,
+    ) -> tuple[Mapping[str, object], np.ndarray]:
+        valid = np.isfinite(values) & (values >= 0.0)
+        row_pass = valid & (values <= maximum)
+        valid_values = values[selected & valid]
+        p95 = float(np.quantile(valid_values, 0.95)) if len(valid_values) else None
+        outlier_fraction = float(np.mean(~row_pass[selected])) if selected.any() else 1.0
+        report = {
+            "rows": int(np.count_nonzero(selected)),
+            "p95": p95,
+            "maximum_allowed_p95": float(maximum),
+            "outlier_fraction": outlier_fraction,
+            "maximum_allowed_outlier_fraction": float(maximum_outliers),
+            "pass": bool(
+                selected.any()
+                and np.count_nonzero(selected & valid) == np.count_nonzero(selected)
+                and p95 is not None
+                and p95 <= maximum
+                and outlier_fraction <= maximum_outliers
+            ),
+        }
+        return report, row_pass
+
+    def absolute_metric(
+        values: np.ndarray, maximum: float
+    ) -> tuple[Mapping[str, object], np.ndarray]:
+        overall, row_pass = summarize_threshold(
+            values,
+            locked,
+            maximum=maximum,
+            maximum_outliers=maximum_registration_outliers,
+        )
+        by_section = {}
+        for section_id in sorted(set(section_ids[locked].astype(str).tolist())):
+            selected = locked & (section_ids.astype(str) == section_id)
+            by_section[section_id], _ = summarize_threshold(
+                values,
+                selected,
+                maximum=maximum,
+                maximum_outliers=maximum_registration_outliers,
+            )
+        return {
+            **overall,
+            "by_section": by_section,
+            "pass": bool(overall["pass"] and all(row["pass"] for row in by_section.values())),
+        }, row_pass
+
+    def relative_metric(
+        errors: np.ndarray, scales: np.ndarray, maximum: float
+    ) -> tuple[Mapping[str, object], np.ndarray]:
+        valid_scale = np.isfinite(scales) & (scales > 0.0)
+        overall_ratios = np.full(len(errors), np.nan, dtype=np.float64)
+        if np.any(locked & valid_scale):
+            overall_ratios[locked] = errors[locked] / float(np.median(scales[locked & valid_scale]))
+        overall, _ = summarize_threshold(
+            overall_ratios,
+            locked,
+            maximum=maximum,
+            maximum_outliers=maximum_registration_outliers,
+        )
+        section_ratios = np.full(len(errors), np.nan, dtype=np.float64)
+        by_section = {}
+        for section_id in sorted(set(section_ids[locked].astype(str).tolist())):
+            selected = locked & (section_ids.astype(str) == section_id)
+            selected_scale = selected & valid_scale
+            if selected_scale.any():
+                section_ratios[selected] = errors[selected] / float(
+                    np.median(scales[selected_scale])
+                )
+            by_section[section_id], _ = summarize_threshold(
+                section_ratios,
+                selected,
+                maximum=maximum,
+                maximum_outliers=maximum_registration_outliers,
+            )
+        row_pass = np.isfinite(section_ratios) & (section_ratios <= maximum)
+        return {
+            **overall,
+            "normalization_denominator": "median_geometry_scale_um",
+            "by_section": by_section,
+            "pass": bool(overall["pass"] and all(row["pass"] for row in by_section.values())),
+        }, row_pass
+
+    annotation_nucleus_report, annotation_nucleus_pass = absolute_metric(
+        annotation_nucleus_um, float(contract["maximum_annotation_nucleus_p95_um"])
+    )
+    annotation_cell_report, annotation_cell_pass = absolute_metric(
+        annotation_cell_um, float(contract["maximum_annotation_cell_p95_um"])
+    )
+    cell_nucleus_report, cell_nucleus_pass = absolute_metric(
+        cell_nucleus_um, float(contract["maximum_cell_nucleus_p95_um"])
+    )
+    diameter_report, diameter_pass = relative_metric(
+        annotation_nucleus_um,
+        nucleus_diameter,
+        float(contract["maximum_registration_nucleus_diameter_ratio_p95"]),
+    )
+    neighbor_report, neighbor_pass = relative_metric(
+        annotation_nucleus_um,
+        nearest_neighbor_um,
+        float(contract["maximum_registration_nearest_neighbor_ratio_p95"]),
+    )
+    recomputed_registration_pass = (
+        annotation_nucleus_pass
+        & annotation_cell_pass
+        & cell_nucleus_pass
+        & diameter_pass
+        & neighbor_pass
+    )
+
+    valid_area = (
+        np.isfinite(nucleus_area_um2)
+        & np.isfinite(cell_area_um2)
+        & (nucleus_area_um2 > 0.0)
+        & (cell_area_um2 > 0.0)
+    )
+    area_pass = (
+        valid_area
+        & (area_ratio >= float(contract["minimum_nucleus_cell_area_ratio"]))
+        & (area_ratio <= float(contract["maximum_nucleus_cell_area_ratio"]))
+    )
+    recomputed_segmentation_pass = nucleus_inside_cell & area_pass
+
+    def segmentation_summary(selected: np.ndarray) -> Mapping[str, object]:
+        outside_fraction = float(np.mean(~nucleus_inside_cell[selected]))
+        area_outlier_fraction = float(np.mean(~area_pass[selected]))
+        return {
+            "rows": int(np.count_nonzero(selected)),
+            "nucleus_outside_cell_fraction": outside_fraction,
+            "maximum_nucleus_outside_cell_fraction": float(
+                contract["maximum_nucleus_outside_cell_fraction"]
+            ),
+            "area_ratio_outlier_fraction": area_outlier_fraction,
+            "maximum_area_ratio_outlier_fraction": float(
+                contract["maximum_segmentation_outlier_fraction"]
+            ),
+            "pass": bool(
+                outside_fraction <= float(contract["maximum_nucleus_outside_cell_fraction"])
+                and area_outlier_fraction
+                <= float(contract["maximum_segmentation_outlier_fraction"])
+            ),
+        }
+
+    segmentation_overall = segmentation_summary(locked)
+    segmentation_by_section = {
+        section_id: segmentation_summary(locked & (section_ids.astype(str) == section_id))
+        for section_id in sorted(set(section_ids[locked].astype(str).tolist()))
+    }
+    segmentation_report = {
+        **segmentation_overall,
+        "by_section": segmentation_by_section,
+        "pass": bool(
+            segmentation_overall["pass"]
+            and all(row["pass"] for row in segmentation_by_section.values())
+        ),
+    }
+
+    padding = np.asarray(crop_padding_fractions, dtype=np.float64)
+    if padding.ndim != 2 or padding.shape != (len(donor_ids), len(crop_ids)):
+        raise ValueError("locked crop padding audit differs from the frozen crop family")
+    valid_padding = np.isfinite(padding) & (padding >= 0.0) & (padding <= 1.0)
+    recomputed_crop_pass = np.all(
+        valid_padding & (padding <= float(contract["maximum_crop_padding_p95"])), axis=1
+    )
+    recomputed_nonmolecular_qc_pass = (
+        recomputed_registration_pass & recomputed_segmentation_pass & recomputed_crop_pass
+    )
+    recomputed_qualified_qc_pass = recomputed_nonmolecular_qc_pass & target_qc_pass
+    crop_reports = {}
+    for column, crop_id in enumerate(crop_ids):
+        values = padding[:, column]
+
+        def crop_summary(selected: np.ndarray) -> Mapping[str, object]:
+            valid = valid_padding[:, column]
+            selected_values = values[selected & valid]
+            p95 = float(np.quantile(selected_values, 0.95)) if len(selected_values) else None
+            mostly = float(
+                np.mean(
+                    ~valid[selected] | (values[selected] > float(contract["mostly_padded_cutoff"]))
+                )
+            )
+            return {
+                "rows": int(np.count_nonzero(selected)),
+                "padding_p95": p95,
+                "mostly_padded_fraction": mostly,
+                "pass": bool(
+                    np.count_nonzero(selected & valid) == np.count_nonzero(selected)
+                    and p95 is not None
+                    and p95 <= float(contract["maximum_crop_padding_p95"])
+                    and mostly <= float(contract["maximum_mostly_padded_fraction"])
+                ),
+            }
+
+        overall = crop_summary(locked)
+        by_section = {
+            section_id: crop_summary(locked & (section_ids.astype(str) == section_id))
+            for section_id in sorted(set(section_ids[locked].astype(str).tolist()))
+        }
+        crop_reports[str(crop_id)] = {
+            **overall,
+            "by_section": by_section,
+            "pass": bool(overall["pass"] and all(row["pass"] for row in by_section.values())),
+        }
+
+    source_qc_matches = {
+        "registration_qc_matches_recomputed": bool(
+            np.array_equal(registration_qc_pass[locked], recomputed_registration_pass[locked])
+        ),
+        "segmentation_qc_matches_recomputed": bool(
+            np.array_equal(segmentation_qc_pass[locked], recomputed_segmentation_pass[locked])
+        ),
+        "crop_qc_matches_recomputed": bool(
+            np.array_equal(crop_qc_pass[locked], recomputed_crop_pass[locked])
+        ),
+        "locked_measurement_qc_matches_recomputed_conjunction": bool(
+            np.array_equal(
+                source_locked_measurement_qc_pass[locked],
+                recomputed_nonmolecular_qc_pass[locked],
+            )
+        ),
+    }
+    distribution_checks = {
+        "annotation_nucleus": bool(annotation_nucleus_report["pass"]),
+        "annotation_cell": bool(annotation_cell_report["pass"]),
+        "cell_nucleus": bool(cell_nucleus_report["pass"]),
+        "nucleus_diameter_relative": bool(diameter_report["pass"]),
+        "nearest_neighbor_relative": bool(neighbor_report["pass"]),
+        "segmentation": bool(segmentation_report["pass"]),
+        "crop_padding": bool(all(report["pass"] for report in crop_reports.values())),
+        **source_qc_matches,
+    }
+    maximum_crop_padding = np.max(padding, axis=1)
+    summaries = {
+        "registration": {
+            "annotation_to_nucleus_distance_um": annotation_nucleus_report,
+            "annotation_to_cell_distance_um": annotation_cell_report,
+            "native_cell_to_nucleus_distance_um": cell_nucleus_report,
+            "annotation_error_over_median_nucleus_diameter": diameter_report,
+            "annotation_error_over_median_nearest_neighbor_distance": neighbor_report,
+        },
+        "segmentation": segmentation_report,
+        "crop_padding": crop_reports,
+        "maximum_crop_padding_p95": float(np.quantile(maximum_crop_padding[locked], 0.95)),
+        "rows_before_frozen_qc": int(np.count_nonzero(locked)),
+        "rows_after_frozen_qc": int(np.count_nonzero(locked & recomputed_qualified_qc_pass)),
+        "source_locked_measurement_qc_false_positive_rows": int(
+            np.count_nonzero(
+                locked & source_locked_measurement_qc_pass & ~recomputed_nonmolecular_qc_pass
+            )
+        ),
+        "reliability_row_policy": (
+            "recomputed_registration_and_segmentation_and_crop_and_target_qc"
+        ),
+    }
+    normalized_a = normalize_split_counts(half_a_counts, library_sizes=half_a_library_sizes)
+    normalized_b = normalize_split_counts(half_b_counts, library_sizes=half_b_library_sizes)
+    donor_type_reports = {}
+    reliable = 0
+    denominator = 0
+    for donor in locked_donors:
+        for fine_type in supported_types:
+            denominator += 1
+            selected = (
+                (donor_ids == donor) & (fine_type_ids == fine_type) & recomputed_qualified_qc_pass
+            )
+            report = feature_reliability(
+                normalized_a[selected],
+                normalized_b[selected],
+                gene_ids,
+                minimum_rows=int(contract["minimum_reliability_rows"]),
+            )
+            median = report["median_spearman_brown_reliability"]
+            passes = bool(
+                median is not None
+                and median >= float(contract["minimum_within_fine_type_reliability"])
+            )
+            reliable += int(passes)
+            donor_type_reports["%s|%s" % (donor, fine_type)] = {
+                **report,
+                "planned": True,
+                "passes_frozen_reliability": passes,
+            }
+    reliable_fraction = float(reliable / max(denominator, 1))
+    audit_pass = bool(
+        all(distribution_checks.values())
+        and reliable_fraction >= float(contract["minimum_locked_donor_type_reliability_fraction"])
+    )
+    return {
+        "schema": "heir.locked_measurement_audit.v1",
+        "selection_changes_forbidden": True,
+        "coverage_denominator": "all_h_meas_supported_fine_types_and_locked_donors",
+        "thresholds": dict(contract),
+        "summaries": summaries,
+        "distribution_checks": distribution_checks,
+        "donor_type_reliability": donor_type_reports,
+        "planned_donor_type_count": denominator,
+        "reliable_donor_type_count": reliable,
+        "reliable_donor_type_fraction": reliable_fraction,
+        "pass": audit_pass,
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study-manifest", type=Path, required=True)
@@ -618,9 +1077,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if len(set(outputs)) != len(outputs):
         raise ValueError("morphology-ridge outputs must be distinct")
 
-    manifest = StudyManifest.load(manifest_path, require_status="locked")
     plan = _load_plan(plan_path, source_path)
     source_sha = sha256_file(source_path)
+    with np.load(source_path, allow_pickle=False) as source_identity_archive:
+        cohort_id = str(
+            _scalar(source_identity_archive, ("cohort_id",)) or plan.get("cohort_id", "")
+        )
+    if cohort_id == "HEST":
+        manifest = StudyManifest.load(
+            manifest_path,
+            require_status="opened",
+            verify_runtime=True,
+            require_clean_runtime=True,
+            verify_container_digest=True,
+            repository_root=Path(__file__).resolve().parents[1],
+        )
+        opening = manifest.content["opening"]
+        if "H-CELL" not in opening["permitted_claims"]:
+            raise ValueError("opened study manifest does not permit the H-CELL claim")
+        opening_receipt_sha256 = _sha256(
+            opening["opening_receipt_sha256"], "opening.opening_receipt_sha256"
+        )
+    elif cohort_id == "HESCAPE":
+        manifest = StudyManifest.load(manifest_path, require_status="locked")
+        opening_receipt_sha256 = None
+    else:
+        raise ValueError("morphology preparation supports only HEST or HESCAPE")
     with np.load(source_path, allow_pickle=False) as archive:
         if str(_scalar(archive, ("schema_version",))) != str(plan["source_schema"]):
             raise ValueError("source observation schema differs from the source plan")
@@ -708,6 +1190,69 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise ValueError("H-MEAS selected a gene absent from the registered source")
         selected_gene_indices = np.asarray([gene_index[gene] for gene in genes], dtype=np.int64)
         values["molecular_targets"] = values["molecular_targets"][:, selected_gene_indices]
+        locked_audit_inputs = None
+        if cohort_id == "HEST":
+            source_thresholds = json.loads(
+                str(_scalar(archive, ("locked_measurement_audit_thresholds_json",)))
+            )
+            if (
+                source_thresholds != manifest.content["locked_measurement_audit"]
+                or str(_scalar(archive, ("locked_measurement_audit_thresholds_sha256",)))
+                != hashlib.sha256(
+                    json.dumps(source_thresholds, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+            ):
+                raise ValueError("confirmatory source changed the frozen locked measurement audit")
+            locked_audit_inputs = {
+                "half_a_counts": np.asarray(
+                    _array(archive, ("nucleus_target_counts_half_a",)), dtype=np.float64
+                )[:, selected_gene_indices],
+                "half_b_counts": np.asarray(
+                    _array(archive, ("nucleus_target_counts_half_b",)), dtype=np.float64
+                )[:, selected_gene_indices],
+                "half_a_library_sizes": np.asarray(
+                    _array(archive, ("nucleus_library_size_half_a",)), dtype=np.float64
+                ),
+                "half_b_library_sizes": np.asarray(
+                    _array(archive, ("nucleus_library_size_half_b",)), dtype=np.float64
+                ),
+                "source_locked_measurement_qc_pass": np.asarray(
+                    _array(archive, ("locked_measurement_qc_pass",)), dtype=np.bool_
+                ),
+                "target_qc_pass": np.asarray(_array(archive, ("target_qc_pass",)), dtype=np.bool_),
+                "registration_qc_pass": np.asarray(
+                    _array(archive, ("registration_qc_pass",)), dtype=np.bool_
+                ),
+                "segmentation_qc_pass": np.asarray(
+                    _array(archive, ("segmentation_qc_pass",)), dtype=np.bool_
+                ),
+                "crop_qc_pass": np.asarray(_array(archive, ("crop_qc_pass",)), dtype=np.bool_),
+                "annotation_nucleus_um": np.asarray(
+                    _array(archive, ("registration_distance_um",)), dtype=np.float64
+                ),
+                "annotation_cell_um": np.asarray(
+                    _array(archive, ("annotation_cell_distance_um",)), dtype=np.float64
+                ),
+                "cell_nucleus_um": np.asarray(
+                    _array(archive, ("cell_nucleus_centroid_distance_um",)), dtype=np.float64
+                ),
+                "nucleus_area_um2": np.asarray(
+                    _array(archive, ("nucleus_area_um2",)), dtype=np.float64
+                ),
+                "nearest_neighbor_um": np.asarray(
+                    _array(archive, ("local_density_features",)), dtype=np.float64
+                )[:, 0],
+                "nucleus_inside_cell": np.asarray(
+                    _array(archive, ("nucleus_centroid_inside_cell",)), dtype=np.bool_
+                ),
+                "cell_area_um2": np.asarray(_array(archive, ("cell_area_um2",)), dtype=np.float64),
+                "crop_ids": tuple(np.asarray(_array(archive, ("crop_ids",))).astype(str).tolist()),
+                "crop_padding_fractions": np.asarray(
+                    _array(archive, ("crop_padding_fractions",)), dtype=np.float64
+                ),
+            }
         type_index = {value: index for index, value in enumerate(supported_types)}
         remapped_labels = np.asarray(
             [type_index.get(value, -1) for value in values["fine_type_ids"]], dtype=np.int64
@@ -796,7 +1341,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             np.asarray(marker_values).astype(str).tolist() if marker_values is not None else ()
         )
         source_qc = np.ones(rows, dtype=np.bool_)
-        for field_name in ("registration_qc_pass", "target_qc_pass", "crop_qc_pass"):
+        for field_name in (
+            "registration_qc_pass",
+            "segmentation_qc_pass",
+            "target_qc_pass",
+            "crop_qc_pass",
+            "locked_measurement_qc_pass",
+        ):
             field = _array(archive, (field_name,), required=False)
             if field is not None:
                 source_qc &= np.asarray(field, dtype=np.bool_)
@@ -842,7 +1393,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _validate_hest_source_contract(
                 manifest,
                 archive,
+                plan=plan,
                 source_gene_ids=source_gene_ids,
+                selected_target_gene_ids=genes,
                 marker_genes=marker_genes,
                 crop_ids=crop_ids,
                 crop_roles=crop_roles,
@@ -949,18 +1502,133 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         + ["boundary::%s" % value for value in named["boundary"][1].tolist()]
         + ["spatial::%s" % value for value in named["spatial"][1].tolist()]
     )
+    locked_measurement_audit = None
+    if cohort_id == "HEST":
+        if locked_audit_inputs is None:
+            raise ValueError("confirmatory HEST source lacks locked measurement audit inputs")
+        locked_measurement_audit = _locked_measurement_audit_report(
+            contract=manifest.content["locked_measurement_audit"],
+            donor_ids=values["donor_ids"],
+            section_ids=values["section_ids"],
+            fine_type_ids=values["fine_type_ids"],
+            locked_donors=manifest.locked_test_donors,
+            supported_types=supported_types,
+            gene_ids=genes,
+            **locked_audit_inputs,
+        )
+    minimum_reference = (
+        int(
+            manifest.content["coverage_requirements"][
+                "minimum_reference_cells_per_donor_section_type"
+            ]
+        )
+        if cohort_id == "HEST"
+        else 1
+    )
+    minimum_evaluation = (
+        int(
+            manifest.content["coverage_requirements"][
+                "minimum_evaluation_cells_per_donor_section_type"
+            ]
+        )
+        if cohort_id == "HEST"
+        else 1
+    )
     for role, role_donors, output in role_specs:
         donor_mask = np.isin(values["donor_ids"], np.asarray(role_donors))
-        qualified = (
-            donor_mask
-            & source_qc
-            & (values["type_labels"] >= 0)
-            & np.isin(row_strata, np.asarray(sorted(retained_strata)))
-        )
+        frozen_type_mask = values["type_labels"] >= 0
+        locked_support_audit = None
+        if role == "locked_test":
+            support_mask = np.zeros(rows, dtype=np.bool_)
+            locked_support_audit = {}
+            minimum_locked_donors = int(
+                manifest.content["coverage_requirements"]["minimum_locked_donors_per_fine_type"]
+            )
+            primary_support = {}
+            for donor in role_donors:
+                donor_sections = sorted(
+                    set(values["section_ids"][values["donor_ids"] == donor].astype(str).tolist())
+                )
+                for section_id in donor_sections:
+                    for fine_type in supported_types:
+                        group = (
+                            (values["donor_ids"] == donor)
+                            & (values["section_ids"] == section_id)
+                            & (values["fine_type_ids"] == fine_type)
+                            & frozen_type_mask
+                            & source_qc
+                        )
+                        reference_count = int(
+                            np.count_nonzero(group & (primary_roles == "reference"))
+                        )
+                        evaluation_count = int(
+                            np.count_nonzero(group & (primary_roles == "evaluation"))
+                        )
+                        primary_support[(donor, section_id, fine_type)] = bool(
+                            reference_count >= minimum_reference
+                            and evaluation_count >= minimum_evaluation
+                        )
+                        locked_support_audit["%s|%s|%s" % (donor, section_id, fine_type)] = {
+                            "planned": True,
+                            "reference_rows_after_frozen_qc": reference_count,
+                            "evaluation_rows_after_frozen_qc": evaluation_count,
+                            "minimum_reference_rows": minimum_reference,
+                            "minimum_evaluation_rows": minimum_evaluation,
+                        }
+            supported_donors_by_type = {
+                fine_type: sum(
+                    any(
+                        primary_support[(donor, section_id, fine_type)]
+                        for section_id in sorted(
+                            set(
+                                values["section_ids"][values["donor_ids"] == donor]
+                                .astype(str)
+                                .tolist()
+                            )
+                        )
+                    )
+                    for donor in role_donors
+                )
+                for fine_type in supported_types
+            }
+            for donor in role_donors:
+                donor_sections = sorted(
+                    set(values["section_ids"][values["donor_ids"] == donor].astype(str).tolist())
+                )
+                for section_id in donor_sections:
+                    for fine_type in supported_types:
+                        group = (
+                            (values["donor_ids"] == donor)
+                            & (values["section_ids"] == section_id)
+                            & (values["fine_type_ids"] == fine_type)
+                            & frozen_type_mask
+                            & source_qc
+                        )
+                        type_support = supported_donors_by_type[fine_type]
+                        evaluable = bool(
+                            primary_support[(donor, section_id, fine_type)]
+                            and type_support >= minimum_locked_donors
+                        )
+                        if evaluable:
+                            support_mask |= group
+                        locked_support_audit["%s|%s|%s" % (donor, section_id, fine_type)].update(
+                            {
+                                "locked_donors_with_primary_support": type_support,
+                                "minimum_locked_donors_per_fine_type": minimum_locked_donors,
+                                "fine_type_support_pass": type_support >= minimum_locked_donors,
+                                "evaluable": evaluable,
+                            }
+                        )
+        else:
+            support_mask = frozen_type_mask & np.isin(
+                row_strata, np.asarray(sorted(retained_strata))
+            )
+        qualified = donor_mask & source_qc & support_mask
         evaluation = qualified & (primary_roles == "evaluation")
         if set(values["donor_ids"][evaluation].tolist()) != set(role_donors):
             raise ValueError("every frozen donor needs qualified evaluation cells")
         evaluation_donors = values["donor_ids"][evaluation]
+        evaluation_sections = values["section_ids"][evaluation]
         evaluation_labels = values["type_labels"][evaluation]
         references_by_split = np.zeros(
             (int(evaluation.sum()), len(reference_split_ids), len(genes)), dtype=np.float64
@@ -974,36 +1642,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise ValueError("frozen split changes primary evaluation rows")
             reference = qualified & (split_roles == "reference")
             for donor in role_donors:
-                reference_blocks = set(
-                    values["block_ids"][reference & (values["donor_ids"] == donor)]
-                )
-                evaluation_blocks = set(
-                    values["block_ids"][evaluation & (values["donor_ids"] == donor)]
-                )
-                if (
-                    not reference_blocks
-                    or not evaluation_blocks
-                    or reference_blocks & evaluation_blocks
+                donor_evaluation = evaluation & (values["donor_ids"] == donor)
+                for section_id in sorted(
+                    set(values["section_ids"][donor_evaluation].astype(str).tolist())
                 ):
-                    raise ValueError("reference and evaluation blocks are not spatially disjoint")
-                for type_index in sorted(
-                    set(evaluation_labels[evaluation_donors == donor].tolist())
-                ):
-                    source_selected = (
+                    section_reference = (
                         reference
                         & (values["donor_ids"] == donor)
-                        & (values["type_labels"] == type_index)
+                        & (values["section_ids"] == section_id)
                     )
-                    target_selected = (evaluation_donors == donor) & (
-                        evaluation_labels == type_index
-                    )
-                    if not source_selected.any():
+                    section_evaluation = donor_evaluation & (values["section_ids"] == section_id)
+                    reference_blocks = set(values["block_ids"][section_reference])
+                    evaluation_blocks = set(values["block_ids"][section_evaluation])
+                    if (
+                        not reference_blocks
+                        or not evaluation_blocks
+                        or reference_blocks & evaluation_blocks
+                    ):
                         raise ValueError(
-                            "an evaluated donor/type lacks an independent reference pool"
+                            "reference and evaluation blocks are not spatially disjoint"
                         )
-                    references_by_split[target_selected, split_index] = values["molecular_targets"][
-                        source_selected
-                    ].mean(axis=0)
+                    evaluation_section_rows = (evaluation_donors == donor) & (
+                        evaluation_sections == section_id
+                    )
+                    for type_index in sorted(
+                        set(evaluation_labels[evaluation_section_rows].tolist())
+                    ):
+                        source_selected = section_reference & (values["type_labels"] == type_index)
+                        target_selected = evaluation_section_rows & (
+                            evaluation_labels == type_index
+                        )
+                        if np.count_nonzero(source_selected) < minimum_reference:
+                            raise ValueError(
+                                "an evaluated donor/section/type lacks the frozen independent "
+                                "reference support"
+                            )
+                        references_by_split[target_selected, split_index] = values[
+                            "molecular_targets"
+                        ][source_selected].mean(axis=0)
             balance_by_split[split_id] = _balance_report(
                 values,
                 reference,
@@ -1029,7 +1705,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if len(set(reference_membership_digests.values())) != len(reference_split_ids):
             raise ValueError("frozen reference splits have identical memberships")
         role_planned = tuple(
-            value for value in planned_strata if value.split("|", 1)[0] in set(role_donors)
+            value
+            for value in planned_strata
+            if value.split("|", 1)[0] in set(role_donors)
+            and value.rsplit("|", 1)[-1] in set(supported_types)
         )
         retained_role_strata = sorted(set(row_strata[evaluation].tolist()))
         coverage_audit = {
@@ -1042,6 +1721,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "source_qc_retained_rows": int(np.count_nonzero(qualified)),
             "evaluation_rows": int(np.count_nonzero(evaluation)),
             "reference_membership_sha256_by_split": reference_membership_digests,
+            "locked_measurement_audit": (
+                locked_measurement_audit if role == "locked_test" else None
+            ),
+            "locked_support_audit": locked_support_audit,
         }
         primary_reference = references_by_split[:, 0, :]
         payload = {
@@ -1092,6 +1775,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "coverage_audit_json": _json(coverage_audit),
             "reference_evaluation_balance_json": _json(balance_by_split),
             "study_manifest_sha256": np.asarray(manifest.sha256),
+            "opening_receipt_sha256": np.asarray(opening_receipt_sha256 or ""),
             "measurement_receipt_sha256": np.asarray(measurement_sha),
             "measurement_source_sha256": np.asarray(measurement_source_sha),
             "hypothesis_ids": np.asarray(manifest.hypothesis_ids),

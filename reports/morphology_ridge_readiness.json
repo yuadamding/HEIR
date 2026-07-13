@@ -1,9 +1,24 @@
 {
-  "schema": "heir.morphology_ridge_readiness.v3",
-  "assessment_date": "2026-07-12",
-  "status": "data_ready_encoder_primary_pending",
+  "schema": "heir.morphology_ridge_readiness.v4",
+  "assessment_date": "2026-07-13",
+  "status": "data_ready_scientific_lock_blocked",
   "benchmark_executed": false,
   "full_heir_development_authorized": false,
+  "scientific_lock_state": {
+    "h_meas_executed": false,
+    "h_cell_lock_authorized": false,
+    "locked_hest_donors_may_be_opened": false,
+    "blockers": [
+      "development_only_annotation_export_missing",
+      "development_only_h_meas_receipt_missing",
+      "exact_gene_disjoint_label_annotation_receipt_missing",
+      "post_h_meas_confirmatory_design_binding_missing",
+      "h_meas_donor_section_type_calibration_topology_binding_missing",
+      "authorizing_truth_matrix_calibration_runner_missing",
+      "authorizing_per_trial_gate_report_attestation_missing",
+      "authorizing_exact_gate_calibration_receipt_missing"
+    ]
+  },
   "historical_execution_audit": {
     "cohort": "snPATHO_4066_4399_4411",
     "feature_encoder": "omiclip-loki-coca-vit-l-14",
@@ -40,11 +55,13 @@
     "genes": 343,
     "observation_level": "55um_pseudo_visium_spot",
     "target_construction": "sum_pooled_xenium_transcripts",
-    "eligible_role": "regional_exploratory_only_not_nucleus_gate",
+    "eligible_role": "development_donor_regional_exploratory_only_not_validation",
+    "evidence_scope": "development_cross_validation_only",
+    "authorizes_validated_regional_association": false,
     "blockers": [
       "rows_are_pseudo_spots_not_cells_or_nuclei",
       "official_pseudo_patient_split_leaks_true_source_donors",
-      "hoptimus1_manual_approval_pending"
+      "development_donors_only_no_independent_holdout"
     ]
   },
   "cell_level_candidate": {
@@ -60,7 +77,11 @@
     "has_nucleus_assigned_transcripts": true,
     "has_rna_derived_oracle_broad_lineage": true,
     "oracle_lineages": ["Endothelial", "Epithelial", "Immune", "Mesenchymal"],
-    "eligible_role": "primary_general_morphology_state_gate",
+    "eligible_role": "five_locked_donor_internal_go_no_go_gate",
+    "evidence_scope": "within_GSE250346_internal_falsification_only",
+    "locked_donor_count": 5,
+    "supports_population_inference": false,
+    "supports_external_generalization": false,
     "not_eligible_for": [
       "independent_external_confirmation",
       "personalized_matched_snrna_reference_gate"
@@ -71,25 +92,41 @@
       "spaceranger": "not_applicable_to_xenium"
     }
   },
+  "encoder_hierarchy_frozen_before_locked_outcomes": true,
   "encoders": {
     "primary": {
-      "repo": "bioptimus/H-optimus-1",
-      "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
-      "status": "manual_approval_http_403",
-      "feature_width": 1536
-    },
-    "strong_replication": {
       "repo": "MahmoodLab/UNI2-h",
       "revision": "d517a8dd47902dd7c308b3c36f63bce47e7b9a43",
+      "status": "available_frozen",
       "checkpoint_sha256": "6e077eda234bebc595868d918d3458d9dd32a050199b0ff04443b2f46a0a3b1e",
       "checkpoint_bytes": 2725669217,
       "feature_width": 1536,
       "fine_tuning_allowed": false
     },
-    "lightweight_replication": {
+    "replication_1": {
+      "repo": "bioptimus/H-optimus-1",
+      "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+      "status": "manual_approval_http_403",
+      "feature_width": 1536
+    },
+    "replication_2": {
       "repo": "bioptimus/H0-mini",
-      "status": "not_requested"
+      "revision": "5b5cc0505d19ae558270045eb0df8c34df4d9609",
+      "status": "checkpoint_not_materialized",
+      "feature_width": 768
     }
   },
-  "claim": "UNI2-h plus HESCAPE cannot fully validate HEIR because encoder strength cannot repair pseudo-spot ground truth. UNI2-h plus raw HEST can run the direct cell-level morphology gate on the same cohort, but not independent confirmation or the matched-snRNA specificity gate."
+  "nuisance_control_interpretation": {
+    "section_and_batch_indicators": "development_fold_controls_only",
+    "fully_adjust_unseen_locked_categories": false,
+    "required_held_out_evidence": [
+      "measured_stain_and_image_quality",
+      "continuous_spatial_features",
+      "local_density_and_boundary_position",
+      "section_balanced_metrics",
+      "reference_evaluation_balance",
+      "alternate_reference_splits"
+    ]
+  },
+  "claim": "UNI2-h plus development-only HESCAPE cannot validate a regional association because encoder strength cannot repair pseudo-spot ground truth or create an independent holdout. UNI2-h plus raw HEST can run a five-donor internal cell-level go/no-go gate on the same source study, but cannot establish population-level confirmation, external generalization, or matched-snRNA specificity."
 }

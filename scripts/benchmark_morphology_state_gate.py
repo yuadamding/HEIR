@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -17,6 +18,10 @@ from heir.evaluation.control_models import (
     feature_family_registry,
 )
 from heir.evaluation.measurement_gate import load_passing_measurement_receipt
+from heir.evaluation.power import (
+    validate_calibration_receipt,
+    validate_confirmatory_design_binding,
+)
 from heir.utils import atomic_json_dump, reject_output_input_collisions, sha256_file
 
 
@@ -112,22 +117,53 @@ def _calibration_receipt(
     )
     if path is None or not path.is_file() or sha256_file(path) != expected:
         raise ValueError("final inference requires the exact locked calibration receipt")
-    return _load_json(path, "calibration receipt")
+    return validate_calibration_receipt(
+        _load_json(path, "calibration receipt"),
+        required=True,
+    )
 
 
 def _positive_numbers(value: object, name: str, *, integer: bool) -> tuple[float, ...]:
     if not isinstance(value, list) or not value:
         raise ValueError("locked %s must be a nonempty list" % name)
-    try:
-        result = tuple(int(item) if integer else float(item) for item in value)
-    except (TypeError, ValueError) as error:
-        raise ValueError("locked %s contains a non-number" % name) from error
-    if any(item <= 0 for item in result) or len(set(result)) != len(result):
+    result = []
+    for item in value:
+        if isinstance(item, bool):
+            raise ValueError("locked %s contains a non-number" % name)
+        try:
+            numeric = float(item)
+        except (TypeError, ValueError) as error:
+            raise ValueError("locked %s contains a non-number" % name) from error
+        if not math.isfinite(numeric):
+            raise ValueError("locked %s contains a non-number" % name)
+        if integer and not numeric.is_integer():
+            raise ValueError("locked %s must contain exact integers" % name)
+        result.append(float(int(numeric)) if integer else numeric)
+    result_tuple = tuple(result)
+    if any(item <= 0 for item in result_tuple) or len(set(result_tuple)) != len(result_tuple):
         raise ValueError("locked %s must contain unique positive values" % name)
-    return tuple(float(value) for value in result)
+    return result_tuple
 
 
-def _gate_settings(manifest: StudyManifest) -> Mapping[str, object]:
+def _positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError("locked %s must be an exact positive integer" % name)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("locked %s must be an exact positive integer" % name) from error
+    if not math.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+        raise ValueError("locked %s must be an exact positive integer" % name)
+    return int(numeric)
+
+
+def _gate_settings(
+    manifest: StudyManifest,
+    *,
+    measurement_receipt_sha256: Optional[str] = None,
+    selection: Optional[Mapping[str, object]] = None,
+    calibration_receipt: Optional[Mapping[str, object]] = None,
+) -> Mapping[str, object]:
     grid = _mapping(
         manifest.content["hyperparameter_grid"],
         "hyperparameter_grid",
@@ -149,7 +185,7 @@ def _gate_settings(manifest: StudyManifest) -> Mapping[str, object]:
         {
             "minimum_development_donors_per_fine_type",
             "minimum_locked_donors_per_fine_type",
-            "minimum_evaluation_cells_per_donor_type",
+            "minimum_evaluation_cells_per_donor_section_type",
             "minimum_positive_supported_fraction",
         },
     )
@@ -180,16 +216,35 @@ def _gate_settings(manifest: StudyManifest) -> Mapping[str, object]:
         },
     )
     seeds = _positive_numbers(randomization["seeds"], "randomization.seeds", integer=True)
-    per_seed = int(randomization["permutations_per_seed"])
-    if per_seed < 1:
-        raise ValueError("locked permutations_per_seed must be positive")
+    per_seed = _positive_integer(
+        randomization["permutations_per_seed"], "randomization.permutations_per_seed"
+    )
     if randomization["unit"] != "donor_x_fine_type_x_spatial_roi":
         raise ValueError(
             "morphology randomization unit differs from the locked donor/type/ROI unit"
         )
+    design_binding = None
+    if bool(gate["final_inference"]):
+        if measurement_receipt_sha256 is None or selection is None or calibration_receipt is None:
+            raise ValueError("final inference requires the completed H-MEAS design binding")
+        exact_settings = calibration_receipt.get("exact_gate_settings")
+        if not isinstance(exact_settings, Mapping):
+            raise ValueError("calibration receipt lacks exact confirmatory settings")
+        design_binding = validate_confirmatory_design_binding(
+            exact_settings.get("confirmatory_design_binding")
+        )
+        if (
+            design_binding["measurement_receipt_sha256"] != measurement_receipt_sha256
+            or design_binding["ordered_target_gene_ids"] != selection["ordered_reliable_gene_ids"]
+            or design_binding["ordered_supported_fine_type_ids"]
+            != selection["supported_fine_type_ids"]
+        ):
+            raise ValueError("calibration design binding differs from the H-MEAS selection")
     return {
         "experiment_role": str(gate["experiment_role"]),
         "scientific_scope": str(gate["scientific_scope"]),
+        "confirmatory_analysis_plan_sha256": str(manifest.content["analysis_plan_sha256"]),
+        "confirmatory_design_binding": design_binding,
         "ranks": tuple(
             int(value) for value in _positive_numbers(grid["ranks"], "ranks", integer=True)
         ),
@@ -199,7 +254,7 @@ def _gate_settings(manifest: StudyManifest) -> Mapping[str, object]:
         "total_permutations": len(seeds) * per_seed,
         "final_inference": bool(gate["final_inference"]),
         "minimum_final_permutations": int(gate["minimum_final_permutations"]),
-        "minimum_support": int(coverage["minimum_evaluation_cells_per_donor_type"]),
+        "minimum_support": int(coverage["minimum_evaluation_cells_per_donor_section_type"]),
         "minimum_development_donors": int(coverage["minimum_development_donors_per_fine_type"]),
         "minimum_locked_donors": int(coverage["minimum_locked_donors_per_fine_type"]),
         "minimum_macro_r2": float(endpoint["minimum_effect"]),
@@ -253,9 +308,20 @@ def _validate_bindings(
         "encoder",
         {"feature_space_id", "checkpoint_sha256"},
     )
+    opening = _mapping(
+        manifest.content.get("opening"),
+        "opening",
+        {"opening_receipt_sha256", "permitted_claims"},
+    )
+    opening_receipt_sha256 = _sha256(
+        opening["opening_receipt_sha256"], "opening.opening_receipt_sha256"
+    )
     if (
         development.study_manifest_sha256 != manifest.sha256
         or locked.study_manifest_sha256 != manifest.sha256
+        or development.opening_receipt_sha256 != opening_receipt_sha256
+        or locked.opening_receipt_sha256 != opening_receipt_sha256
+        or "H-CELL" not in opening["permitted_claims"]
         or development.measurement_receipt_sha256 != sha256_file(measurement_path)
         or locked.measurement_receipt_sha256 != sha256_file(measurement_path)
         or development.measurement_source_sha256 != prerequisites["measurement_source_sha256"]
@@ -311,7 +377,7 @@ def _validate_bindings(
         or tuple(sorted(set(locked.donor_ids.tolist())))
         != tuple(sorted(manifest.locked_test_donors))
     ):
-        raise ValueError("prepared morphology artifacts differ from the locked H-MEAS study")
+        raise ValueError("prepared morphology artifacts differ from the opened H-CELL study")
     protection = _mapping(
         manifest.content.get("lock_protection"),
         "lock_protection",
@@ -331,13 +397,10 @@ def _validate_bindings(
     if development.cohort_id != "HEST" or locked.cohort_id != "HEST":
         raise ValueError("only HEST may enter the internal locked morphology benchmark")
     for artifact in (development, locked):
-        membership = artifact.coverage_audit.get(
-            "reference_membership_sha256_by_split"
-        )
+        membership = artifact.coverage_audit.get("reference_membership_sha256_by_split")
         if (
             not isinstance(membership, Mapping)
-            or set(str(value) for value in membership)
-            != set(artifact.reference_split_ids)
+            or set(str(value) for value in membership) != set(artifact.reference_split_ids)
             or len(set(str(value) for value in membership.values()))
             != len(artifact.reference_split_ids)
         ):
@@ -383,12 +446,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reject_output_input_collisions((report_path,), inputs, label="morphology ridge benchmark")
     before = {str(path): sha256_file(path) for path in inputs}
 
-    manifest = StudyManifest.load(manifest_path, require_status="locked")
+    manifest = StudyManifest.load(
+        manifest_path,
+        require_status="opened",
+        verify_runtime=True,
+        require_clean_runtime=True,
+        verify_container_digest=True,
+        repository_root=Path(__file__).resolve().parents[1],
+    )
     if manifest.study_stage != "confirmatory_morphology":
         raise ValueError("morphology benchmark requires a confirmatory morphology manifest")
+    opening = _mapping(
+        manifest.content.get("opening"),
+        "opening",
+        {"opening_receipt_sha256", "permitted_claims"},
+    )
+    if "H-CELL" not in opening["permitted_claims"]:
+        raise ValueError("opened study manifest does not permit the H-CELL claim")
     measurement, selection = _measurement_receipt(manifest, measurement_path)
     calibration = _calibration_receipt(manifest, calibration_path)
-    settings = _gate_settings(manifest)
+    settings = _gate_settings(
+        manifest,
+        measurement_receipt_sha256=sha256_file(measurement_path),
+        selection=selection,
+        calibration_receipt=calibration,
+    )
     development = MorphologyRidgeDatasetArtifact.load_npz(development_path, role="development")
     locked = MorphologyRidgeDatasetArtifact.load_npz(locked_path, role="locked_test")
     _validate_bindings(manifest, measurement_path, selection, development, locked)
@@ -424,6 +506,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         donor_bootstrap_seed=settings["donor_bootstrap_seed"],
         prespecified_fixed_hyperparameters=settings["prespecified_fixed_hyperparameters"],
         calibration_receipt=calibration,
+        confirmatory_analysis_plan_sha256=settings["confirmatory_analysis_plan_sha256"],
+        confirmatory_design_binding=settings["confirmatory_design_binding"],
         device=args.device,
     )
     for path in inputs:
@@ -432,12 +516,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = {
         **report,
         "experiment_role": settings["experiment_role"],
-        "scientific_settings_source": "locked_study_manifest_only",
+        "scientific_settings_source": "opened_study_manifest_only",
         "measurement_gate_pass": measurement["pass"],
         "provenance": {
             "study_manifest": {
                 "path": str(manifest_path),
                 "sha256": before[str(manifest_path)],
+                "opening_receipt_sha256": opening["opening_receipt_sha256"],
             },
             "measurement_report": {
                 "path": str(measurement_path),

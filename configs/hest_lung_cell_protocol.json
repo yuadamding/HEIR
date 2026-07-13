@@ -1,5 +1,5 @@
 {
-  "schema": "heir.hest_xenium_cell_protocol.v3",
+  "schema": "heir.hest_xenium_cell_protocol.v4",
   "scientific_scope": "registered_cell_local_context_112um_association",
   "g2_claim_scope": "registered_cell_local_context_112um",
   "authorizes_nucleus_intrinsic_claim": false,
@@ -149,13 +149,21 @@
     "SPP1",
     "TREM2"
   ],
-  "fine_type_annotation_provenance": {
-    "source_field": "final_CT",
-    "source_export": "GSE250346_corrected_Seurat_metadata",
-    "exact_annotation_marker_panel_available": false,
-    "exclusion_policy": "conservative_predeclared_proxy",
+  "label_target_independence": {
+    "strategy": "conservative_proxy_marker_exclusion_pending_exact_annotation_provenance",
+    "evidence_kind": "pending",
+    "annotation_receipt_sha256": null,
+    "ordered_annotation_feature_ids": [],
+    "ordered_annotation_feature_ids_sha256": null,
+    "annotation_training_scope": "unknown_pending_provenance",
+    "annotation_training_donor_ids": [],
+    "annotation_training_donor_ids_sha256": null,
+    "locked_donors_used_for_training": null,
+    "same_cohort_annotation": true,
+    "cross_fitting_method": "pending",
+    "cross_fitting_receipt_sha256": null,
     "establishes_full_target_independence": false,
-    "limitation": "The original final_CT marker-selection and classifier-gene procedure is unavailable; this conservative proxy removes known subtype-defining genes but cannot prove complete label-target independence."
+    "limitation": "The original final_CT marker-selection and classifier-gene procedure is unavailable; no annotation receipt, exact ordered annotation feature set, or donor-cross-fitting receipt exists, so this protocol cannot authorize H-CELL."
   },
   "gene_ids": [
     "ABCC2",
@@ -485,8 +493,8 @@
   "minimum_transcript_qv": 20.0,
   "minimum_development_donors_per_fine_type": 3,
   "minimum_locked_donors_per_fine_type": 3,
-  "minimum_reference_cells_per_donor_type": 20,
-  "minimum_evaluation_cells_per_donor_type": 20,
+  "minimum_reference_cells_per_donor_section_type": 20,
+  "minimum_evaluation_cells_per_donor_section_type": 20,
   "excluded_feature_prefixes": [
     "NegControlProbe_",
     "NegControlCodeword_",

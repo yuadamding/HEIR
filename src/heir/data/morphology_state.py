@@ -147,6 +147,7 @@ class MorphologyRidgeDatasetArtifact:
     coverage_audit: Mapping[str, object] = field(default_factory=dict)
     reference_evaluation_balance: Mapping[str, object] = field(default_factory=dict)
     study_manifest_sha256: str = ""
+    opening_receipt_sha256: str = ""
     measurement_receipt_sha256: str = ""
     measurement_source_sha256: str = ""
     hypothesis_ids: Tuple[str, ...] = ()
@@ -158,7 +159,7 @@ class MorphologyRidgeDatasetArtifact:
         default_factory=lambda: np.empty((0, 0, 0), dtype=np.float64)
     )
 
-    SCHEMA = "heir.morphology_ridge_dataset.v3"
+    SCHEMA = "heir.morphology_ridge_dataset.v4"
 
     @classmethod
     def load_npz(cls, path: PathLike, *, role: str) -> "MorphologyRidgeDatasetArtifact":
@@ -211,6 +212,7 @@ class MorphologyRidgeDatasetArtifact:
                 "coverage_audit_json",
                 "reference_evaluation_balance_json",
                 "study_manifest_sha256",
+                "opening_receipt_sha256",
                 "measurement_receipt_sha256",
                 "measurement_source_sha256",
                 "hypothesis_ids",
@@ -356,6 +358,7 @@ class MorphologyRidgeDatasetArtifact:
                 study_manifest_sha256=_sha256(
                     _scalar(archive, "study_manifest_sha256"), "study_manifest_sha256"
                 ),
+                opening_receipt_sha256=str(_scalar(archive, "opening_receipt_sha256")),
                 measurement_receipt_sha256=_sha256(
                     _scalar(archive, "measurement_receipt_sha256"),
                     "measurement_receipt_sha256",
@@ -512,6 +515,10 @@ class MorphologyRidgeDatasetArtifact:
             raise ValueError("reference means by frozen split contain non-finite values")
         if not self.reference_split_ids:
             raise ValueError("at least one frozen reference/evaluation split is required")
+        if not np.array_equal(self.reference_means, self.reference_means_by_split[:, 0, :]):
+            raise ValueError(
+                "standalone reference means differ from the primary frozen reference split"
+            )
         if not self.planned_stratum_ids or not self.coverage_audit:
             raise ValueError("planned biological coverage must be carried into the artifact")
         memberships = self.coverage_audit.get("reference_membership_sha256_by_split")
@@ -536,6 +543,10 @@ class MorphologyRidgeDatasetArtifact:
             raise ValueError("morphology-ridge evidence scope is unsupported")
         if self.cohort_id == "HESCAPE" and self.evidence_scope != "development_pilot":
             raise ValueError("HESCAPE is restricted to development-pilot evidence")
+        if self.cohort_id == "HEST":
+            _sha256(self.opening_receipt_sha256, "opening_receipt_sha256")
+        elif self.opening_receipt_sha256:
+            raise ValueError("development-pilot artifacts cannot claim an opening receipt")
         declared = (
             self.feature_space_id,
             self.molecular_space_id,
@@ -593,6 +604,7 @@ class MorphologyRidgeDatasetArtifact:
             "registration_source_sha256",
             "exclusion_policy_sha256",
             "study_manifest_sha256",
+            "opening_receipt_sha256",
             "measurement_receipt_sha256",
             "measurement_source_sha256",
             "hypothesis_ids",

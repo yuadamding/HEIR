@@ -26,6 +26,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         locked_path,
         require_status="locked",
         verify_runtime=True,
+        require_clean_runtime=True,
+        verify_container_digest=True,
         repository_root=args.repository_root,
     )
     opened = open_manifest_content(
