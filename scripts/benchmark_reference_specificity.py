@@ -40,8 +40,30 @@ def _load_prerequisites(paths: Sequence[Path]) -> list[Mapping[str, object]]:
             or not role
         ):
             raise ValueError("reference utility requires passing frozen morphology reports")
+        provenance = report.get("provenance")
+        if not isinstance(provenance, Mapping):
+            raise ValueError("morphology prerequisite lacks bound provenance")
+        feature_checkpoint = str(provenance.get("feature_checkpoint_sha256", ""))
+        locked_test = provenance.get("locked_test_data")
+        locked_test_sha = (
+            str(locked_test.get("sha256", "")) if isinstance(locked_test, Mapping) else ""
+        )
+        for name, digest in (
+            ("feature checkpoint", feature_checkpoint),
+            ("locked-test query source", locked_test_sha),
+        ):
+            if len(digest) != 64 or any(value not in "0123456789abcdef" for value in digest):
+                raise ValueError("morphology prerequisite %s is malformed" % name)
         roles.append(role)
-        result.append({"role": role, "path": str(path), "sha256": sha256_file(path)})
+        result.append(
+            {
+                "role": role,
+                "path": str(path),
+                "sha256": sha256_file(path),
+                "feature_checkpoint_sha256": feature_checkpoint,
+                "locked_test_data_sha256": locked_test_sha,
+            }
+        )
     if "primary_hest_uni2h" not in roles:
         raise ValueError("reference utility requires a passing primary_hest_uni2h report")
     if not any(role.startswith("external_confirmation_") for role in roles):
@@ -59,9 +81,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         required=True,
         help="repeat for the primary HEST and genuine external confirmation reports",
     )
+    parser.add_argument("--power-analysis-receipt", type=Path, required=True)
     parser.add_argument("--report-output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=100)
-    parser.add_argument("--minimum-effect", type=float, required=True)
+    parser.add_argument("--minimum-relative-effect", type=float, required=True)
+    parser.add_argument("--minimum-positive-donor-fraction", type=float, default=0.75)
+    parser.add_argument("--minimum-query-coverage", type=float, default=0.8)
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--confidence", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=17)
@@ -69,13 +94,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     source = args.input.expanduser().resolve()
     prerequisite_paths = tuple(path.expanduser().resolve() for path in args.prerequisite_report)
+    power_path = args.power_analysis_receipt.expanduser().resolve()
     output = args.report_output.expanduser().resolve()
-    inputs = (source, *prerequisite_paths)
+    inputs = (source, power_path, *prerequisite_paths)
     if any(not path.is_file() for path in inputs) or len(set(inputs)) != len(inputs):
         raise ValueError("reference-utility inputs must be distinct existing files")
     reject_output_input_collisions((output,), inputs, label="matched reference utility")
     before = {str(path): sha256_file(path) for path in inputs}
     prerequisites = _load_prerequisites(prerequisite_paths)
+    try:
+        power_receipt = json.loads(power_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("reference-utility power receipt is invalid") from error
+    if not isinstance(power_receipt, Mapping):
+        raise ValueError("reference-utility power receipt must be a JSON object")
+    primary_prerequisite = next(
+        value for value in prerequisites if value["role"] == "primary_hest_uni2h"
+    )
+    external_prerequisites = [
+        value for value in prerequisites if str(value["role"]).startswith("external_confirmation_")
+    ]
 
     with np.load(source, allow_pickle=False) as archive:
         required = {
@@ -86,11 +124,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "query_donors",
             "query_observation_ids",
             "query_section_ids",
+            "query_source_sample_ids",
+            "query_source_material_ids",
+            "query_specimen_ids",
+            "query_preservation_methods",
             "query_disease_states",
             "query_site_ids",
+            "query_institution_ids",
             "query_assay_ids",
             "query_quality_bins",
             "query_depth_bins",
+            "query_latent_model_sha256",
+            "query_normalization_sha256",
+            "query_assay_harmonization_sha256",
+            "query_assay_harmonization_fit_donor_ids",
+            "query_assay_harmonization_source_sha256",
+            "query_calibrated_assay_pairs",
+            "eligible_hard_wrong_donor_ids",
+            "total_eligible_query_count",
+            "excluded_query_reason_names",
+            "excluded_query_reason_counts",
+            "eligible_query_donor_ids",
+            "eligible_query_type_labels",
+            "power_analysis_sha256",
+            "power_justified_minimum_donors",
             "frozen_image_model_sha256",
             "query_source_sha256",
             "bank_names",
@@ -98,8 +155,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         missing = sorted(required - set(archive.files))
         if missing:
             raise ValueError("reference-utility input is missing: %s" % ", ".join(missing))
-        if str(_scalar(archive, "schema_version")) != "heir.reference_utility_input.v1":
+        if str(_scalar(archive, "schema_version")) != "heir.reference_utility_input.v2":
             raise ValueError("reference-utility input schema is unsupported")
+        exclusion_names = tuple(str(value) for value in archive["excluded_query_reason_names"])
+        exclusion_counts = np.asarray(archive["excluded_query_reason_counts"])
+        if (
+            exclusion_counts.shape != (len(exclusion_names),)
+            or len(set(exclusion_names)) != len(exclusion_names)
+            or any(not name.strip() for name in exclusion_names)
+            or not np.issubdtype(exclusion_counts.dtype, np.integer)
+            or np.any(exclusion_counts < 0)
+        ):
+            raise ValueError("reference-utility exclusion denominator is malformed")
+        query_eligibility = {
+            "total_eligible_query_count": int(_scalar(archive, "total_eligible_query_count")),
+            "excluded_query_count_by_reason": {
+                name: int(count) for name, count in zip(exclusion_names, exclusion_counts)
+            },
+            "eligible_donor_ids": np.array(archive["eligible_query_donor_ids"]),
+            "eligible_type_labels": np.array(archive["eligible_query_type_labels"]),
+            "power_analysis_sha256": str(_scalar(archive, "power_analysis_sha256")),
+            "power_justified_minimum_donors": int(
+                _scalar(archive, "power_justified_minimum_donors")
+            ),
+        }
         names = tuple(str(value) for value in archive["bank_names"])
         if not names or len(set(names)) != len(names):
             raise ValueError("reference-utility bank names must be non-empty and unique")
@@ -111,12 +190,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "donor_ids",
             "observation_ids",
             "section_ids",
+            "source_sample_ids",
+            "source_material_ids",
+            "specimen_ids",
+            "preservation_methods",
             "disease_states",
             "site_ids",
+            "institution_ids",
             "assay_ids",
             "quality_bins",
             "depth_bins",
             "latent_model_sha256",
+            "normalization_sha256",
+            "assay_harmonization_sha256",
+            "assay_mode",
+            "latent_fit_donor_ids",
+            "assay_harmonization_fit_donor_ids",
+            "assay_harmonization_source_sha256",
+            "calibrated_assay_pairs",
+            "material_relationship_to_query",
+            "independent_tissue_material",
+            "contains_registered_query_cells",
+            "selection_uses_query_truth",
             "source_sha256",
         )
         for index, name in enumerate(names):
@@ -128,6 +223,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 value = archive[key]
                 payload[field] = _scalar(archive, key) if value.ndim == 0 else np.array(value)
             banks[name] = payload
+        frozen_image_model_sha256 = str(_scalar(archive, "frozen_image_model_sha256"))
+        query_source_sha256 = str(_scalar(archive, "query_source_sha256"))
         report = evaluate_reference_utility(
             np.array(archive["query_image_state_latent"]),
             np.array(archive["query_molecular_target_latent"]),
@@ -141,14 +238,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             np.array(archive["query_quality_bins"]),
             np.array(archive["query_depth_bins"]),
             banks,
+            query_source_sample_ids=np.array(archive["query_source_sample_ids"]),
+            query_source_material_ids=np.array(archive["query_source_material_ids"]),
+            query_specimen_ids=np.array(archive["query_specimen_ids"]),
+            query_preservation_methods=np.array(archive["query_preservation_methods"]),
+            query_institution_ids=np.array(archive["query_institution_ids"]),
+            query_latent_model_sha256=str(_scalar(archive, "query_latent_model_sha256")),
+            query_normalization_sha256=str(_scalar(archive, "query_normalization_sha256")),
+            query_assay_harmonization_sha256=str(
+                _scalar(archive, "query_assay_harmonization_sha256")
+            ),
+            query_assay_harmonization_fit_donor_ids=np.array(
+                archive["query_assay_harmonization_fit_donor_ids"]
+            ),
+            query_assay_harmonization_source_sha256=str(
+                _scalar(archive, "query_assay_harmonization_source_sha256")
+            ),
+            query_calibrated_assay_pairs=np.array(archive["query_calibrated_assay_pairs"]),
+            eligible_hard_wrong_donor_ids=np.array(archive["eligible_hard_wrong_donor_ids"]),
+            query_eligibility=query_eligibility,
+            power_analysis_receipt=power_receipt,
+            power_analysis_receipt_sha256=before[str(power_path)],
+            frozen_image_model_sha256=frozen_image_model_sha256,
+            query_source_sha256=query_source_sha256,
+            morphology_evidence_binding={
+                "primary_feature_checkpoint_sha256": primary_prerequisite[
+                    "feature_checkpoint_sha256"
+                ],
+                "primary_query_source_sha256": primary_prerequisite["locked_test_data_sha256"],
+                "primary_report_sha256": primary_prerequisite["sha256"],
+                "external_report_sha256s": [value["sha256"] for value in external_prerequisites],
+            },
             repeats=args.repeats,
-            minimum_effect=args.minimum_effect,
+            minimum_relative_effect=args.minimum_relative_effect,
+            minimum_positive_donor_fraction=args.minimum_positive_donor_fraction,
+            minimum_query_coverage=args.minimum_query_coverage,
             bootstrap_samples=args.bootstrap_samples,
             confidence=args.confidence,
             seed=args.seed,
         )
-        frozen_image_model_sha256 = str(_scalar(archive, "frozen_image_model_sha256"))
-        query_source_sha256 = str(_scalar(archive, "query_source_sha256"))
 
     for path in inputs:
         if sha256_file(path) != before[str(path)]:
@@ -159,6 +287,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "frozen_image_model_sha256": frozen_image_model_sha256,
         "query_source_sha256": query_source_sha256,
         "morphology_prerequisites": prerequisites,
+        "power_analysis_receipt": {
+            "path": str(power_path),
+            "sha256": before[str(power_path)],
+        },
         "authorizes_uot_or_refinement": False,
         "authorizes_full_heir": False,
     }

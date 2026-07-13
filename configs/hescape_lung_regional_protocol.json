@@ -1,6 +1,7 @@
 {
   "schema": "heir.hescape_regional_protocol.v3",
   "scientific_scope": "regional_pseudospot_exploratory",
+  "analysis_scope": "development_donors_only_hest_lock_unopened",
   "authorization_ceiling": "regional_pseudospot_only_no_cell_or_nucleus_claims",
   "authorizes_nucleus_claim": false,
   "dataset_repo": "Peng-AI/hescape-pyarrow",
@@ -32,7 +33,7 @@
     "TILD175", "VUHD069", "VUHD116", "VUILD102", "VUILD105", "VUILD106",
     "VUILD107", "VUILD110", "VUILD115", "VUILD91"
   ],
-  "locked_test_donors": ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"],
+  "reserved_hest_locked_donors": ["THD0008", "THD0011", "TILD117", "VUILD78", "VUILD96"],
   "dominant_niche_markers": {
     "epithelial": [
       "EPCAM", "KRT8", "KRT18", "KRT5", "KRT14", "SFTPC", "SFTPD", "SCGB1A1",
@@ -60,15 +61,33 @@
   "roi_size_source_pixels": 1024,
   "opposite_pool_guard_source_pixels": 512,
   "source_pixel_size_um": 0.2125,
-  "primary_crop_role": "target_matched_55um",
+  "primary_crop_role": "target_matched_55um_common_mpp",
   "crop_protocols": {
-    "target_matched_55um": {
+    "target_matched_55um_common_mpp": {
+      "structure": "center_window_on_common_canvas",
+      "source_pixels": 512,
+      "retained_center_source_pixels": 256,
+      "window_offset_source_pixels": [0, 0],
+      "inner_mask_source_pixels": 0,
+      "masked_center_fill": "rounded_imagenet_mean_rgb_outside_window",
+      "stain_inclusion_mask": "strict_retained_center_after_bilinear_resize",
+      "physical_width_um": 108.8,
+      "signal_width_um": 54.4,
+      "nominal_target_width_um": 55.0,
+      "resize_pixels": 224,
+      "effective_model_mpp": 0.4857142857142857,
+      "crop_scale": "target_matched_55um_common_0.486mpp"
+    },
+    "target_matched_55um_high_resolution_sensitivity": {
       "structure": "center_square",
       "source_pixels": 256,
+      "retained_center_source_pixels": 0,
+      "window_offset_source_pixels": [0, 0],
       "inner_mask_source_pixels": 0,
       "masked_center_fill": "none",
       "stain_inclusion_mask": "all_resized_pixels",
       "physical_width_um": 54.4,
+      "signal_width_um": 54.4,
       "nominal_target_width_um": 55.0,
       "resize_pixels": 224,
       "effective_model_mpp": 0.24285714285714285,
@@ -77,10 +96,13 @@
     "context_108um": {
       "structure": "center_square",
       "source_pixels": 512,
+      "retained_center_source_pixels": 0,
+      "window_offset_source_pixels": [0, 0],
       "inner_mask_source_pixels": 0,
       "masked_center_fill": "none",
       "stain_inclusion_mask": "all_resized_pixels",
       "physical_width_um": 108.8,
+      "signal_width_um": 108.8,
       "nominal_target_width_um": 55.0,
       "resize_pixels": 224,
       "effective_model_mpp": 0.4857142857142857,
@@ -89,14 +111,32 @@
     "context_annulus_55_to_109um": {
       "structure": "center_annulus",
       "source_pixels": 512,
+      "retained_center_source_pixels": 0,
+      "window_offset_source_pixels": [0, 0],
       "inner_mask_source_pixels": 256,
       "masked_center_fill": "rounded_imagenet_mean_rgb",
       "stain_inclusion_mask": "strict_outer_annulus_after_bilinear_resize",
       "physical_width_um": 108.8,
+      "signal_width_um": 54.4,
       "nominal_target_width_um": 55.0,
       "resize_pixels": 224,
       "effective_model_mpp": 0.4857142857142857,
       "crop_scale": "context_only_annulus_55_to_109um"
+    },
+    "offcenter_55um_common_mpp_mask_control": {
+      "structure": "center_window_on_common_canvas",
+      "source_pixels": 512,
+      "retained_center_source_pixels": 256,
+      "window_offset_source_pixels": [128, 0],
+      "inner_mask_source_pixels": 0,
+      "masked_center_fill": "rounded_imagenet_mean_rgb_outside_window",
+      "stain_inclusion_mask": "strict_retained_center_after_bilinear_resize",
+      "physical_width_um": 108.8,
+      "signal_width_um": 54.4,
+      "nominal_target_width_um": 55.0,
+      "resize_pixels": 224,
+      "effective_model_mpp": 0.4857142857142857,
+      "crop_scale": "offcenter_55um_common_0.486mpp_mask_control"
     }
   },
   "site_definition": "official_hescape_organ",

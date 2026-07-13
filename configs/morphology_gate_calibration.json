@@ -1,0 +1,42 @@
+{
+  "schema": "heir.morphology_gate_calibration_config.v1",
+  "scenario_config": {
+    "seed": 1701,
+    "replicates_per_condition": 24,
+    "development_donors": 6,
+    "evaluation_donors": 8,
+    "fine_types": 3,
+    "cells_per_donor_type": 12,
+    "target_genes": 6,
+    "crop_families": 4,
+    "permutations": 19,
+    "minimum_effect_loading": 0.6,
+    "scenario_families": [
+      "spatial_autocorrelation",
+      "disease_imbalance",
+      "section_effects",
+      "missing_fine_types",
+      "variable_transcript_reliability",
+      "unbalanced_donor_cell_counts",
+      "inactive_permutation_strata",
+      "nuisance_selection",
+      "target_panel_selection",
+      "crop_family_multiplicity"
+    ]
+  },
+  "thresholds": {
+    "maximum_complete_gate_false_pass_probability": 0.05,
+    "minimum_power_at_minimum_meaningful_effect": 0.8,
+    "minimum_macro_r2": 0.05,
+    "minimum_image_minus_nuisance_r2": 0.03,
+    "maximum_exact_signflip_p": 0.05,
+    "minimum_positive_donor_fraction": 0.7,
+    "maximum_largest_positive_donor_share": 0.5,
+    "minimum_supported_strata_fraction": 0.75,
+    "minimum_active_permutation_strata_fraction": 0.75,
+    "minimum_gene_reliability": 0.6,
+    "minimum_reliable_gene_fraction": 0.5,
+    "minimum_reliable_donor_fraction": 0.75,
+    "ridge_alpha": 1.0
+  }
+}

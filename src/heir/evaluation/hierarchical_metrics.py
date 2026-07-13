@@ -67,9 +67,7 @@ def macro_error_reduction(
             if support < minimum_support:
                 continue
             baseline_rmse = float(np.sqrt(np.mean(np.square(truth[selected] - baseline[selected]))))
-            model_rmse = float(
-                np.sqrt(np.mean(np.square(truth[selected] - prediction[selected])))
-            )
+            model_rmse = float(np.sqrt(np.mean(np.square(truth[selected] - prediction[selected]))))
             value = (baseline_rmse - model_rmse) / max(baseline_rmse, 1.0e-12)
             rows.append(
                 {
@@ -309,9 +307,7 @@ def group_stratification(
     if values.shape != (len(truth),) or any(not value.strip() for value in values.tolist()):
         return {"available": False, "reason": "%s labels are malformed" % group_name}
     try:
-        macro, rows, group_values = macro_r2(
-            truth, prediction, values, labels, minimum_support
-        )
+        macro, rows, group_values = macro_r2(truth, prediction, values, labels, minimum_support)
     except ValueError as error:
         return {"available": False, "reason": str(error)}
     return {
@@ -329,6 +325,54 @@ def group_stratification(
     }
 
 
+def within_group_donor_type_r2(
+    truth: np.ndarray,
+    prediction: np.ndarray,
+    groups: np.ndarray,
+    donors: np.ndarray,
+    labels: np.ndarray,
+    minimum_support: int,
+    *,
+    group_name: str,
+) -> Mapping[str, object]:
+    """Evaluate donor/type macro R2 separately inside each biological group."""
+
+    group_values = np.asarray(groups).astype(str)
+    if group_values.shape != (len(truth),):
+        raise ValueError("within-group labels are not row aligned")
+    reports = {}
+    for group in sorted(set(group_values.tolist())):
+        selected = group_values == group
+        try:
+            macro, rows, donor_values = macro_r2(
+                truth[selected],
+                prediction[selected],
+                np.asarray(donors)[selected],
+                np.asarray(labels)[selected],
+                minimum_support,
+            )
+        except ValueError as error:
+            reports[group] = {"available": False, "reason": str(error)}
+            continue
+        reports[group] = {
+            "available": True,
+            "donor_equal_type_equal_macro_r2": macro,
+            "donor_macro_r2": donor_values,
+            "donor_type_rows": rows,
+        }
+    available = [
+        float(report["donor_equal_type_equal_macro_r2"])
+        for report in reports.values()
+        if report["available"]
+    ]
+    return {
+        "group_name": group_name,
+        "groups": reports,
+        "group_equal_macro_r2": float(np.mean(available)) if available else None,
+        "available_groups": len(available),
+    }
+
+
 __all__ = [
     "donor_bootstrap",
     "donor_dominance",
@@ -342,4 +386,5 @@ __all__ = [
     "macro_reconstruction_r2",
     "paired_donor_effects",
     "section_ids_from_blocks",
+    "within_group_donor_type_r2",
 ]

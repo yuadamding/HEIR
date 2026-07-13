@@ -1,30 +1,50 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://heir.invalid/schemas/study_manifest.schema.json",
-  "title": "HEIR locked study manifest",
+  "title": "HEIR two-stage locked study manifest",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "study_id", "status", "hypothesis_ids", "git_commit",
-    "analysis_plan_sha256", "container_digest", "dataset", "partitions",
-    "observations", "encoder", "crop_protocols", "target_gene_panel_sha256",
-    "type_marker_panel_sha256", "technical_covariates", "controls",
-    "hyperparameter_grid", "randomization", "primary_endpoint", "secondary_endpoints",
-    "coverage_requirements", "decision_thresholds"
+    "schema",
+    "study_id",
+    "study_stage",
+    "status",
+    "hypothesis_ids",
+    "git_commit",
+    "analysis_plan_sha256",
+    "container_digest",
+    "dataset",
+    "partitions",
+    "observations",
+    "candidate_target_gene_panel_sha256",
+    "type_marker_panel_sha256",
+    "randomization",
+    "primary_endpoint",
+    "secondary_endpoints",
+    "coverage_requirements",
+    "decision_thresholds",
+    "lock_protection",
+    "label_target_independence"
   ],
   "properties": {
-    "schema": {"const": "heir.study_manifest.v1"},
+    "schema": {"const": "heir.study_manifest.v2"},
     "study_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{2,127}$"},
+    "study_stage": {"enum": ["measurement_development", "confirmatory_morphology"]},
     "status": {"enum": ["draft", "locked", "opened"]},
     "hypothesis_ids": {
-      "type": "array", "minItems": 1, "uniqueItems": true,
-      "items": {"enum": ["H-MEAS", "H-REGIONAL", "H-CELL", "H-INTRINSIC", "H-REF", "H-END2END", "H-COMP", "H-EXT"]}
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["H-MEAS", "H-REGIONAL", "H-CELL", "H-INTRINSIC", "H-REF", "H-END2END", "H-COMP", "H-EXT"]
+      }
     },
     "git_commit": {"type": "string"},
     "analysis_plan_sha256": {"$ref": "#/$defs/sha256"},
     "container_digest": {"type": "string"},
     "dataset": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["repository", "revision", "source_study", "source_manifest_sha256"],
       "properties": {
         "repository": {"type": "string", "minLength": 1},
@@ -34,7 +54,8 @@
       }
     },
     "partitions": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["development_donors", "locked_test_donors", "external_test_donors", "split_manifest_sha256"],
       "properties": {
         "development_donors": {"$ref": "#/$defs/nonemptyStrings"},
@@ -44,18 +65,25 @@
       }
     },
     "observations": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["level", "registration_method", "target_variants", "broad_type_field", "fine_type_field"],
       "properties": {
         "level": {"type": "string", "minLength": 1},
         "registration_method": {"type": "string", "minLength": 1},
         "target_variants": {"$ref": "#/$defs/nonemptyStrings"},
         "broad_type_field": {"type": "string", "minLength": 1},
-        "fine_type_field": {"type": "string", "minLength": 1}
+        "fine_type_field": {"type": "string", "minLength": 1},
+        "supported_fine_type_ids": {"$ref": "#/$defs/strings"},
+        "supported_fine_type_ids_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
       }
     },
+    "candidate_target_gene_panel_sha256": {"$ref": "#/$defs/sha256"},
+    "target_gene_panel_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "type_marker_panel_sha256": {"$ref": "#/$defs/sha256"},
     "encoder": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["manifest_sha256", "feature_space_id", "checkpoint_sha256"],
       "properties": {
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
@@ -63,24 +91,209 @@
         "checkpoint_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
-    "crop_protocols": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/sha256"}},
-    "target_gene_panel_sha256": {"$ref": "#/$defs/sha256"},
-    "type_marker_panel_sha256": {"$ref": "#/$defs/sha256"},
+    "crop_protocols": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/sha256"}
+    },
+    "reference_splits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary_split_id", "split_ids"],
+      "properties": {
+        "primary_split_id": {"type": "string", "minLength": 1},
+        "split_ids": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
     "technical_covariates": {"$ref": "#/$defs/strings"},
     "controls": {"$ref": "#/$defs/nonemptyStrings"},
     "hyperparameter_grid": {"type": "object", "minProperties": 1},
     "randomization": {"type": "object", "minProperties": 1},
     "primary_endpoint": {"type": "object", "minProperties": 1},
     "secondary_endpoints": {"type": "array"},
-    "coverage_requirements": {"type": "object", "minProperties": 1},
+    "coverage_requirements": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "maximum_reference_evaluation_absolute_smd": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "maximum_reference_evaluation_categorical_total_variation": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "minimum_locked_donors_per_fine_type": {"type": "integer", "minimum": 0}
+      }
+    },
     "decision_thresholds": {"type": "object", "minProperties": 1},
+    "prerequisites": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measurement_report_sha256", "measurement_study_manifest_sha256", "measurement_source_sha256"],
+      "properties": {
+        "measurement_report_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "measurement_study_manifest_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "measurement_source_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
+      }
+    },
+    "morphology_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_role",
+        "scientific_scope",
+        "final_inference",
+        "calibration_receipt_sha256",
+        "minimum_final_permutations",
+        "minimum_coordinate_delta",
+        "minimum_stain_delta",
+        "minimum_null_shuffled_fraction",
+        "minimum_strata_coverage",
+        "minimum_expression_error_reduction",
+        "minimum_basis_ceiling_r2",
+        "maximum_direct_contrast_p",
+        "minimum_mask_implementation_pass_fraction",
+        "donor_bootstrap_iterations",
+        "donor_bootstrap_seed",
+        "prespecified_fixed_hyperparameters"
+      ],
+      "properties": {
+        "experiment_role": {"type": "string", "minLength": 1},
+        "scientific_scope": {"const": "registered_cell_local_context_association"},
+        "final_inference": {"type": "boolean"},
+        "calibration_receipt_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "minimum_final_permutations": {"type": "integer", "minimum": 1},
+        "minimum_coordinate_delta": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_stain_delta": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_null_shuffled_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_strata_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_expression_error_reduction": {"type": "number", "minimum": 0, "maximum": 1},
+        "minimum_basis_ceiling_r2": {"type": "number", "minimum": 0, "maximum": 1},
+        "maximum_direct_contrast_p": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "minimum_mask_implementation_pass_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "donor_bootstrap_iterations": {"type": "integer", "minimum": 1},
+        "donor_bootstrap_seed": {"type": "integer"},
+        "prespecified_fixed_hyperparameters": {"type": "boolean"}
+      }
+    },
+    "lock_protection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reserved_exclusively_for",
+        "reserved_donor_ids",
+        "prior_outcome_access_confirmed_false",
+        "hescape_analysis_scope",
+        "hescape_allowed_donor_ids",
+        "forbidden_prior_outcome_uses"
+      ],
+      "properties": {
+        "reserved_exclusively_for": {"const": "H-CELL"},
+        "reserved_donor_ids": {"$ref": "#/$defs/nonemptyStrings"},
+        "prior_outcome_access_confirmed_false": {"const": true},
+        "hescape_analysis_scope": {"const": "development_donors_only_hest_lock_unopened"},
+        "hescape_allowed_donor_ids": {"$ref": "#/$defs/nonemptyStrings"},
+        "forbidden_prior_outcome_uses": {"$ref": "#/$defs/nonemptyStrings"}
+      }
+    },
+    "label_target_independence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "marker_panel_sha256",
+        "candidate_marker_target_overlap_count",
+        "establishes_full_target_independence",
+        "limitation"
+      ],
+      "properties": {
+        "strategy": {"type": "string", "minLength": 1},
+        "marker_panel_sha256": {"$ref": "#/$defs/sha256"},
+        "candidate_marker_target_overlap_count": {"const": 0},
+        "establishes_full_target_independence": {"type": "boolean"},
+        "limitation": {"type": "string", "minLength": 1}
+      }
+    },
     "locked_at": {"type": "string", "format": "date-time"},
+    "locked_content_sha256": {"$ref": "#/$defs/sha256"},
     "opening": {"type": "object"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"study_stage": {"const": "measurement_development"}}},
+      "then": {
+        "properties": {
+          "hypothesis_ids": {"const": ["H-MEAS"]},
+          "randomization": {
+            "required": ["transcript_split_salt", "donor_cross_fit_seed", "selection_partition"],
+            "properties": {"selection_partition": {"const": "development_only"}}
+          },
+          "coverage_requirements": {
+            "required": [
+              "minimum_coverage_fraction",
+              "minimum_reference_cells_per_stratum",
+              "minimum_evaluation_cells_per_stratum",
+              "minimum_development_donors_per_fine_type",
+              "minimum_locked_donors_per_fine_type",
+              "maximum_reference_evaluation_row_overlap",
+              "maximum_reference_evaluation_block_overlap",
+              "maximum_reference_evaluation_source_file_overlap"
+            ],
+            "properties": {
+              "minimum_locked_donors_per_fine_type": {"const": 0}
+            }
+          }
+        },
+        "not": {
+          "anyOf": [
+            {"required": ["prerequisites"]},
+            {"required": ["encoder"]},
+            {"required": ["crop_protocols"]},
+            {"required": ["reference_splits"]},
+            {"required": ["target_gene_panel_sha256"]},
+            {"required": ["technical_covariates"]},
+            {"required": ["controls"]},
+            {"required": ["hyperparameter_grid"]},
+            {"required": ["morphology_gate"]}
+          ]
+        }
+      },
+      "else": {
+        "properties": {
+          "coverage_requirements": {
+            "required": [
+              "maximum_reference_evaluation_absolute_smd",
+              "maximum_reference_evaluation_categorical_total_variation"
+            ]
+          }
+        },
+        "required": [
+          "prerequisites",
+          "encoder",
+          "crop_protocols",
+          "reference_splits",
+          "target_gene_panel_sha256",
+          "technical_covariates",
+          "controls",
+          "hyperparameter_grid",
+          "morphology_gate"
+        ]
+      }
+    }
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-    "nonemptyStrings": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+    "strings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "nonemptyStrings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
   }
 }
-

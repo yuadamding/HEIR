@@ -1,0 +1,141 @@
+{
+  "schema": "heir.study_manifest.v2",
+  "study_id": "hest_lung_measurement_development_v1",
+  "study_stage": "measurement_development",
+  "status": "draft",
+  "hypothesis_ids": [
+    "H-MEAS"
+  ],
+  "git_commit": "",
+  "analysis_plan_sha256": "3a9493d6784eccfdc88abc3b7ecffbdcc5190c1e9afa6dfcae54c59c3166514c",
+  "container_digest": "",
+  "dataset": {
+    "repository": "MahmoodLab/hest",
+    "revision": "7e8d5a0b0aace41d8c8ec0f6ecea80e4ad2a61ec",
+    "source_study": "GSE250346",
+    "source_manifest_sha256": "35e327b87deb6c08df2776dbafe594ad832a122381e7b1757f3d2c239b05245d"
+  },
+  "partitions": {
+    "development_donors": [
+      "VUILD91",
+      "TILD175",
+      "VUHD069",
+      "VUHD116",
+      "VUILD102",
+      "VUILD105",
+      "VUILD106",
+      "VUILD107",
+      "VUILD110",
+      "VUILD115"
+    ],
+    "locked_test_donors": [
+      "THD0008",
+      "THD0011",
+      "VUILD78",
+      "VUILD96",
+      "TILD117"
+    ],
+    "external_test_donors": [],
+    "split_manifest_sha256": "e4fe0cb3e8afd45e664a9ce44aa3f336828fdbc95dc8311d90990ea1453540db"
+  },
+  "observations": {
+    "level": "cell",
+    "registration_method": "native_xenium_cell_id_join",
+    "target_variants": [
+      "nucleus_overlapping_transcripts",
+      "whole_cell_assigned_transcripts"
+    ],
+    "broad_type_field": "final_lineage",
+    "fine_type_field": "final_CT"
+  },
+  "candidate_target_gene_panel_sha256": "f994cac70501e1aa01bde1083f47a93a3138ee5cc0a18b1af15d3b9002e96266",
+  "type_marker_panel_sha256": "f5ecbda147399fe51110aa01df54c9534d1d365e25c8294de5f27ec40e8fd122",
+  "lock_protection": {
+    "reserved_exclusively_for": "H-CELL",
+    "reserved_donor_ids": [
+      "THD0008",
+      "THD0011",
+      "VUILD78",
+      "VUILD96",
+      "TILD117"
+    ],
+    "prior_outcome_access_confirmed_false": true,
+    "hescape_analysis_scope": "development_donors_only_hest_lock_unopened",
+    "hescape_allowed_donor_ids": [
+      "VUILD91",
+      "TILD175",
+      "VUHD069",
+      "VUHD116",
+      "VUILD102",
+      "VUILD105",
+      "VUILD106",
+      "VUILD107",
+      "VUILD110",
+      "VUILD115"
+    ],
+    "forbidden_prior_outcome_uses": [
+      "HESCAPE_locked_regional_outcomes",
+      "crop_or_model_selection_on_reserved_donors",
+      "threshold_adaptation_on_reserved_donors"
+    ]
+  },
+  "label_target_independence": {
+    "strategy": "conservative_proxy_marker_exclusion_for_measurement_development",
+    "marker_panel_sha256": "f5ecbda147399fe51110aa01df54c9534d1d365e25c8294de5f27ec40e8fd122",
+    "candidate_marker_target_overlap_count": 0,
+    "establishes_full_target_independence": false,
+    "limitation": "H-MEAS may measure the marker-disjoint candidate panel, but H-CELL remains blocked until exact label-target independence is established."
+  },
+  "randomization": {
+    "transcript_split_salt": "heir-hest-gse250346-split-half-v1",
+    "donor_cross_fit_seed": 17,
+    "selection_partition": "development_only"
+  },
+  "primary_endpoint": {
+    "name": "nucleus_overlap_within_fine_type_donor_cross_fitted_reliability",
+    "target_variant": "nucleus_overlapping_transcripts",
+    "authorizes_target_selection": true
+  },
+  "secondary_endpoints": [
+    "whole_cell_measurement_sensitivity",
+    "development_only_target_support_audit"
+  ],
+  "coverage_requirements": {
+    "minimum_coverage_fraction": 0.8,
+    "minimum_reference_cells_per_stratum": 20,
+    "minimum_evaluation_cells_per_stratum": 20,
+    "minimum_development_donors_per_fine_type": 3,
+    "minimum_locked_donors_per_fine_type": 0,
+    "maximum_reference_evaluation_row_overlap": 0,
+    "maximum_reference_evaluation_block_overlap": 0,
+    "maximum_reference_evaluation_source_file_overlap": 0
+  },
+  "decision_thresholds": {
+    "maximum_annotation_nucleus_p95_um": 8.0,
+    "maximum_annotation_cell_p95_um": 12.0,
+    "maximum_cell_nucleus_p95_um": 8.0,
+    "maximum_registration_nucleus_diameter_ratio_p95": 0.5,
+    "maximum_registration_nearest_neighbor_ratio_p95": 0.5,
+    "best_registration_quality_max_fraction_of_limit": 0.25,
+    "intermediate_registration_quality_max_fraction_of_limit": 0.6,
+    "maximum_registration_outlier_fraction": 0.05,
+    "maximum_nucleus_outside_cell_fraction": 0.01,
+    "minimum_nucleus_cell_area_ratio": 0.05,
+    "maximum_nucleus_cell_area_ratio": 0.95,
+    "maximum_segmentation_outlier_fraction": 0.05,
+    "maximum_crop_padding_p95": 0.25,
+    "mostly_padded_cutoff": 0.5,
+    "maximum_mostly_padded_fraction": 0.01,
+    "minimum_transcript_qv": 20.0,
+    "minimum_median_gene_reliability": 0.5,
+    "minimum_median_program_reliability": 0.6,
+    "minimum_target_basis_ceiling": 0.5,
+    "minimum_reliable_gene_fraction": 0.25,
+    "minimum_reliable_development_donor_fraction": 0.8,
+    "minimum_within_fine_type_reliability": 0.4,
+    "minimum_reliability_rows": 40,
+    "target_basis_rank": 4,
+    "minimum_reliable_development_donors": 8,
+    "minimum_reliable_donors_per_fine_type": 3
+  }
+}

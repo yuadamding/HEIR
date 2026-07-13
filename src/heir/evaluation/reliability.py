@@ -66,6 +66,14 @@ class SplitHalfCounts:
     assignments: np.ndarray
 
 
+@dataclass(frozen=True)
+class CrossFittedResiduals:
+    """Development-row residuals from donor-held-out technical regressions."""
+
+    values: np.ndarray
+    fold_training_donors: Mapping[str, tuple[str, ...]]
+
+
 def construct_split_half_counts(
     transcript_ids: object,
     transcript_observation_ids: object,
@@ -78,13 +86,9 @@ def construct_split_half_counts(
     """Construct dense split-half counts after exact identity validation."""
 
     transcripts = _identifiers(transcript_ids, "transcript_ids", unique=True)
-    transcript_rows = _identifiers(
-        transcript_observation_ids, "transcript_observation_ids"
-    )
+    transcript_rows = _identifiers(transcript_observation_ids, "transcript_observation_ids")
     transcript_genes = _identifiers(transcript_gene_ids, "transcript_gene_ids")
-    observations = _identifiers(
-        ordered_observation_ids, "ordered_observation_ids", unique=True
-    )
+    observations = _identifiers(ordered_observation_ids, "ordered_observation_ids", unique=True)
     genes = _identifiers(ordered_gene_ids, "ordered_gene_ids", unique=True)
     if not (len(transcripts) == len(transcript_rows) == len(transcript_genes)):
         raise ValueError("transcript identity arrays must have the same length")
@@ -226,9 +230,7 @@ def feature_reliability(
         "features": {
             name: {
                 "raw_split_half_correlation": None if not np.isfinite(value) else float(value),
-                "spearman_brown_reliability": (
-                    None if not np.isfinite(score) else float(score)
-                ),
+                "spearman_brown_reliability": (None if not np.isfinite(score) else float(score)),
             }
             for name, value, score in zip(names, raw.tolist(), corrected.tolist())
         },
@@ -336,6 +338,186 @@ def fit_target_basis(
     return mean, basis
 
 
+def _balanced_donor_weights(donor_ids: np.ndarray) -> np.ndarray:
+    weights = np.zeros(len(donor_ids), dtype=np.float64)
+    donors = sorted(set(donor_ids.tolist()))
+    if not donors:
+        return weights
+    for donor in donors:
+        selected = donor_ids == donor
+        weights[selected] = 1.0 / (len(donors) * int(selected.sum()))
+    return weights
+
+
+def cross_fitted_residualize(
+    values: object,
+    technical_covariates: object,
+    donor_ids: object,
+    fine_type_ids: object,
+    *,
+    development_mask: object,
+    minimum_training_donors: int = 2,
+) -> CrossFittedResiduals:
+    """Residualize each fine type with donor-held-out weighted regressions."""
+
+    targets = np.asarray(values, dtype=np.float64)
+    covariates = np.asarray(technical_covariates, dtype=np.float64)
+    donors = _identifiers(donor_ids, "residualization_donor_ids")
+    fine_types = _identifiers(fine_type_ids, "residualization_fine_type_ids")
+    development = np.asarray(development_mask)
+    if targets.ndim == 1:
+        targets = targets[:, None]
+    if (
+        targets.ndim != 2
+        or covariates.ndim != 2
+        or len(targets) != len(covariates)
+        or len(donors) != len(targets)
+        or len(fine_types) != len(targets)
+        or development.dtype != np.bool_
+        or development.shape != (len(targets),)
+        or not np.isfinite(targets).all()
+        or not np.isfinite(covariates).all()
+    ):
+        raise ValueError("cross-fitted residualization inputs are malformed")
+    if minimum_training_donors < 1:
+        raise ValueError("minimum_training_donors must be positive")
+    residuals = np.full(targets.shape, np.nan, dtype=np.float64)
+    folds: dict[str, tuple[str, ...]] = {}
+    for fine_type in sorted(set(fine_types[development].tolist())):
+        type_development = development & (fine_types == fine_type)
+        type_donors = sorted(set(donors[type_development].tolist()))
+        for heldout in type_donors:
+            heldout_rows = type_development & (donors == heldout)
+            training_rows = type_development & (donors != heldout)
+            training_donors = tuple(sorted(set(donors[training_rows].tolist())))
+            fold_id = fine_type + "|" + heldout
+            folds[fold_id] = training_donors
+            if len(training_donors) < minimum_training_donors:
+                continue
+            train_design = np.column_stack(
+                (np.ones(int(training_rows.sum())), covariates[training_rows])
+            )
+            heldout_design = np.column_stack(
+                (np.ones(int(heldout_rows.sum())), covariates[heldout_rows])
+            )
+            weights = _balanced_donor_weights(donors[training_rows])
+            square_root_weights = np.sqrt(weights)[:, None]
+            coefficients = np.linalg.lstsq(
+                train_design * square_root_weights,
+                targets[training_rows] * square_root_weights,
+                rcond=None,
+            )[0]
+            residuals[heldout_rows] = targets[heldout_rows] - heldout_design @ coefficients
+    return CrossFittedResiduals(residuals, folds)
+
+
+def cross_fitted_target_basis_reliability(
+    half_a: object,
+    half_b: object,
+    donor_ids: object,
+    *,
+    development_mask: object,
+    rank: int,
+    minimum_rows: int,
+    minimum_training_donors: int = 2,
+    full_targets: Optional[object] = None,
+) -> Mapping[str, object]:
+    """Estimate basis reliability with every development donor held out in turn.
+
+    Each fold fits and deterministically orients the basis using only the other
+    development donors.  Component reliabilities are then evaluated only in
+    the held-out donor.  No all-development alignment is used, avoiding a
+    route by which the held-out target could influence its fitted basis.
+    """
+
+    first = np.asarray(half_a, dtype=np.float64)
+    second = np.asarray(half_b, dtype=np.float64)
+    donors = _identifiers(donor_ids, "target_basis_donor_ids")
+    development = np.asarray(development_mask)
+    if (
+        first.ndim != 2
+        or second.shape != first.shape
+        or len(donors) != len(first)
+        or development.dtype != np.bool_
+        or development.shape != (len(first),)
+        or not np.isfinite(first).all()
+        or not np.isfinite(second).all()
+    ):
+        raise ValueError("cross-fitted target-basis inputs are malformed")
+    if minimum_training_donors < 1:
+        raise ValueError("minimum_training_donors must be positive")
+    if full_targets is None:
+        total = 0.5 * (first + second)
+        fit_source = "mean_of_normalized_halves"
+    else:
+        total = np.asarray(full_targets, dtype=np.float64)
+        if total.shape != first.shape or not np.isfinite(total).all():
+            raise ValueError("full molecular targets must align with split halves")
+        fit_source = "frozen_full_molecular_target"
+    development_donors = tuple(sorted(set(donors[development].tolist())))
+    if len(development_donors) < minimum_training_donors + 1:
+        raise ValueError("too few development donors for donor cross-fitting")
+    names = tuple("basis_%03d" % (index + 1) for index in range(rank))
+    fold_reports = {}
+    for heldout in development_donors:
+        heldout_rows = development & (donors == heldout)
+        training_rows = development & (donors != heldout)
+        training_donors = tuple(sorted(set(donors[training_rows].tolist())))
+        if len(training_donors) < minimum_training_donors:
+            raise ValueError("a target-basis fold has too few training donors")
+        weights = _balanced_donor_weights(donors[training_rows])
+        mean, basis = fit_target_basis(total[training_rows], rank=rank, sample_weights=weights)
+        first_scores = (first[heldout_rows] - mean) @ basis
+        second_scores = (second[heldout_rows] - mean) @ basis
+        reliability = feature_reliability(
+            first_scores,
+            second_scores,
+            names,
+            minimum_rows=minimum_rows,
+        )
+        basis_bytes = np.ascontiguousarray(basis.astype("<f8", copy=False)).tobytes()
+        fold_reports[heldout] = {
+            **reliability,
+            "heldout_donor": heldout,
+            "training_donors": list(training_donors),
+            "basis_sha256": hashlib.sha256(basis_bytes).hexdigest(),
+        }
+    components = {}
+    for name in names:
+        values = {
+            donor: report["features"][name]["spearman_brown_reliability"]
+            for donor, report in fold_reports.items()
+            if report["features"][name]["spearman_brown_reliability"] is not None
+        }
+        components[name] = {
+            "donor_macro_spearman_brown_reliability": (
+                None if not values else float(np.median(list(values.values())))
+            ),
+            "evaluable_donor_ids": sorted(values),
+            "evaluable_donor_count": int(len(values)),
+            "evaluable_donor_fraction": float(len(values) / len(development_donors)),
+        }
+    finite = [
+        value["donor_macro_spearman_brown_reliability"]
+        for value in components.values()
+        if value["donor_macro_spearman_brown_reliability"] is not None
+    ]
+    return {
+        "rank": int(rank),
+        "fit_partition": "cross_fitted_development_donors",
+        "fit_source": fit_source,
+        "component_alignment": "variance_order_then_largest_loading_positive",
+        "component_alignment_partition": "training_fold_only",
+        "fit_weighting": "equal_donor_then_equal_row_within_donor",
+        "heldout_target_used_in_basis_fit": False,
+        "development_donor_ids": list(development_donors),
+        "folds": fold_reports,
+        "components": components,
+        "minimum_component_reliability": None if not finite else float(min(finite)),
+        "median_component_reliability": None if not finite else float(np.median(finite)),
+    }
+
+
 def target_basis_reliability_ceiling(
     half_a: object,
     half_b: object,
@@ -376,9 +558,7 @@ def target_basis_reliability_ceiling(
         if weights.shape != (len(first),):
             raise ValueError("target-basis fit weights must align with all observations")
         selected_weights = weights[mask]
-    mean, fitted = fit_target_basis(
-        total[mask], rank=rank, sample_weights=selected_weights
-    )
+    mean, fitted = fit_target_basis(total[mask], rank=rank, sample_weights=selected_weights)
     if basis is not None:
         fitted = np.asarray(basis, dtype=np.float64)
         if fitted.ndim != 2 or fitted.shape[0] != first.shape[1] or not fitted.shape[1]:
@@ -433,8 +613,11 @@ def target_basis_reliability_ceiling(
 
 __all__ = [
     "SPLIT_HALF_METHOD",
+    "CrossFittedResiduals",
     "SplitHalfCounts",
     "construct_split_half_counts",
+    "cross_fitted_residualize",
+    "cross_fitted_target_basis_reliability",
     "deterministic_transcript_halves",
     "feature_reliability",
     "fit_target_basis",

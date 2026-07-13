@@ -14,6 +14,7 @@ from heir.evaluation import (
     predict_oracle_ridge,
     validate_experiment_identity,
 )
+from heir.evaluation.control_models import HEST_CROP_CONTRACT
 
 
 def _artifact(
@@ -34,9 +35,7 @@ def _artifact(
     observation_ids = []
     for donor_position, donor in enumerate(donors):
         for type_index in range(2):
-            state = np.asarray(
-                [-1.0, 0.7, -0.2, 0.4, 0.9, -0.8, 0.1, -0.5, 0.3, -0.4, 1.0, -0.9]
-            )
+            state = np.asarray([-1.0, 0.7, -0.2, 0.4, 0.9, -0.8, 0.1, -0.5, 0.3, -0.4, 1.0, -0.9])
             local_coordinate = np.sin(
                 np.arange(12, dtype=np.float64) * 2.3 + donor_position + type_index
             )
@@ -55,9 +54,7 @@ def _artifact(
             coordinates.append(np.column_stack((local_coordinate, np.square(local_coordinate))))
             labels.extend([type_index] * 12)
             donor_ids.extend([donor] * 12)
-            block_ids.extend(
-                [f"{donor}/section_{donor}/block_{index // 4}" for index in range(12)]
-            )
+            block_ids.extend([f"{donor}/section_{donor}/block_{index // 4}" for index in range(12)])
             roi_ids.extend(
                 [
                     f"{donor}/section_{donor}/type_{type_index}/roi_{index // 4}"
@@ -66,6 +63,22 @@ def _artifact(
             )
             observation_ids.extend([f"{donor}_{type_index}_{index}" for index in range(12)])
     cells = len(labels)
+    section_ids = np.asarray([value.split("/")[-2] for value in block_ids])
+    donor_disease = {
+        donor: ("Control" if index % 2 == 0 else "Disease") for index, donor in enumerate(donors)
+    }
+    disease_states = np.asarray([donor_disease[value] for value in donor_ids])
+    feature_values = np.concatenate(features)
+    target_values = np.concatenate(targets)
+    reference_values = np.concatenate(means)
+    planned_strata = tuple(
+        sorted(
+            {
+                "%s|%s|%s" % (donor, section, ("epithelial", "immune")[label])
+                for donor, section, label in zip(donor_ids, section_ids, labels)
+            }
+        )
+    )
     return MorphologyRidgeDatasetArtifact(
         observation_ids=np.asarray(observation_ids),
         donor_ids=np.asarray(donor_ids),
@@ -73,9 +86,9 @@ def _artifact(
         roi_ids=np.asarray(roi_ids),
         type_labels=np.asarray(labels, dtype=np.int64),
         type_names=("epithelial", "immune"),
-        frozen_features=np.concatenate(features),
-        molecular_targets=np.concatenate(targets),
-        reference_means=np.concatenate(means),
+        frozen_features=feature_values,
+        molecular_targets=target_values,
+        reference_means=reference_values,
         coordinate_features=np.concatenate(coordinates),
         stain_features=np.empty((cells, 0), dtype=np.float64),
         stain_feature_names=(),
@@ -96,8 +109,8 @@ def _artifact(
         registration_method="high-confidence-one-to-one",
         encoder_name="frozen-synthetic-encoder",
         crop_scale="small_cell_centered",
-        cohort_id="HESCAPE",
-        cohort_release="human-lung-healthy-panel",
+        cohort_id="HEST",
+        cohort_release="synthetic-locked-study",
         assay="Xenium",
         observation_level="cell",
         target_construction="registered_cell_expression",
@@ -105,6 +118,43 @@ def _artifact(
         labels_independent_of_images=True,
         registration_is_one_to_one=True,
         role=role,
+        section_ids=section_ids,
+        disease_states=disease_states,
+        site_ids=np.repeat("site_a", cells),
+        batch_ids=np.repeat("batch_a", cells),
+        image_feature_tensor=feature_values[:, None, :],
+        crop_ids=("crop_112um",),
+        crop_roles=("registered_cell_local_context_112um",),
+        crop_comparison_families=("g2_primary",),
+        primary_crop_id="crop_112um",
+        nuclear_morphometrics=np.empty((cells, 0), dtype=np.float64),
+        nuclear_morphometric_names=(),
+        cell_morphometrics=np.empty((cells, 0), dtype=np.float64),
+        cell_morphometric_names=(),
+        cellvit_context_features=np.empty((cells, 0), dtype=np.float64),
+        cellvit_context_feature_names=(),
+        local_density_features=np.empty((cells, 0), dtype=np.float64),
+        local_density_feature_names=(),
+        boundary_features=np.empty((cells, 0), dtype=np.float64),
+        boundary_feature_names=(),
+        spatial_control_features=np.concatenate(coordinates),
+        spatial_control_feature_names=("x", "x_squared"),
+        planned_stratum_ids=planned_strata,
+        planned_stratum_manifest_sha256="8" * 64,
+        coverage_audit={
+            "retained_fraction": 1.0,
+            "reference_membership_sha256_by_split": {"primary": "c" * 64},
+        },
+        reference_evaluation_balance={"primary": {"pass": True}},
+        study_manifest_sha256="9" * 64,
+        measurement_receipt_sha256="a" * 64,
+        measurement_source_sha256="b" * 64,
+        hypothesis_ids=("H-CELL",),
+        scientific_scope="registered_cell_local_context_association",
+        evidence_scope="internal_locked_hest",
+        authorizes_nucleus_intrinsic_claim=False,
+        reference_split_ids=("primary",),
+        reference_means_by_split=reference_values[:, None, :],
     )
 
 
@@ -191,9 +241,7 @@ def test_multicandidate_null_reselects_pipeline_hyperparameters() -> None:
     )
     assert control["full_pipeline_hyperparameters_reselected"] is True
     assert control["hyperparameter_selection"] == "repeated_development_donor_fold_selection"
-    assert sum(
-        row["count"] for row in control["selected_hyperparameter_counts"]
-    ) == 2
+    assert sum(row["count"] for row in control["selected_hyperparameter_counts"]) == 2
 
 
 def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None:
@@ -206,6 +254,40 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
         tuple(f"locked_{index}" for index in range(5)),
         role="locked_test",
         source_offset=8,
+    )
+    development = replace(
+        development,
+        reference_split_ids=("primary", "alternate"),
+        reference_means_by_split=np.stack(
+            (development.reference_means, development.reference_means), axis=1
+        ),
+        reference_evaluation_balance={
+            "primary": {"pass": True},
+            "alternate": {"pass": True},
+        },
+        coverage_audit={
+            **development.coverage_audit,
+            "reference_membership_sha256_by_split": {
+                "primary": "c" * 64,
+                "alternate": "d" * 64,
+            },
+        },
+    )
+    locked = replace(
+        locked,
+        reference_split_ids=("primary", "alternate"),
+        reference_means_by_split=np.stack((locked.reference_means, locked.reference_means), axis=1),
+        reference_evaluation_balance={
+            "primary": {"pass": True},
+            "alternate": {"pass": True},
+        },
+        coverage_audit={
+            **locked.coverage_audit,
+            "reference_membership_sha256_by_split": {
+                "primary": "e" * 64,
+                "alternate": "f" * 64,
+            },
+        },
     )
     report = evaluate_morphology_ridge_gate(
         development,
@@ -221,6 +303,13 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
     assert report["component_pass"] is True
     assert report["authorizes_full_heir"] is False
     assert report["oracle_type_only"] is True
+    assert report["nucleus_hypothesis_tested"] is False
+    assert report["crop_source_not_inferred_from_observation_level"] is True
+    assert report["hypothesis_decisions"]["G2_local_context"]["tested"] is True
+    assert [row["split_id"] for row in report["reference_split_sensitivity"]] == [
+        "primary",
+        "alternate",
+    ]
     control = report["permutation_control"]
     assert control["training_probe_refit_for_each_permutation"] is True
     assert control["hyperparameter_selection"] == "manifest_prespecified_single_candidate"
@@ -295,7 +384,9 @@ def test_ridge_gate_rejects_too_few_permutations_and_coordinate_only_signal() ->
     assert report["component_pass"] is False
 
 
-def test_final_inference_requires_calibration_and_999_unique_permutations() -> None:
+def test_final_inference_requires_calibration_and_999_unique_permutations(
+    calibration_receipt,
+) -> None:
     development = _artifact(
         tuple(f"development_{index}" for index in range(5)),
         role="development",
@@ -316,26 +407,6 @@ def test_final_inference_requires_calibration_and_999_unique_permutations() -> N
             final_inference=True,
             device="cpu",
         )
-    receipt = {
-        "schema": "heir.morphology_gate_calibration.v1",
-        "simulation_sha256": "a" * 64,
-        "thresholds_sha256": "b" * 64,
-        "maximum_complete_gate_false_pass_probability": 0.05,
-        "power_at_minimum_meaningful_effect": 0.80,
-        "locked_outcomes_used": False,
-        "complete_gate_executed": True,
-        "scenario_families": [
-            "no_image_effect",
-            "weak_image_effect",
-            "minimum_meaningful_effect",
-            "larger_image_effect",
-            "donor_heterogeneity",
-            "section_heterogeneity",
-            "spatial_autocorrelation",
-            "missing_donor_type_strata",
-            "measurement_reliability",
-        ],
-    }
     with pytest.raises(ValueError, match="at least 999 unique permutations"):
         evaluate_morphology_ridge_gate(
             development,
@@ -344,9 +415,69 @@ def test_final_inference_requires_calibration_and_999_unique_permutations() -> N
             alphas=(1.0,),
             total_permutations=998,
             final_inference=True,
-            calibration_receipt=receipt,
+            calibration_receipt=calibration_receipt,
             device="cpu",
         )
+
+
+def test_g3_intrinsic_flags_require_prespecified_direct_crop_contrasts() -> None:
+    def with_ladder(artifact: MorphologyRidgeDatasetArtifact):
+        zeros = np.zeros_like(artifact.frozen_features)
+        intrinsic_ids = {
+            "nucleus_mask_only",
+            "nucleus_mask_mean_fill_112um",
+            "cell_mask_only",
+            "cell_mask_mean_fill_112um",
+        }
+        crop_ids = tuple(HEST_CROP_CONTRACT)
+        return replace(
+            artifact,
+            hypothesis_ids=("H-CELL", "H-INTRINSIC"),
+            image_feature_tensor=np.stack(
+                tuple(
+                    artifact.frozen_features
+                    if crop_id == "crop_112um" or crop_id in intrinsic_ids
+                    else zeros
+                    for crop_id in crop_ids
+                ),
+                axis=1,
+            ),
+            crop_ids=crop_ids,
+            crop_roles=tuple(HEST_CROP_CONTRACT[value][0] for value in crop_ids),
+            crop_comparison_families=tuple(HEST_CROP_CONTRACT[value][1] for value in crop_ids),
+        )
+
+    development = with_ladder(
+        _artifact(
+            tuple(f"development_{index}" for index in range(5)),
+            role="development",
+            source_offset=4,
+        )
+    )
+    locked = with_ladder(
+        _artifact(
+            tuple(f"locked_{index}" for index in range(5)),
+            role="locked_test",
+            source_offset=8,
+        )
+    )
+    report = evaluate_morphology_ridge_gate(
+        development,
+        locked,
+        ranks=(1,),
+        alphas=(1.0e-4,),
+        total_permutations=100,
+        minimum_support=8,
+        prespecified_fixed_hyperparameters=True,
+        device="cpu",
+    )
+    assert report["nucleus_hypothesis_tested"] is True
+    assert report["cell_intrinsic_hypothesis_tested"] is True
+    nucleus = report["hypothesis_decisions"]["G3_nucleus_intrinsic"]
+    assert nucleus["tested"] is True
+    assert nucleus["focal_family"] == "nucleus_mask_image"
+    assert nucleus["strongest_comparator_family"] != "nucleus_mask_image"
+    assert nucleus["pass"] is False  # exploratory runs never authorize G3
 
 
 def test_ridge_artifact_rejects_marker_leakage_and_donor_overlap() -> None:
@@ -390,8 +521,13 @@ def test_primary_identity_rejects_historical_cross_modal_encoder() -> None:
         artifact,
         encoder_name="bioptimus/H-optimus-1",
         crop_scale="full_context",
+        cohort_id="HESCAPE",
+        cohort_release="human-lung-healthy-panel",
         observation_level="pseudo_spot_55um",
         target_construction="sum_pooled_xenium_transcripts",
+        evidence_scope="development_pilot",
+        hypothesis_ids=("H-REGIONAL",),
+        scientific_scope="development_only_regional_pilot",
     )
     validate_experiment_identity(regional, "regional_hescape_hoptimus1")
     with pytest.raises(ValueError, match="cell-level targets"):
@@ -415,8 +551,13 @@ def _regional_uni2h(artifact: MorphologyRidgeDatasetArtifact) -> MorphologyRidge
         artifact,
         encoder_name="MahmoodLab/UNI2-h",
         crop_scale="full_context",
+        cohort_id="HESCAPE",
+        cohort_release="human-lung-healthy-panel",
         observation_level="pseudo_spot_55um",
         target_construction="sum_pooled_xenium_transcripts",
+        evidence_scope="development_pilot",
+        hypothesis_ids=("H-REGIONAL",),
+        scientific_scope="development_only_regional_pilot",
         stain_features=artifact.coordinate_features.copy(),
         stain_feature_names=(
             "rgb_mean_r",
@@ -434,7 +575,7 @@ def _regional_uni2h(artifact: MorphologyRidgeDatasetArtifact) -> MorphologyRidge
     )
 
 
-def test_uni2h_regional_gate_reports_raw_and_composition_adjusted_endpoints() -> None:
+def test_hescape_regional_artifact_cannot_enter_locked_morphology_gate() -> None:
     development = _regional_uni2h(
         _artifact(
             tuple(f"development_{index}" for index in range(5)),
@@ -450,33 +591,18 @@ def test_uni2h_regional_gate_reports_raw_and_composition_adjusted_endpoints() ->
         )
     )
     validate_experiment_identity(development, "regional_hescape_uni2h")
-    report = evaluate_morphology_ridge_gate(
-        development,
-        locked,
-        ranks=(1,),
-        alphas=(1.0e-4,),
-        permutation_seeds=(17, 29, 41),
-        permutations_per_seed=100,
-        minimum_support=8,
-        prespecified_fixed_hyperparameters=True,
-        device="cpu",
-    )
-    assert report["component_pass"] is True
-    assert report["nucleus_hypothesis_tested"] is False
-    assert report["regional_hypothesis_tested"] is True
-    assert report["scientific_scope"] == "regional_pseudospot_exploratory"
-    endpoints = report["regional_endpoints"]
-    assert endpoints["correction_coefficients_fit_on_development_only"] is True
-    assert endpoints["composition_adjusted"] is not None
-    assert (
-        endpoints["composition_adjusted"][
-            "donor_equal_niche_equal_residual_coordinate_r2"
-        ]
-        > 0.0
-    )
-    assert report["checks"]["composition_adjusted_positive"] is True
-    assert report["checks"]["beats_coordinate_only"] is True
-    assert report["checks"]["beats_stain_statistics_only"] is True
+    with pytest.raises(ValueError, match="development-pilot"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            ranks=(1,),
+            alphas=(1.0e-4,),
+            permutation_seeds=(17, 29, 41),
+            permutations_per_seed=100,
+            minimum_support=8,
+            prespecified_fixed_hyperparameters=True,
+            device="cpu",
+        )
 
 
 def test_uni2h_identity_requires_named_composition_and_stain_controls() -> None:

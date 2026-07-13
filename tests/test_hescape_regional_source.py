@@ -27,7 +27,11 @@ def _minimal_source_payload() -> dict[str, object]:
     rows = 2
     coverage = []
     exclusions = []
-    for section_id in sorted(builder.SECTION_TO_TRUE_DONOR):
+    for section_id in sorted(
+        section
+        for section, donor in builder.SECTION_TO_TRUE_DONOR.items()
+        if donor in set(builder.DEVELOPMENT_DONORS)
+    ):
         identity = {
             "donor_id": builder.SECTION_TO_TRUE_DONOR[section_id],
             "section_id": section_id,
@@ -59,16 +63,19 @@ def _minimal_source_payload() -> dict[str, object]:
                 "retained": 2,
             }
         )
-    crop_role = "target_matched_55um"
+    crop_role = "target_matched_55um_common_mpp"
     crop = builder.CROP_PROTOCOLS[crop_role]
     payload: dict[str, object] = {
         "schema_version": np.asarray(builder.SOURCE_SCHEMA),
+        "analysis_scope": np.asarray("development_donors_only_hest_lock_unopened"),
+        "reserved_hest_locked_donors": np.asarray(builder.RESERVED_HEST_LOCKED_DONORS),
+        "reserved_donor_outcomes_loaded": np.asarray(False),
         "observation_ids": np.asarray(["A", "B"]),
-        "donor_ids": np.asarray(["VUILD96", "VUILD96"]),
-        "section_ids": np.asarray(["NCBI856", "NCBI856"]),
+        "donor_ids": np.asarray(["VUILD91", "VUILD91"]),
+        "section_ids": np.asarray(["NCBI858", "NCBI858"]),
         "disease_states": np.asarray(["healthy", "healthy"]),
         "site_ids": np.asarray(["lung", "lung"]),
-        "batch_ids": np.asarray(["NCBI856", "NCBI856"]),
+        "batch_ids": np.asarray(["NCBI858", "NCBI858"]),
         "hescape_patient_ids": np.asarray(["Patient 1", "Patient 1"]),
         "block_ids": np.asarray(["B1", "B2"]),
         "roi_ids": np.asarray(["R1", "R2"]),
@@ -99,10 +106,13 @@ def _minimal_source_payload() -> dict[str, object]:
         "crop_role": np.asarray(crop_role),
         "crop_structure": np.asarray(crop["structure"]),
         "crop_source_pixels": np.asarray(crop["source_pixels"]),
+        "crop_retained_center_source_pixels": np.asarray(crop["retained_center_source_pixels"]),
+        "crop_window_offset_source_pixels": np.asarray(crop["window_offset_source_pixels"]),
         "crop_inner_mask_source_pixels": np.asarray(crop["inner_mask_source_pixels"]),
         "crop_masked_center_fill": np.asarray(crop["masked_center_fill"]),
         "crop_stain_inclusion_mask": np.asarray(crop["stain_inclusion_mask"]),
         "crop_physical_width_um": np.asarray(crop["physical_width_um"]),
+        "crop_signal_width_um": np.asarray(crop["signal_width_um"]),
         "crop_resize_pixels": np.asarray(crop["resize_pixels"]),
         "crop_protocol_sha256": np.asarray(builder._canonical_sha256(crop)),
         "ordered_input_gene_schema_sha256": np.asarray(
@@ -298,9 +308,10 @@ def test_protocol_pins_true_donors_and_never_splits_paired_sections() -> None:
     mapping = protocol["section_to_true_donor"]
     assert len(set(mapping.values())) == 15
     assert tuple(protocol["development_donors"]) == builder.DEVELOPMENT_DONORS
-    assert tuple(protocol["locked_test_donors"]) == builder.LOCKED_DONORS
+    assert tuple(protocol["reserved_hest_locked_donors"]) == (builder.RESERVED_HEST_LOCKED_DONORS)
+    assert "locked_test_donors" not in protocol
     roles = {donor: "development" for donor in builder.DEVELOPMENT_DONORS} | {
-        donor: "locked_test" for donor in builder.LOCKED_DONORS
+        donor: "reserved_unopened" for donor in builder.RESERVED_HEST_LOCKED_DONORS
     }
     for left, right in (
         ("NCBI856", "NCBI857"),
@@ -316,23 +327,31 @@ def test_protocol_pins_true_donors_and_never_splits_paired_sections() -> None:
 def test_protocol_makes_55um_target_match_primary_and_prespecifies_context() -> None:
     protocol_path = Path(__file__).parents[1] / "configs" / "hescape_lung_regional_protocol.json"
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
-    primary = builder._resolve_crop_protocol(protocol, "target_matched_55um")
+    primary = builder._resolve_crop_protocol(protocol, "target_matched_55um_common_mpp")
+    high_resolution = builder._resolve_crop_protocol(
+        protocol, "target_matched_55um_high_resolution_sensitivity"
+    )
     context = builder._resolve_crop_protocol(protocol, "context_108um")
     annulus = builder._resolve_crop_protocol(protocol, "context_annulus_55_to_109um")
-    assert protocol["primary_crop_role"] == "target_matched_55um"
-    assert primary["source_pixels"] == 256
-    assert primary["physical_width_um"] == pytest.approx(256 * protocol["source_pixel_size_um"])
+    assert protocol["primary_crop_role"] == "target_matched_55um_common_mpp"
+    assert primary["source_pixels"] == 512
+    assert primary["retained_center_source_pixels"] == 256
+    assert primary["signal_width_um"] == pytest.approx(256 * protocol["source_pixel_size_um"])
+    assert primary["effective_model_mpp"] == context["effective_model_mpp"]
+    assert high_resolution["effective_model_mpp"] != context["effective_model_mpp"]
     assert context["source_pixels"] == 512
     assert context["physical_width_um"] == pytest.approx(512 * protocol["source_pixel_size_um"])
     assert context["crop_scale"] == "context_108um_sensitivity"
     assert annulus["structure"] == "center_annulus"
-    assert annulus["inner_mask_source_pixels"] == primary["source_pixels"]
+    assert annulus["inner_mask_source_pixels"] == primary["retained_center_source_pixels"]
     assert annulus["masked_center_fill"] == "rounded_imagenet_mean_rgb"
     assert annulus["stain_inclusion_mask"] == "strict_outer_annulus_after_bilinear_resize"
     with pytest.raises(ValueError, match="crop role is not prespecified"):
         builder._resolve_crop_protocol(protocol, "post_hoc_crop")
     drifted = json.loads(json.dumps(protocol))
-    drifted["crop_protocols"]["target_matched_55um"]["source_pixels"] = 512
+    drifted["crop_protocols"]["target_matched_55um_common_mpp"]["retained_center_source_pixels"] = (
+        128
+    )
     with pytest.raises(ValueError, match="crop_protocols differs"):
         builder._validate_protocol(drifted)
 
@@ -382,7 +401,8 @@ def test_preprocessing_uses_primary_center_and_context_only_annulus() -> None:
     buffer = io.BytesIO()
     image_module.fromarray(image, mode="RGB").save(buffer, format="PNG")
     primary_tensor, primary_stain = builder._preprocess_image(
-        buffer.getvalue(), crop_protocol=builder.CROP_PROTOCOLS["target_matched_55um"]
+        buffer.getvalue(),
+        crop_protocol=builder.CROP_PROTOCOLS["target_matched_55um_common_mpp"],
     )
     context_tensor, context_stain = builder._preprocess_image(
         buffer.getvalue(), crop_protocol=builder.CROP_PROTOCOLS["context_108um"]
@@ -476,8 +496,10 @@ def test_ordered_schema_hash_is_order_sensitive_and_rejects_duplicates() -> None
 def test_source_schema_keeps_composition_stain_and_coordinate_controls_separate() -> None:
     payload = _minimal_source_payload()
     builder._validate_source_payload(payload)
+    assert payload["reserved_donor_outcomes_loaded"].item() is False
+    assert set(payload["donor_ids"]) <= set(builder.DEVELOPMENT_DONORS)
     assert tuple(payload["site_ids"]) == ("lung", "lung")
-    assert tuple(payload["batch_ids"]) == ("NCBI856", "NCBI856")
+    assert tuple(payload["batch_ids"]) == ("NCBI858", "NCBI858")
     assert tuple(payload["gene_ids"]) == ("G0", "G1", "G2")
     assert tuple(payload["frozen_feature_names"]) == builder.FROZEN_FEATURE_NAMES
     assert tuple(payload["composition_feature_names"]) == (
@@ -491,7 +513,7 @@ def test_source_schema_keeps_composition_stain_and_coordinate_controls_separate(
             {**payload, "composition_feature_names": np.asarray(["wrong"] * 4)}
         )
     with pytest.raises(ValueError, match="crop fields differ"):
-        builder._validate_source_payload({**payload, "crop_source_pixels": np.asarray(512)})
+        builder._validate_source_payload({**payload, "crop_source_pixels": np.asarray(256)})
     with pytest.raises(ValueError, match="ordered schema differs"):
         builder._validate_source_payload(
             {**payload, "ordered_stain_schema_sha256": np.asarray("a" * 64)}

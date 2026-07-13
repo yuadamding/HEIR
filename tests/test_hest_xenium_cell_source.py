@@ -11,6 +11,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from heir.data.study_manifest import current_git_commit, freeze_manifest_content
+
 
 def _load_builder():
     path = Path(__file__).parents[1] / "scripts" / "build_hest_xenium_cell_source.py"
@@ -195,18 +197,32 @@ def _protocol(samples: list[dict[str, object]], development: list[str], locked: 
     crop_manifest_sha256 = _sha256(CROP_MANIFEST_PATH)
     return {
         "schema": builder.PROTOCOL_SCHEMA,
-        "scientific_scope": "nucleus_centered_local_context_association",
+        "scientific_scope": "registered_cell_local_context_112um_association",
+        "g2_claim_scope": "registered_cell_local_context_112um",
         "authorizes_nucleus_intrinsic_claim": False,
         "dataset_repo": builder.DATASET_REPO,
         "dataset_revision": builder.DATASET_REVISION,
         "encoder_manifest_sha256": encoder_manifest_sha256,
         "crop_manifest_sha256": crop_manifest_sha256,
-        "study_manifest_sha256": "5" * 64,
         "normalization": "log1p_cpm_10000",
         "assay": "Xenium",
         "observation_level": "cell",
         "target_construction": "nucleus_overlapping_xenium_transcripts",
         "registration_method": "native_xenium_cell_id_join",
+        "disease_estimands": ["disease_inclusive", "disease_adjusted"],
+        "nuisance_fields": [
+            "log1p_library_size",
+            "section_id",
+            "disease_status",
+            "site_id",
+            "batch_id",
+            "stain_quality",
+            "nuclear_morphology",
+            "cell_morphology",
+            "local_density",
+            "boundary_position",
+            "smooth_spatial_basis",
+        ],
         "development_donors": development,
         "locked_test_donors": locked,
         "broad_type_names": list(builder.TYPE_NAMES),
@@ -215,6 +231,15 @@ def _protocol(samples: list[dict[str, object]], development: list[str], locked: 
             "Epithelial": ["TYPE_A"],
             "Immune": ["TYPE_B"],
             "Mesenchymal": ["TYPE_D"],
+        },
+        "fine_type_marker_gene_ids": ["TYPE_FINE"],
+        "fine_type_annotation_provenance": {
+            "source_field": "final_CT",
+            "source_export": "GSE250346_corrected_Seurat_metadata",
+            "exact_annotation_marker_panel_available": False,
+            "exclusion_policy": "conservative_predeclared_proxy",
+            "establishes_full_target_independence": False,
+            "limitation": "synthetic fixture",
         },
         "gene_ids": ["G1", "G2"],
         "minimum_transcripts_per_cell": 10,
@@ -234,6 +259,23 @@ def _protocol(samples: list[dict[str, object]], development: list[str], locked: 
         "maximum_registration_outlier_fraction": 0.01,
         "maximum_crop_padding_fraction": 0.99,
         "pool_assignment_salt": "synthetic-frozen-v1",
+        "reference_splits": {
+            "primary_split_id": "primary",
+            "selection_unit": "spatial_block",
+            "primary_evaluation_rows_fixed": True,
+            "alternate_splits": [
+                {
+                    "split_id": "reference_hash_fold_0",
+                    "salt": "synthetic-reference-fold-0",
+                    "initial_reference_retention_fraction": 0.8,
+                },
+                {
+                    "split_id": "reference_hash_fold_1",
+                    "salt": "synthetic-reference-fold-1",
+                    "initial_reference_retention_fraction": 0.8,
+                },
+            ],
+        },
         "transcript_split_salt": "synthetic-split-v1",
         "target_programs": {"synthetic_program": ["G1", "G2"]},
         "samples": samples,
@@ -336,12 +378,37 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
     }
     protocol_path = tmp_path / "protocol.json"
     protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
+    draft = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "manifests"
+            / "studies"
+            / "hest_lung_measurement_development.draft.json"
+        ).read_text(encoding="utf-8")
+    )
+    draft["analysis_plan_sha256"] = _sha256(protocol_path)
+    draft["candidate_target_gene_panel_sha256"] = builder._canonical_sha256(["G1", "G2"])
+    marker_sha256 = builder._canonical_sha256(["TYPE_FINE"])
+    draft["type_marker_panel_sha256"] = marker_sha256
+    draft["label_target_independence"]["marker_panel_sha256"] = marker_sha256
+    locked_manifest = freeze_manifest_content(
+        draft,
+        git_commit=current_git_commit(REPOSITORY_ROOT),
+        container_digest="sha256:" + "1" * 64,
+    )
+    study_manifest_path = tmp_path / "measurement-study.locked.json"
+    study_manifest_path.write_text(json.dumps(locked_manifest), encoding="utf-8")
+    for sample in samples:
+        if sample["donor_id"] in locked:
+            for field in ("wsi", "transcripts", "cell_seg", "nucleus_seg", "cellvit_seg"):
+                (tmp_path / sample[field]["path"]).unlink()
     output = tmp_path / "source.npz"
     plan_output = tmp_path / "preparation-plan.json"
     qc_output = tmp_path / "qc.json"
     encoder_manifest = builder._load_encoder_manifest(ENCODER_MANIFEST_PATH)
     builder.build_source(
         protocol_path,
+        study_manifest_path,
         ENCODER_MANIFEST_PATH,
         CROP_MANIFEST_PATH,
         tmp_path,
@@ -355,26 +422,86 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
     )
     with np.load(output, allow_pickle=False) as archive:
         assert str(archive["schema_version"]) == builder.SOURCE_SCHEMA
-        assert len(archive["observation_ids"]) == 80
-        assert len(set(archive["observation_ids"].astype(str))) == 80
-        assert set(archive["split_ids"].astype(str)) == {"development", "locked_test"}
+        assert len(archive["observation_ids"]) == 48
+        assert len(set(archive["observation_ids"].astype(str))) == 48
+        assert set(archive["split_ids"].astype(str)) == {"development"}
+        assert str(archive["study_stage"]) == "measurement_development"
+        assert str(archive["source_scope"]) == "development_donors_only"
+        assert not bool(archive["locked_donor_outcomes_materialized"])
+        assert str(archive["study_manifest_sha256"]) == _sha256(study_manifest_path)
         assert set(archive["pool_roles"].astype(str)) == {"reference", "evaluation"}
-        assert archive["frozen_features"].shape == (80, encoder_manifest.feature_width)
-        assert archive["image_features"].shape == (80, 9, encoder_manifest.feature_width)
+        assert tuple(archive["reference_split_ids"].astype(str)) == (
+            "primary",
+            "reference_hash_fold_0",
+            "reference_hash_fold_1",
+        )
+        assert archive["pool_roles_by_split"].shape == (48, 3)
+        primary_evaluation = archive["pool_roles"].astype(str) == "evaluation"
+        assert np.all(
+            archive["pool_roles_by_split"].astype(str)[primary_evaluation] == "evaluation"
+        )
+        assert archive["frozen_features"].shape == (48, encoder_manifest.feature_width)
+        assert archive["image_features"].shape == (48, 18, encoder_manifest.feature_width)
         assert tuple(archive["crop_ids"].astype(str)) == (
-            "nucleus_mask_only",
-            "cell_mask_only",
-            "crop_32um",
-            "crop_64um",
             "crop_112um",
+            "nucleus_mask_only",
+            "nucleus_mask_mean_fill_112um",
+            "nucleus_mask_blurred_112um",
+            "nucleus_shape_random_location_mean_fill_112um",
+            "cell_mask_only",
+            "cell_mask_mean_fill_112um",
+            "cell_mask_blurred_112um",
+            "cell_shape_random_location_mean_fill_112um",
             "context_ring_32_to_112um",
             "context_ring_64_to_112um",
             "target_cell_removed_112um",
+            "target_cell_removed_mean_fill_112um",
+            "target_cell_removed_blurred_112um",
+            "random_location_cell_removed_mean_fill_112um",
+            "crop_32um",
+            "crop_64um",
             "blank_patch",
         )
-        assert archive["crop_padding_fractions"].shape == (80, 9)
-        assert archive["crop_mask_fractions"].shape == (80, 9)
-        assert archive["molecular_targets"].shape == (80, 2)
+        assert archive["crop_padding_fractions"].shape == (48, 18)
+        assert archive["crop_mask_fractions"].shape == (48, 18)
+        assert archive["crop_roles"].shape == (18,)
+        assert archive["crop_comparison_families"].shape == (18,)
+        common = np.isin(
+            archive["crop_comparison_families"].astype(str),
+            ["intrinsic_common_canvas", "mask_artifact_control", "context_control"],
+        )
+        np.testing.assert_array_equal(archive["crop_diameters_um"][common], 112.0)
+        np.testing.assert_allclose(archive["crop_effective_mpp"][common], 0.5)
+        assert set(
+            archive["crop_ids"][
+                archive["crop_comparison_families"].astype(str) == "resolution_sensitivity"
+            ].astype(str)
+        ) == {"crop_32um", "crop_64um"}
+        crop_metadata = {
+            crop_id: (mask_mode, fill_mode)
+            for crop_id, mask_mode, fill_mode in zip(
+                archive["crop_ids"].astype(str),
+                archive["crop_mask_modes"].astype(str),
+                archive["crop_fill_modes"].astype(str),
+            )
+        }
+        assert crop_metadata["nucleus_mask_mean_fill_112um"] == (
+            "keep_nucleus",
+            "mean_color",
+        )
+        assert crop_metadata["nucleus_mask_blurred_112um"] == (
+            "keep_nucleus",
+            "blurred",
+        )
+        assert crop_metadata["cell_shape_random_location_mean_fill_112um"] == (
+            "random_keep_cell",
+            "mean_color",
+        )
+        assert crop_metadata["random_location_cell_removed_mean_fill_112um"] == (
+            "random_remove_cell",
+            "mean_color",
+        )
+        assert archive["molecular_targets"].shape == (48, 2)
         np.testing.assert_allclose(archive["molecular_targets"], np.log1p(2500.0))
         np.testing.assert_allclose(
             archive["whole_cell_molecular_targets"][:, 0], np.log1p(10_000.0 * 5.0 / 17.0)
@@ -385,13 +512,11 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         np.testing.assert_array_equal(archive["nucleus_library_sizes"], 16)
         np.testing.assert_array_equal(archive["whole_cell_library_sizes"], 17)
         np.testing.assert_array_equal(
-            archive["nucleus_library_size_half_a"]
-            + archive["nucleus_library_size_half_b"],
+            archive["nucleus_library_size_half_a"] + archive["nucleus_library_size_half_b"],
             archive["nucleus_library_sizes"],
         )
         np.testing.assert_array_equal(
-            archive["whole_cell_library_size_half_a"]
-            + archive["whole_cell_library_size_half_b"],
+            archive["whole_cell_library_size_half_a"] + archive["whole_cell_library_size_half_b"],
             archive["whole_cell_library_sizes"],
         )
         np.testing.assert_array_equal(
@@ -399,28 +524,41 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
             archive["nucleus_target_counts"],
         )
         np.testing.assert_array_equal(
-            archive["whole_cell_target_counts_half_a"]
-            + archive["whole_cell_target_counts_half_b"],
+            archive["whole_cell_target_counts_half_a"] + archive["whole_cell_target_counts_half_b"],
             archive["whole_cell_target_counts"],
         )
         assert str(archive["transcript_split_method"]) == "sha256-final-byte-lsb-v1"
-        assert str(archive["transcript_split_salt_sha256"]) == hashlib.sha256(
-            b"synthetic-split-v1"
-        ).hexdigest()
-        assert int(archive["eligible_target_transcripts"]) == 80 * 9
+        assert (
+            str(archive["transcript_split_salt_sha256"])
+            == hashlib.sha256(b"synthetic-split-v1").hexdigest()
+        )
+        assert int(archive["eligible_target_transcripts"]) == 48 * 9
         assert tuple(archive["program_names"].astype(str)) == ("synthetic_program",)
         np.testing.assert_array_equal(archive["program_gene_membership"], [[True, True]])
-        assert len(archive["planned_stratum_ids"]) == 40
+        assert len(archive["planned_stratum_ids"]) == 24
         assert str(archive["planned_stratum_manifest_sha256"]) == builder._canonical_sha256(
             list(archive["planned_stratum_ids"].astype(str))
         )
-        assert archive["coordinate_features"].shape == (80, 5)
+        assert archive["coordinate_features"].shape == (48, 24)
         assert archive["frozen_feature_names"].shape == (encoder_manifest.feature_width,)
-        assert archive["coordinate_feature_names"].shape == (5,)
-        assert archive["stain_features"].shape == (80, 0)
-        assert archive["stain_feature_names"].shape == (0,)
-        assert archive["composition_features"].shape == (80, 0)
-        assert archive["composition_feature_names"].shape == (0,)
+        assert archive["coordinate_feature_names"].shape == (24,)
+        assert archive["stain_features"].shape == (48, 70)
+        assert archive["stain_feature_names"].shape == (70,)
+        assert archive["composition_features"].shape == (48, 10)
+        assert archive["composition_feature_names"].shape == (10,)
+        assert archive["nuclear_morphometric_features"].shape == (48, 34)
+        assert archive["cell_morphometric_features"].shape == (48, 33)
+        assert archive["classical_morphology_features"].shape == (48, 67)
+        assert np.isfinite(archive["stain_features"]).all()
+        assert np.isfinite(archive["classical_morphology_features"]).all()
+        assert tuple(archive["fine_type_marker_gene_ids"].astype(str)) == ("TYPE_FINE",)
+        assert str(archive["fine_type_marker_panel_sha256"]) == builder._canonical_sha256(
+            ["TYPE_FINE"]
+        )
+        assert set(archive["disease_estimands"].astype(str)) == {
+            "disease_inclusive",
+            "disease_adjusted",
+        }
         assert set(archive["type_labels"].tolist()) == {0, 1}
         assert set(archive["type_names"].astype(str)) == {
             "Synthetic epithelial",
@@ -428,27 +566,32 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
         }
         assert set(archive["broad_type_labels"].tolist()) == {1, 2}
         assert tuple(archive["broad_type_names"].astype(str)) == builder.TYPE_NAMES
-        assert archive["registration_qc_features"].shape == (80, 23)
+        assert archive["registration_qc_features"].shape == (48, 23)
         assert archive["registration_qc_feature_names"].shape == (23,)
-        assert set(archive["section_ids"].astype(str)) == set(builder.SECTION_IDENTITIES)
+        assert set(archive["section_ids"].astype(str)) == {
+            sample_id
+            for sample_id, (donor_id, _) in builder.SECTION_IDENTITIES.items()
+            if donor_id in development
+        }
         assert set(archive["disease_statuses"].astype(str)) == {"Disease"}
         assert set(archive["site_ids"].astype(str)) == {"synthetic_site"}
         assert set(archive["batch_ids"].astype(str)) == {"TMA1:Run1"}
         assert str(archive["encoder_name"]) == encoder_manifest.repository
-        assert str(archive["target_construction"]) == (
-            "nucleus_overlapping_xenium_transcripts"
-        )
+        assert str(archive["target_construction"]) == ("nucleus_overlapping_xenium_transcripts")
         assert str(archive["primary_crop_id"]) == "crop_112um"
-        assert str(archive["crop_role"]) == "full_context_primary"
+        assert str(archive["crop_role"]) == "registered_cell_local_context_112um"
         assert float(archive["crop_diameter_um"]) == 112.0
         assert str(archive["mask_mode"]) == "none"
         assert not bool(archive["authorizes_nucleus_intrinsic_claim"])
+        assert not bool(archive["nucleus_hypothesis_tested"])
+        assert not bool(archive["cell_intrinsic_hypothesis_tested"])
+        assert str(archive["g2_claim_scope"]) == "registered_cell_local_context_112um"
         assert archive["registration_qc_pass"].all()
         np.testing.assert_array_equal(archive["registration_cardinality"], 1)
         assert archive["target_qc_pass"].all()
         assert archive["crop_qc_pass"].all()
-        assert archive["cellvit_sensitivity_features"].shape == (80, 2)
-        assert archive["cellvit_context_features"].shape == (80, 2)
+        assert archive["cellvit_sensitivity_features"].shape == (48, 2)
+        assert archive["cellvit_context_features"].shape == (48, 2)
         assert set(archive["cellvit_sensitivity_feature_names"].astype(str)) == {
             "cellvit_log1p_count_Epithelial",
             "cellvit_log1p_count_Inflammatory",
@@ -501,47 +644,62 @@ def test_builder_creates_registered_cell_source_and_isolates_cellvit(
             "cell_morphometric_features",
             "cellvit_context_features",
             "image_features_by_crop_and_encoder",
+            "pool_roles_by_split",
         }
         assert required_matrices <= set(archive.files)
         assert "registration_is_one_to_one" not in archive.files
+        assert "study_manifest_sha256" in archive.files
     plan = json.loads(plan_output.read_text(encoding="utf-8"))
     assert plan["source_observations_sha256"] == _sha256(output)
     assert plan["source_schema"] == builder.SOURCE_SCHEMA
+    assert plan["study_stage"] == "measurement_development"
+    assert plan["source_scope"] == "development_donors_only"
+    assert plan["locked_donor_outcomes_materialized"] is False
     assert plan["encoder_name"] == encoder_manifest.repository
     assert plan["target_construction"] == "nucleus_overlapping_xenium_transcripts"
     assert plan["type_names"] == ["Synthetic epithelial", "Synthetic immune"]
     assert plan["broad_type_names"] == list(builder.TYPE_NAMES)
     assert len(plan["frozen_feature_names"]) == encoder_manifest.feature_width
-    assert plan["coordinate_feature_names"] == [
-        "he_x_normalized",
-        "he_y_normalized",
-        "he_x_squared",
-        "he_y_squared",
-        "he_xy",
-    ]
-    assert plan["crop_metadata"] == {
-        "primary_crop_id": "crop_112um",
-        "crop_role": "full_context_primary",
-        "crop_diameter_um": 112.0,
-        "source_mpp": builder.SOURCE_MPP,
-        "model_mpp": encoder_manifest.model_mpp,
-        "model_input_pixels": encoder_manifest.input_pixels,
-        "mask_mode": "none",
-        "padding": "white",
-    }
+    assert plan["coordinate_feature_names"] == list(builder.SPATIAL_FEATURE_NAMES)
+    assert plan["crop_metadata"]["primary_crop_id"] == "crop_112um"
+    assert plan["crop_metadata"]["crop_role"] == ("registered_cell_local_context_112um")
+    assert plan["crop_metadata"]["crop_diameter_um"] == 112.0
+    assert plan["crop_metadata"]["source_mpp"] == builder.SOURCE_MPP
+    assert plan["crop_metadata"]["mask_mode"] == "none"
+    assert plan["crop_metadata"]["fill_mode"] == "none"
+    assert len(plan["crop_metadata"]["variants"]) == 18
     assert plan["target"]["primary"] == "nucleus_overlapping_xenium_transcripts"
     assert plan["target"]["secondary"] == "whole_cell_xenium_transcripts"
     assert plan["crop_ids"] == list(np.load(output, allow_pickle=False)["crop_ids"].astype(str))
     assert plan["gene_ids"] == list(np.load(output, allow_pickle=False)["gene_ids"].astype(str))
     assert plan["type_names"] == list(np.load(output, allow_pickle=False)["type_names"].astype(str))
     assert plan["authorizes_nucleus_intrinsic_claim"] is False
+    assert plan["nucleus_hypothesis_tested"] is False
+    assert plan["cell_intrinsic_hypothesis_tested"] is False
+    assert plan["fine_type_marker_panel_sha256"] == builder._canonical_sha256(["TYPE_FINE"])
+    assert plan["reference_splits"] == {
+        "primary_split_id": "primary",
+        "split_ids": ["primary", "reference_hash_fold_0", "reference_hash_fold_1"],
+        "primary_evaluation_rows_fixed": True,
+        "selection_unit": "spatial_block",
+    }
     qc = json.loads(qc_output.read_text(encoding="utf-8"))
     assert qc["pass"] is True
+    assert qc["study_stage"] == "measurement_development"
+    assert qc["source_scope"] == "development_donors_only"
+    assert qc["locked_donor_outcomes_materialized"] is False
     assert qc["source_observations"]["sha256"] == _sha256(output)
     assert qc["preparation_plan"]["sha256"] == _sha256(plan_output)
-    assert qc["targets"]["whole_cell_eligible_transcripts"] > qc["targets"][
-        "nucleus_eligible_transcripts"
-    ]
+    assert qc["crops"]["g2_claim_scope"] == "registered_cell_local_context_112um"
+    assert qc["crops"]["inpainting_substitute"] == "blurred_replacement"
+    assert qc["feature_families"]["stain_quality_columns"] == 70
+    assert qc["feature_families"]["nuclear_morphology_columns"] == 34
+    assert qc["feature_families"]["cell_morphology_columns"] == 33
+    assert set(qc["reference_evaluation_balance"]) == set(builder.DEVELOPMENT_DONORS)
+    assert (
+        qc["targets"]["whole_cell_eligible_transcripts"]
+        > qc["targets"]["nucleus_eligible_transcripts"]
+    )
 
 
 def test_protocol_and_input_hashes_fail_closed(tmp_path: Path) -> None:
@@ -577,9 +735,32 @@ def test_protocol_and_input_hashes_fail_closed(tmp_path: Path) -> None:
         builder._validate_protocol(
             {**protocol, "samples": wrong_samples}, encoder_manifest, crop_manifest
         )
+    with pytest.raises(ValueError, match="broad/fine marker and evaluation genes"):
+        builder._validate_protocol(
+            {**protocol, "fine_type_marker_gene_ids": ["G1"]},
+            encoder_manifest,
+            crop_manifest,
+        )
     missing = builder.InputFile("missing.tif", "1" * 64)
     with pytest.raises(ValueError, match="missing or differs"):
         builder._resolve_input(tmp_path.resolve(), missing)
+
+
+def test_builder_cannot_open_confirmatory_rows_from_a_draft_manifest(tmp_path: Path) -> None:
+    draft = REPOSITORY_ROOT / "manifests" / "studies" / "hest_lung_cell_association.draft.json"
+    with pytest.raises(ValueError, match="must have status locked"):
+        builder.build_source(
+            tmp_path / "unread-protocol.json",
+            draft,
+            ENCODER_MANIFEST_PATH,
+            CROP_MANIFEST_PATH,
+            tmp_path / "unread-data",
+            tmp_path / "unread-model",
+            tmp_path / "source.npz",
+            tmp_path / "plan.json",
+            tmp_path / "qc.json",
+            device="cpu",
+        )
 
 
 def test_expression_aggregation_rejects_duplicate_transcript_ids(tmp_path: Path) -> None:
@@ -618,9 +799,7 @@ def test_encoder_manifests_record_access_status_and_handcrafted_control() -> Non
     uni2h = load_encoder_manifest(ENCODER_MANIFEST_PATH)
     assert uni2h.available
     assert uni2h.repository == "MahmoodLab/UNI2-h"
-    inaccessible = (
-        REPOSITORY_ROOT / "manifests" / "encoders" / "hoptimus1.inaccessible.json"
-    )
+    inaccessible = REPOSITORY_ROOT / "manifests" / "encoders" / "hoptimus1.inaccessible.json"
     status = load_encoder_manifest(inaccessible, require_available=False)
     assert not status.available
     assert status.checkpoint_sha256 == "0" * 64

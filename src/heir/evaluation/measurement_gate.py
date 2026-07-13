@@ -13,14 +13,18 @@ import numpy as np
 from heir.evaluation.reliability import (
     SPLIT_HALF_METHOD,
     construct_split_half_counts,
+    cross_fitted_residualize,
+    cross_fitted_target_basis_reliability,
     feature_reliability,
     normalize_split_counts,
     program_reliability,
-    target_basis_reliability_ceiling,
+    program_scores,
 )
 from heir.utils import sha256_file
 
 MEASUREMENT_GATE_SCHEMA = "heir.measurement_gate.v1"
+PRIMARY_TARGET_VARIANT = "nucleus_overlapping_transcripts"
+SECONDARY_TARGET_VARIANT = "whole_cell_assigned_transcripts"
 PathLike = Union[str, Path]
 
 
@@ -43,6 +47,10 @@ class MeasurementThresholds:
     maximum_annotation_nucleus_p95_um: float
     maximum_annotation_cell_p95_um: float
     maximum_cell_nucleus_p95_um: float
+    maximum_registration_nucleus_diameter_ratio_p95: float
+    maximum_registration_nearest_neighbor_ratio_p95: float
+    best_registration_quality_max_fraction_of_limit: float
+    intermediate_registration_quality_max_fraction_of_limit: float
     maximum_registration_outlier_fraction: float
     maximum_nucleus_outside_cell_fraction: float
     minimum_nucleus_cell_area_ratio: float
@@ -56,8 +64,12 @@ class MeasurementThresholds:
     minimum_median_program_reliability: float
     minimum_target_basis_ceiling: float
     minimum_reliable_gene_fraction: float
+    minimum_reliable_development_donor_fraction: float
+    minimum_within_fine_type_reliability: float
     minimum_reliability_rows: int
     target_basis_rank: int
+    minimum_reliable_development_donors: int
+    minimum_reliable_donors_per_fine_type: int
     minimum_coverage_fraction: float
     minimum_reference_cells_per_stratum: int
     minimum_evaluation_cells_per_stratum: int
@@ -75,6 +87,10 @@ class MeasurementThresholds:
             "maximum_annotation_nucleus_p95_um",
             "maximum_annotation_cell_p95_um",
             "maximum_cell_nucleus_p95_um",
+            "maximum_registration_nucleus_diameter_ratio_p95",
+            "maximum_registration_nearest_neighbor_ratio_p95",
+            "best_registration_quality_max_fraction_of_limit",
+            "intermediate_registration_quality_max_fraction_of_limit",
             "maximum_registration_outlier_fraction",
             "maximum_nucleus_outside_cell_fraction",
             "minimum_nucleus_cell_area_ratio",
@@ -88,8 +104,12 @@ class MeasurementThresholds:
             "minimum_median_program_reliability",
             "minimum_target_basis_ceiling",
             "minimum_reliable_gene_fraction",
+            "minimum_reliable_development_donor_fraction",
+            "minimum_within_fine_type_reliability",
             "minimum_reliability_rows",
             "target_basis_rank",
+            "minimum_reliable_development_donors",
+            "minimum_reliable_donors_per_fine_type",
         )
         coverage_names = (
             "minimum_coverage_fraction",
@@ -120,6 +140,8 @@ class MeasurementThresholds:
             "maximum_annotation_nucleus_p95_um",
             "maximum_annotation_cell_p95_um",
             "maximum_cell_nucleus_p95_um",
+            "maximum_registration_nucleus_diameter_ratio_p95",
+            "maximum_registration_nearest_neighbor_ratio_p95",
             "minimum_nucleus_cell_area_ratio",
             "maximum_nucleus_cell_area_ratio",
             "minimum_transcript_qv",
@@ -139,6 +161,8 @@ class MeasurementThresholds:
             "minimum_median_program_reliability",
             "minimum_target_basis_ceiling",
             "minimum_reliable_gene_fraction",
+            "minimum_reliable_development_donor_fraction",
+            "minimum_within_fine_type_reliability",
             "minimum_coverage_fraction",
         )
         for name in fractions:
@@ -147,13 +171,28 @@ class MeasurementThresholds:
                 raise ValueError("measurement threshold %s must be in [0, 1]" % name)
         if self.minimum_nucleus_cell_area_ratio > self.maximum_nucleus_cell_area_ratio:
             raise ValueError("nucleus/cell area-ratio thresholds are reversed")
+        if (
+            self.maximum_registration_nucleus_diameter_ratio_p95 <= 0
+            or self.maximum_registration_nearest_neighbor_ratio_p95 <= 0
+        ):
+            raise ValueError("geometry-relative registration thresholds must be positive")
+        if not (
+            0
+            < self.best_registration_quality_max_fraction_of_limit
+            < self.intermediate_registration_quality_max_fraction_of_limit
+            < 1
+        ):
+            raise ValueError("registration quality-stratum cutoffs must increase within (0, 1)")
+        if self.minimum_reliable_development_donor_fraction <= 0:
+            raise ValueError("reliable molecular targets require a positive donor fraction")
         positive_integers = (
             "minimum_reliability_rows",
             "target_basis_rank",
+            "minimum_reliable_development_donors",
+            "minimum_reliable_donors_per_fine_type",
             "minimum_reference_cells_per_stratum",
             "minimum_evaluation_cells_per_stratum",
             "minimum_development_donors_per_fine_type",
-            "minimum_locked_donors_per_fine_type",
         )
         if any(
             isinstance(getattr(self, name), (bool, np.bool_))
@@ -162,6 +201,18 @@ class MeasurementThresholds:
             for name in positive_integers
         ):
             raise ValueError("measurement minimum counts and target rank must be positive integers")
+        if (
+            self.minimum_reliable_development_donors < 2
+            or self.minimum_reliable_donors_per_fine_type < 2
+        ):
+            raise ValueError("donor-cross-fitted reliability requires at least two donors")
+        locked_minimum = self.minimum_locked_donors_per_fine_type
+        if (
+            isinstance(locked_minimum, (bool, np.bool_))
+            or int(locked_minimum) != locked_minimum
+            or int(locked_minimum) < 0
+        ):
+            raise ValueError("locked donor coverage minimum must be a non-negative integer")
         overlap_names = (
             "maximum_reference_evaluation_row_overlap",
             "maximum_reference_evaluation_block_overlap",
@@ -300,6 +351,134 @@ def _distance(
         first_x_values.astype(np.float64) - second_x_values.astype(np.float64),
         first_y_values.astype(np.float64) - second_y_values.astype(np.float64),
     )
+
+
+def _nearest_neighbor_distances(
+    x_coordinates: np.ndarray,
+    y_coordinates: np.ndarray,
+    section_ids: np.ndarray,
+    nucleus_diameters: np.ndarray,
+) -> np.ndarray:
+    """Exact planar nearest-neighbor distances using an expanding spatial grid."""
+
+    x = np.asarray(x_coordinates, dtype=np.float64)
+    y = np.asarray(y_coordinates, dtype=np.float64)
+    diameters = np.asarray(nucleus_diameters, dtype=np.float64)
+    if (
+        x.shape != y.shape
+        or x.shape != diameters.shape
+        or x.shape != section_ids.shape
+        or not np.isfinite(x).all()
+        or not np.isfinite(y).all()
+    ):
+        raise ValueError("nucleus coordinates for nearest-neighbor QC are malformed")
+    positive_diameters = diameters[np.isfinite(diameters) & (diameters > 0)]
+    if not len(positive_diameters):
+        raise ValueError("nearest-neighbor QC requires positive nucleus diameters")
+    cell_size = float(np.median(positive_diameters))
+    result = np.full(len(x), np.nan, dtype=np.float64)
+    for section in sorted(set(section_ids.tolist())):
+        indices = np.flatnonzero(section_ids == section)
+        if len(indices) < 2:
+            continue
+        cell_x = np.floor(x[indices] / cell_size).astype(np.int64)
+        cell_y = np.floor(y[indices] / cell_size).astype(np.int64)
+        grid: dict[tuple[int, int], list[int]] = {}
+        for local_index, key in enumerate(zip(cell_x.tolist(), cell_y.tolist())):
+            grid.setdefault(key, []).append(local_index)
+        minimum_x, maximum_x = int(cell_x.min()), int(cell_x.max())
+        minimum_y, maximum_y = int(cell_y.min()), int(cell_y.max())
+        for local_index, global_index in enumerate(indices.tolist()):
+            center_x, center_y = int(cell_x[local_index]), int(cell_y[local_index])
+            best_squared = np.inf
+            maximum_radius = max(
+                center_x - minimum_x,
+                maximum_x - center_x,
+                center_y - minimum_y,
+                maximum_y - center_y,
+            )
+            for radius in range(maximum_radius + 1):
+                for grid_x in range(center_x - radius, center_x + radius + 1):
+                    for grid_y in range(center_y - radius, center_y + radius + 1):
+                        if radius and max(abs(grid_x - center_x), abs(grid_y - center_y)) != radius:
+                            continue
+                        for candidate in grid.get((grid_x, grid_y), ()):
+                            if candidate == local_index:
+                                continue
+                            delta_x = x[indices[candidate]] - x[global_index]
+                            delta_y = y[indices[candidate]] - y[global_index]
+                            best_squared = min(best_squared, delta_x * delta_x + delta_y * delta_y)
+                left = (center_x - radius) * cell_size
+                right = (center_x + radius + 1) * cell_size
+                bottom = (center_y - radius) * cell_size
+                top = (center_y + radius + 1) * cell_size
+                distance_to_unsearched = min(
+                    x[global_index] - left,
+                    right - x[global_index],
+                    y[global_index] - bottom,
+                    top - y[global_index],
+                )
+                if np.isfinite(best_squared) and best_squared <= distance_to_unsearched**2:
+                    break
+            if np.isfinite(best_squared):
+                result[global_index] = np.sqrt(best_squared)
+    return result
+
+
+def _relative_distance_qc(
+    errors: np.ndarray,
+    scales: np.ndarray,
+    section_ids: np.ndarray,
+    *,
+    maximum_p95: float,
+    maximum_outlier_fraction: float,
+) -> tuple[Mapping[str, object], np.ndarray, np.ndarray]:
+    valid = np.isfinite(errors) & (errors >= 0) & np.isfinite(scales) & (scales > 0)
+    row_ratios = np.full(len(errors), np.nan, dtype=np.float64)
+
+    def summarize(selected: np.ndarray) -> Mapping[str, object]:
+        selected_valid = selected & valid
+        median_scale = float(np.median(scales[selected_valid])) if selected_valid.any() else None
+        ratios = np.full(len(errors), np.nan, dtype=np.float64)
+        if median_scale is not None:
+            ratios[selected_valid] = errors[selected_valid] / median_scale
+        selected_pass = selected_valid & (ratios <= maximum_p95)
+        summary = dict(_quantiles(ratios[selected_valid]))
+        outlier_fraction = float(np.mean(~selected_pass[selected])) if selected.any() else 1.0
+        return {
+            **summary,
+            "normalization_denominator": "median_geometry_scale_um",
+            "median_geometry_scale_um": median_scale,
+            "maximum_allowed_p95_ratio": float(maximum_p95),
+            "outlier_fraction": outlier_fraction,
+            "maximum_allowed_outlier_fraction": float(maximum_outlier_fraction),
+            "pass": bool(
+                selected.any()
+                and selected_valid.sum() == selected.sum()
+                and summary["p95"] is not None
+                and float(summary["p95"]) <= maximum_p95
+                and outlier_fraction <= maximum_outlier_fraction
+            ),
+        }
+
+    overall = np.ones(len(errors), dtype=np.bool_)
+    by_section = {}
+    for section in sorted(set(section_ids.tolist())):
+        selected = section_ids == section
+        section_valid = selected & valid
+        if section_valid.any():
+            median_scale = float(np.median(scales[section_valid]))
+            row_ratios[section_valid] = errors[section_valid] / median_scale
+        by_section[section] = summarize(selected)
+    row_pass = valid & (row_ratios <= maximum_p95)
+    report = {
+        **summarize(overall),
+        "by_section": by_section,
+    }
+    report["pass"] = bool(
+        report["pass"] and all(value["pass"] for value in report["by_section"].values())
+    )
+    return report, row_pass, row_ratios
 
 
 def _distance_qc(
@@ -484,9 +663,7 @@ def _precomputed_half_libraries(
     first_library, second_library, total_library = libraries
     if not np.array_equal(first_library + second_library, total_library):
         raise ValueError("precomputed library-size halves do not reconstruct full libraries")
-    if np.any(first_library < half_a.sum(axis=1)) or np.any(
-        second_library < half_b.sum(axis=1)
-    ):
+    if np.any(first_library < half_a.sum(axis=1)) or np.any(second_library < half_b.sum(axis=1)):
         raise ValueError("precomputed library-size halves are below target-gene counts")
     return first_library, second_library
 
@@ -549,9 +726,7 @@ def _group_reliability(
             "genes": gene_report["features"],
             "programs": program_report["features"],
             "median_gene_reliability": gene_report["median_spearman_brown_reliability"],
-            "median_program_reliability": program_report[
-                "median_spearman_brown_reliability"
-            ],
+            "median_program_reliability": program_report["median_spearman_brown_reliability"],
         }
     return result
 
@@ -576,9 +751,7 @@ def _macro_reliability(
             family = report.get(feature_family) if isinstance(report, Mapping) else None
             record = family.get(feature) if isinstance(family, Mapping) else None
             value = (
-                record.get("spearman_brown_reliability")
-                if isinstance(record, Mapping)
-                else None
+                record.get("spearman_brown_reliability") if isinstance(record, Mapping) else None
             )
             if value is not None and np.isfinite(float(value)):
                 values.append(float(value))
@@ -588,6 +761,10 @@ def _macro_reliability(
                 None if not values else float(np.median(values))
             ),
             "evaluable_development_donors": evaluable_groups,
+            "evaluable_development_donor_count": int(len(evaluable_groups)),
+            "evaluable_development_donor_fraction": float(len(evaluable_groups) / len(group_names))
+            if group_names
+            else 0.0,
             "development_donors": int(len(group_names)),
         }
     finite = [
@@ -604,6 +781,153 @@ def _macro_reliability(
     }
 
 
+def _donor_macro_feature_reliability(
+    first: np.ndarray,
+    second: np.ndarray,
+    feature_ids: Sequence[str],
+    donor_ids: np.ndarray,
+    development_mask: np.ndarray,
+    *,
+    minimum_rows: int,
+) -> Mapping[str, object]:
+    names = tuple(str(value) for value in feature_ids)
+    development_donors = sorted(set(donor_ids[development_mask].tolist()))
+    donor_reports = {}
+    for donor in development_donors:
+        selected = development_mask & (donor_ids == donor)
+        finite_rows = selected & np.isfinite(first).all(axis=1) & np.isfinite(second).all(axis=1)
+        donor_reports[donor] = feature_reliability(
+            first[finite_rows],
+            second[finite_rows],
+            names,
+            minimum_rows=minimum_rows,
+        )
+    features = {}
+    for feature in names:
+        values = {
+            donor: report["features"][feature]["spearman_brown_reliability"]
+            for donor, report in donor_reports.items()
+            if report["features"][feature]["spearman_brown_reliability"] is not None
+        }
+        features[feature] = {
+            "donor_macro_spearman_brown_reliability": (
+                None if not values else float(np.median(list(values.values())))
+            ),
+            "evaluable_development_donor_ids": sorted(values),
+            "evaluable_development_donor_count": int(len(values)),
+            "evaluable_development_donor_fraction": (
+                float(len(values) / len(development_donors)) if development_donors else 0.0
+            ),
+            "development_donor_ids": development_donors,
+        }
+    finite = [
+        value["donor_macro_spearman_brown_reliability"]
+        for value in features.values()
+        if value["donor_macro_spearman_brown_reliability"] is not None
+    ]
+    return {
+        "development_donor_ids": development_donors,
+        "donor_reports": donor_reports,
+        "features": features,
+        "finite_features": int(len(finite)),
+        "median_donor_macro_spearman_brown_reliability": (
+            None if not finite else float(np.median(finite))
+        ),
+    }
+
+
+def _within_type_donor_macro_reliability(
+    first: np.ndarray,
+    second: np.ndarray,
+    feature_ids: Sequence[str],
+    donor_ids: np.ndarray,
+    fine_types: np.ndarray,
+    development_mask: np.ndarray,
+    *,
+    minimum_rows: int,
+) -> Mapping[str, object]:
+    names = tuple(str(value) for value in feature_ids)
+    result = {}
+    for fine_type in sorted(set(fine_types.tolist())):
+        type_development = development_mask & (fine_types == fine_type)
+        type_donors = sorted(set(donor_ids[type_development].tolist()))
+        donor_reports = {}
+        for donor in type_donors:
+            selected = type_development & (donor_ids == donor)
+            finite_rows = (
+                selected & np.isfinite(first).all(axis=1) & np.isfinite(second).all(axis=1)
+            )
+            donor_reports[donor] = feature_reliability(
+                first[finite_rows],
+                second[finite_rows],
+                names,
+                minimum_rows=minimum_rows,
+            )
+        features = {}
+        for feature in names:
+            values = {
+                donor: report["features"][feature]["spearman_brown_reliability"]
+                for donor, report in donor_reports.items()
+                if report["features"][feature]["spearman_brown_reliability"] is not None
+            }
+            features[feature] = {
+                "donor_macro_spearman_brown_reliability": (
+                    None if not values else float(np.median(list(values.values())))
+                ),
+                "evaluable_development_donor_ids": sorted(values),
+                "evaluable_development_donor_count": int(len(values)),
+                "evaluable_development_donor_fraction": (
+                    float(len(values) / len(type_donors)) if type_donors else 0.0
+                ),
+                "development_donor_ids": type_donors,
+            }
+        result[fine_type] = {
+            "development_donor_ids": type_donors,
+            "donor_reports": donor_reports,
+            "features": features,
+        }
+    return result
+
+
+def _feature_meets_reliability_contract(
+    feature_id: str,
+    overall: Mapping[str, object],
+    within_type: Mapping[str, object],
+    supported_fine_types: Sequence[str],
+    *,
+    minimum_reliability: float,
+    minimum_development_donors: int,
+    minimum_development_donor_fraction: float,
+    minimum_donors_per_fine_type: int,
+    minimum_within_type_reliability: float,
+) -> bool:
+    value = overall.get("donor_macro_spearman_brown_reliability")
+    if (
+        value is None
+        or float(value) < minimum_reliability
+        or int(overall.get("evaluable_development_donor_count", 0)) < minimum_development_donors
+        or float(overall.get("evaluable_development_donor_fraction", 0.0))
+        < minimum_development_donor_fraction
+    ):
+        return False
+    for fine_type in supported_fine_types:
+        type_report = within_type.get(fine_type)
+        features = type_report.get("features") if isinstance(type_report, Mapping) else None
+        feature = features.get(feature_id) if isinstance(features, Mapping) else None
+        if (
+            not isinstance(feature, Mapping)
+            or feature.get("donor_macro_spearman_brown_reliability") is None
+            or float(feature["donor_macro_spearman_brown_reliability"])
+            < minimum_within_type_reliability
+            or int(feature.get("evaluable_development_donor_count", 0))
+            < minimum_donors_per_fine_type
+            or float(feature.get("evaluable_development_donor_fraction", 0.0))
+            < minimum_development_donor_fraction
+        ):
+            return False
+    return True
+
+
 def _target_basis_ceiling_by_type(
     first: np.ndarray,
     second: np.ndarray,
@@ -611,36 +935,42 @@ def _target_basis_ceiling_by_type(
     development_mask: np.ndarray,
     donor_ids: np.ndarray,
     fine_types: np.ndarray,
+    supported_fine_types: Sequence[str],
     *,
     rank: int,
     minimum_rows: int,
     minimum_ceiling: float,
+    minimum_donors: int,
+    minimum_donor_fraction: float,
 ) -> Mapping[str, object]:
     reports = {}
     values = []
     all_evaluable = True
-    for fine_type in sorted(set(fine_types.tolist())):
+    for fine_type in supported_fine_types:
         type_rows = fine_types == fine_type
         type_development = development_mask & type_rows
-        weights = np.zeros(len(first), dtype=np.float64)
-        for donor in sorted(set(donor_ids[type_development].tolist())):
-            donor_type = type_development & (donor_ids == donor)
-            weights[donor_type] = 1.0 / donor_type.sum()
         try:
             report = dict(
-                target_basis_reliability_ceiling(
+                cross_fitted_target_basis_reliability(
                     first,
                     second,
+                    donor_ids,
                     development_mask=type_development,
                     rank=rank,
                     minimum_rows=minimum_rows,
-                    fit_weights=weights,
-                    group_labels=donor_ids,
+                    minimum_training_donors=max(1, minimum_donors - 1),
                     full_targets=full_target,
                 )
             )
-            value = report["median_group_macro_reliability"]
-            report["pass"] = bool(value is not None and value >= minimum_ceiling)
+            value = report["minimum_component_reliability"]
+            component_coverage = all(
+                int(component["evaluable_donor_count"]) >= minimum_donors
+                and float(component["evaluable_donor_fraction"]) >= minimum_donor_fraction
+                for component in report["components"].values()
+            )
+            report["pass"] = bool(
+                value is not None and value >= minimum_ceiling and component_coverage
+            )
             if value is not None:
                 values.append(float(value))
             all_evaluable &= value is not None
@@ -659,15 +989,23 @@ def _target_basis_ceiling_by_type(
         "minimum_fine_type_ceiling": None if not values else float(min(values)),
         "median_fine_type_ceiling": None if not values else float(np.median(values)),
         "pass": bool(
-            reports
-            and all_evaluable
-            and all(report["pass"] for report in reports.values())
+            reports and all_evaluable and all(report["pass"] for report in reports.values())
         ),
     }
 
 
 def _panel_sha256(gene_ids: Sequence[str]) -> str:
     payload = json.dumps(list(gene_ids), ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _mapping_sha256(value: Mapping[str, object]) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -726,6 +1064,8 @@ def evaluate_measurement_gate(
     """Evaluate measurement validity without using any image-model outcome."""
 
     thresholds.validate()
+    if thresholds.minimum_locked_donors_per_fine_type != 0:
+        raise ValueError("measurement-development locked donor coverage minimum must be zero")
     observations = _required_strings(source, ("observation_id", "observation_ids"))
     rows = len(observations)
     if not rows:
@@ -734,6 +1074,7 @@ def evaluate_measurement_gate(
     if len(cell_ids) != rows:
         raise ValueError("cell IDs do not align with registered observations")
     donor_ids = _string_vector(source, ("donor_id", "donor_ids"), rows)
+    split_ids = _string_vector(source, ("split_id", "split_ids"), rows)
     section_ids = _string_vector(source, ("section_id", "section_ids"), rows)
     fine_types = _string_vector(
         source,
@@ -757,6 +1098,27 @@ def evaluate_measurement_gate(
     )
     if any(value is None for value in separation_identities):
         raise ValueError("measurement source lacks donor/section/type/pool separation identities")
+    study_stage = _scalar_value(source, ("study_stage",))
+    source_scope = _scalar_value(source, ("source_scope",))
+    source_study_manifest_sha256 = _scalar_value(source, ("study_manifest_sha256",))
+    locked_outcomes_materialized = _scalar_value(source, ("locked_donor_outcomes_materialized",))
+    if study_stage != "measurement_development":
+        raise ValueError("H-MEAS source is not marked measurement_development")
+    if source_scope != "development_donors_only":
+        raise ValueError("H-MEAS source is not development-donor-only")
+    if source_study_manifest_sha256 != study_manifest_sha256:
+        raise ValueError("H-MEAS source is not bound to the measurement study manifest")
+    if locked_outcomes_materialized is not False:
+        raise ValueError("H-MEAS source does not prove locked donor outcomes stayed unopened")
+    if split_ids is None or set(split_ids.tolist()) != {"development"}:
+        raise ValueError("H-MEAS source split_ids must contain development only")
+    observed_donors = set(donor_ids.tolist())
+    locked_rows = sorted(observed_donors & set(locked_test_donors))
+    unexpected_donors = sorted(observed_donors - set(development_donors))
+    if locked_rows:
+        raise ValueError("H-MEAS source materialized reserved locked donor rows")
+    if unexpected_donors:
+        raise ValueError("H-MEAS source contains donors outside the development partition")
 
     annotation_nucleus = _distance(
         source,
@@ -785,6 +1147,103 @@ def evaluate_measurement_gate(
         ("nucleus_centroid_y_um",),
         rows,
     )
+    nucleus_area_geometry = _vector(source, ("nucleus_area_um2",), rows)
+    nucleus_x = _vector(source, ("nucleus_centroid_x_um",), rows)
+    nucleus_y = _vector(source, ("nucleus_centroid_y_um",), rows)
+    nearest_neighbor = _vector(source, ("nearest_neighbor_nucleus_distance_um",), rows)
+    geometry_available = bool(
+        annotation_nucleus is not None
+        and nucleus_area_geometry is not None
+        and nucleus_x is not None
+        and nucleus_y is not None
+    )
+    if geometry_available:
+        nucleus_diameter = 2.0 * np.sqrt(nucleus_area_geometry.astype(np.float64) / np.pi)
+        if nearest_neighbor is None:
+            nearest_neighbor = _nearest_neighbor_distances(
+                nucleus_x,
+                nucleus_y,
+                section_ids,
+                nucleus_diameter,
+            )
+            nearest_neighbor_method = "exact_expanding_spatial_grid_v1"
+        else:
+            nearest_neighbor = nearest_neighbor.astype(np.float64)
+            nearest_neighbor_method = "registered_source"
+        diameter_relative_report, diameter_relative_rows, diameter_ratios = _relative_distance_qc(
+            annotation_nucleus,
+            nucleus_diameter,
+            section_ids,
+            maximum_p95=(thresholds.maximum_registration_nucleus_diameter_ratio_p95),
+            maximum_outlier_fraction=(thresholds.maximum_registration_outlier_fraction),
+        )
+        neighbor_relative_report, neighbor_relative_rows, neighbor_ratios = _relative_distance_qc(
+            annotation_nucleus,
+            nearest_neighbor,
+            section_ids,
+            maximum_p95=(thresholds.maximum_registration_nearest_neighbor_ratio_p95),
+            maximum_outlier_fraction=(thresholds.maximum_registration_outlier_fraction),
+        )
+        geometry_quality_score = np.maximum(
+            diameter_ratios / thresholds.maximum_registration_nucleus_diameter_ratio_p95,
+            neighbor_ratios / thresholds.maximum_registration_nearest_neighbor_ratio_p95,
+        )
+        quality_strata = np.full(rows, "failed", dtype="<U16")
+        quality_strata[np.isfinite(geometry_quality_score) & (geometry_quality_score <= 1.0)] = (
+            "near_threshold"
+        )
+        quality_strata[
+            np.isfinite(geometry_quality_score)
+            & (
+                geometry_quality_score
+                <= thresholds.intermediate_registration_quality_max_fraction_of_limit
+            )
+        ] = "intermediate"
+        quality_strata[
+            np.isfinite(geometry_quality_score)
+            & (geometry_quality_score <= thresholds.best_registration_quality_max_fraction_of_limit)
+        ] = "best"
+        quality_stratum_manifest_sha256 = _panel_sha256(
+            [
+                observation + "|" + quality
+                for observation, quality in zip(observations.tolist(), quality_strata.tolist())
+            ]
+        )
+        quality_strata_report = {
+            "definition": (
+                "max(error/section_median_nucleus_diameter/diameter_limit,"
+                "error/section_median_nearest_neighbor_distance/neighbor_limit)"
+            ),
+            "cutoffs_fraction_of_limit": {
+                "best": thresholds.best_registration_quality_max_fraction_of_limit,
+                "intermediate": (
+                    thresholds.intermediate_registration_quality_max_fraction_of_limit
+                ),
+                "near_threshold": 1.0,
+            },
+            "counts": {
+                name: int(np.count_nonzero(quality_strata == name))
+                for name in ("best", "intermediate", "near_threshold", "failed")
+            },
+            "by_section": {
+                section: {
+                    name: int(np.count_nonzero((section_ids == section) & (quality_strata == name)))
+                    for name in ("best", "intermediate", "near_threshold", "failed")
+                }
+                for section in sorted(set(section_ids.tolist()))
+            },
+            "observation_stratum_manifest_sha256": quality_stratum_manifest_sha256,
+        }
+    else:
+        nucleus_diameter = np.full(rows, np.nan)
+        nearest_neighbor = np.full(rows, np.nan)
+        nearest_neighbor_method = None
+        diameter_relative_report = {"available": False, "pass": False}
+        neighbor_relative_report = {"available": False, "pass": False}
+        diameter_relative_rows = np.zeros(rows, dtype=np.bool_)
+        neighbor_relative_rows = np.zeros(rows, dtype=np.bool_)
+        quality_strata = np.full(rows, "failed", dtype="<U16")
+        quality_strata_report = {"available": False}
     annotation_report, annotation_rows = _distance_qc(
         annotation_nucleus,
         maximum_p95=thresholds.maximum_annotation_nucleus_p95_um,
@@ -836,6 +1295,8 @@ def evaluate_measurement_gate(
             annotation_rows
             & annotation_cell_rows
             & cell_nucleus_rows
+            & diameter_relative_rows
+            & neighbor_relative_rows
             & (cardinality == 1)
         )
     else:
@@ -843,9 +1304,7 @@ def evaluate_measurement_gate(
     supplied_registration_qc = _vector(source, ("registration_qc_pass",), rows)
     registration_disagreements = None
     if supplied_registration_qc is not None:
-        supplied_registration_qc = _booleans(
-            supplied_registration_qc, "registration_qc_pass"
-        )
+        supplied_registration_qc = _booleans(supplied_registration_qc, "registration_qc_pass")
         registration_disagreements = int(
             np.count_nonzero(supplied_registration_qc & ~registration_row_pass)
         )
@@ -865,6 +1324,8 @@ def evaluate_measurement_gate(
         and annotation_report["pass"]
         and annotation_cell_report["pass"]
         and cell_nucleus_report["pass"]
+        and diameter_relative_report["pass"]
+        and neighbor_relative_report["pass"]
         and section_registration_pass
         and (registration_disagreements in (None, 0))
     )
@@ -877,6 +1338,14 @@ def evaluate_measurement_gate(
         "annotation_to_nucleus_distance_um": annotation_report,
         "annotation_to_cell_distance_um": annotation_cell_report,
         "native_cell_to_nucleus_distance_um": cell_nucleus_report,
+        "geometry_relative_registration": {
+            "equivalent_nucleus_diameter_um": _quantiles(nucleus_diameter),
+            "nearest_neighbor_nucleus_distance_um": _quantiles(nearest_neighbor),
+            "nearest_neighbor_method": nearest_neighbor_method,
+            "annotation_error_over_nucleus_diameter": diameter_relative_report,
+            "annotation_error_over_nearest_neighbor_distance": (neighbor_relative_report),
+            "quality_strata": quality_strata_report,
+        },
         "by_section": {
             section: {
                 "annotation_to_nucleus_distance_um": annotation_by_section[section],
@@ -896,7 +1365,7 @@ def evaluate_measurement_gate(
     }
 
     cell_area = _vector(source, ("cell_area_um2",), rows)
-    nucleus_area = _vector(source, ("nucleus_area_um2",), rows)
+    nucleus_area = nucleus_area_geometry
     nucleus_inside = _vector(source, ("nucleus_centroid_inside_cell",), rows)
     if cell_area is None or nucleus_area is None or nucleus_inside is None:
         segmentation_row_pass = np.zeros(rows, dtype=np.bool_)
@@ -933,8 +1402,7 @@ def evaluate_measurement_gate(
                 "area_ratio_outlier_fraction": section_area_outliers,
                 "pass": bool(
                     section_outside <= thresholds.maximum_nucleus_outside_cell_fraction
-                    and section_area_outliers
-                    <= thresholds.maximum_segmentation_outlier_fraction
+                    and section_area_outliers <= thresholds.maximum_segmentation_outlier_fraction
                 ),
             }
         segmentation_pass = bool(
@@ -992,10 +1460,7 @@ def evaluate_measurement_gate(
                 section_valid = valid[selected]
                 section_summary = _quantiles(section_values[section_valid])
                 section_mostly = float(
-                    np.mean(
-                        ~section_valid
-                        | (section_values > thresholds.mostly_padded_cutoff)
-                    )
+                    np.mean(~section_valid | (section_values > thresholds.mostly_padded_cutoff))
                 )
                 crop_by_section[section] = {
                     "padding_fraction": section_summary,
@@ -1003,10 +1468,8 @@ def evaluate_measurement_gate(
                     "pass": bool(
                         section_valid.all()
                         and section_summary["p95"] is not None
-                        and float(section_summary["p95"])
-                        <= thresholds.maximum_crop_padding_p95
-                        and section_mostly
-                        <= thresholds.maximum_mostly_padded_fraction
+                        and float(section_summary["p95"]) <= thresholds.maximum_crop_padding_p95
+                        and section_mostly <= thresholds.maximum_mostly_padded_fraction
                     ),
                 }
             component_pass = bool(
@@ -1060,9 +1523,7 @@ def evaluate_measurement_gate(
             source,
             ("transcript_gene_id", "transcript_gene_ids", "transcript_feature_name"),
         )
-        if not (
-            len(transcript_ids) == len(transcript_assignments) == len(transcript_genes)
-        ):
+        if not (len(transcript_ids) == len(transcript_assignments) == len(transcript_genes)):
             raise ValueError("transcript identity arrays are not aligned")
         transcript_qv = _vector(
             source, ("transcript_qv", "transcript_qv_values"), len(transcript_ids)
@@ -1073,8 +1534,7 @@ def evaluate_measurement_gate(
             qv_values = transcript_qv.astype(np.float64)
             invalid_qv = int(
                 np.count_nonzero(
-                    ~np.isfinite(qv_values)
-                    | (qv_values < thresholds.minimum_transcript_qv)
+                    ~np.isfinite(qv_values) | (qv_values < thresholds.minimum_transcript_qv)
                 )
             )
         duplicate_transcripts = _duplicate_count(transcript_ids)
@@ -1112,21 +1572,13 @@ def evaluate_measurement_gate(
             "transcript_count": _nonnegative_integer_scalar(
                 source, ("eligible_target_transcripts",)
             ),
-            "duplicate": _nonnegative_integer_scalar(
-                source, ("duplicate_transcript_ids",)
-            ),
+            "duplicate": _nonnegative_integer_scalar(source, ("duplicate_transcript_ids",)),
             "multiassigned": _nonnegative_integer_scalar(
                 source, ("transcripts_assigned_to_multiple_cells",)
             ),
-            "invalid_qv": _nonnegative_integer_scalar(
-                source, ("invalid_qv_transcripts",)
-            ),
-            "unknown_gene": _nonnegative_integer_scalar(
-                source, ("unknown_gene_transcripts",)
-            ),
-            "unknown_cell": _nonnegative_integer_scalar(
-                source, ("unknown_cell_transcripts",)
-            ),
+            "invalid_qv": _nonnegative_integer_scalar(source, ("invalid_qv_transcripts",)),
+            "unknown_gene": _nonnegative_integer_scalar(source, ("unknown_gene_transcripts",)),
+            "unknown_cell": _nonnegative_integer_scalar(source, ("unknown_cell_transcripts",)),
         }
         if any(value is None for value in receipt_fields.values()):
             raise ValueError("precomputed transcript split lacks identity-QC receipts")
@@ -1138,12 +1590,8 @@ def evaluate_measurement_gate(
         unknown_assignment_rows = int(receipt_fields["unknown_cell"])
         split_method = str(_scalar_value(source, ("transcript_split_method",)))
         minimum_qv_value = _scalar_value(source, ("transcript_minimum_qv",))
-        receipt_minimum_qv = (
-            None if minimum_qv_value is None else float(minimum_qv_value)
-        )
-        split_salt_sha256 = str(
-            _scalar_value(source, ("transcript_split_salt_sha256",))
-        )
+        receipt_minimum_qv = None if minimum_qv_value is None else float(minimum_qv_value)
+        split_salt_sha256 = str(_scalar_value(source, ("transcript_split_salt_sha256",)))
         transcript_identity_manifest_sha256 = str(
             _scalar_value(source, ("transcript_identity_manifest_sha256",))
         )
@@ -1159,13 +1607,37 @@ def evaluate_measurement_gate(
             and receipt_minimum_qv == thresholds.minimum_transcript_qv
         )
     frozen_programs = programs or _programs_from_source(source, gene_ids)
+    technical_covariates_value = _first(source, ("technical_covariates",))
+    if technical_covariates_value is None:
+        technical_covariates = None
+    else:
+        technical_covariates = np.asarray(technical_covariates_value, dtype=np.float64)
+        if (
+            technical_covariates.ndim != 2
+            or len(technical_covariates) != rows
+            or not np.isfinite(technical_covariates).all()
+        ):
+            raise ValueError("technical covariates must be a finite row-aligned matrix")
     development = np.isin(donor_ids, np.asarray(tuple(development_donors), dtype=str))
-    development_weights = np.zeros(rows, dtype=np.float64)
-    for donor in development_donors:
-        selected = donor_ids == donor
-        if selected.any():
-            development_weights[selected] = 1.0 / selected.sum()
     missing_development_donors = sorted(set(development_donors) - set(donor_ids.tolist()))
+    type_selection_support = {}
+    minimum_type_development_donors = max(
+        thresholds.minimum_development_donors_per_fine_type,
+        thresholds.minimum_reliable_donors_per_fine_type,
+    )
+    for fine_type in sorted(set(fine_types[development].tolist())):
+        type_rows = fine_types == fine_type
+        development_ids = sorted(set(donor_ids[type_rows].tolist()) & set(development_donors))
+        supported = len(development_ids) >= minimum_type_development_donors
+        type_selection_support[fine_type] = {
+            "development_donor_ids": development_ids,
+            "supported": supported,
+            "selection_partition": "development_only",
+        }
+    supported_fine_types = [
+        fine_type for fine_type, support in type_selection_support.items() if support["supported"]
+    ]
+    primary_variant_present = PRIMARY_TARGET_VARIANT in variants
     molecular_prerequisites_pass = bool(
         duplicate_transcripts == 0
         and multiassigned == 0
@@ -1174,197 +1646,376 @@ def evaluate_measurement_gate(
         and unknown_gene_rows == 0
         and split_receipt_pass
         and frozen_programs is not None
+        and technical_covariates is not None
         and development.any()
         and not missing_development_donors
+        and primary_variant_present
+        and supported_fine_types
     )
     variant_reports = {}
-    selected_panels = []
-    molecular_row_has_target = np.full(rows, molecular_prerequisites_pass, dtype=np.bool_)
+    molecular_row_has_target = np.zeros(rows, dtype=np.bool_)
+    processing_variants = (
+        (PRIMARY_TARGET_VARIANT,)
+        + tuple(value for value in variants if value != PRIMARY_TARGET_VARIANT)
+        if primary_variant_present
+        else variants
+    )
     if molecular_prerequisites_pass:
-        for variant_index, variant in enumerate(variants):
-            frozen_full_target = _frozen_full_target(
-                source,
-                variant,
-                rows=rows,
-                genes=len(gene_ids),
-                required=not raw_transcript_mode,
-            )
-            if raw_transcript_mode:
-                selected_transcripts = variant_membership[:, variant_index]
-                split = construct_split_half_counts(
-                    transcript_ids[selected_transcripts],
-                    normalized_assignments[selected_transcripts],
-                    transcript_genes[selected_transcripts],
-                    observations,
-                    gene_ids,
-                    salt=split_salt,
-                )
-                half_a = split.half_a
-                half_b = split.half_b
-                variant_transcripts = int(selected_transcripts.sum())
-                half_a_library = None
-                half_b_library = None
-                full_library = None
-                normalization_denominator = "target_panel_transcripts"
-            else:
-                half_a, half_b, variant_transcripts = _precomputed_split_counts(
-                    source, variant, rows=rows, genes=len(gene_ids)
-                )
-                half_a_library, half_b_library = _precomputed_half_libraries(
+        for variant in processing_variants:
+            role = "primary" if variant == PRIMARY_TARGET_VARIANT else "secondary_sensitivity"
+            affects_primary = variant == PRIMARY_TARGET_VARIANT
+            try:
+                variant_index = variants.index(variant)
+                frozen_full_target = _frozen_full_target(
                     source,
                     variant,
-                    half_a=half_a,
-                    half_b=half_b,
                     rows=rows,
+                    genes=len(gene_ids),
+                    required=not raw_transcript_mode,
                 )
-                normalization_denominator = "frozen_target_library_transcripts"
-                full_library = half_a_library + half_b_library
-                if (
-                    variant == "whole_cell_assigned_transcripts"
-                    and variant_transcripts != transcript_count
-                ):
-                    raise ValueError(
-                        "whole-cell split count differs from eligible transcript receipt"
+                if raw_transcript_mode:
+                    selected_transcripts = variant_membership[:, variant_index]
+                    split = construct_split_half_counts(
+                        transcript_ids[selected_transcripts],
+                        normalized_assignments[selected_transcripts],
+                        transcript_genes[selected_transcripts],
+                        observations,
+                        gene_ids,
+                        salt=split_salt,
                     )
-            total = half_a + half_b
-            molecular_row_has_target &= total.sum(axis=1) > 0
-            normalized_a = normalize_split_counts(
-                half_a, library_sizes=half_a_library
-            )
-            normalized_b = normalize_split_counts(
-                half_b, library_sizes=half_b_library
-            )
-            gene_report = feature_reliability(
-                normalized_a[development],
-                normalized_b[development],
-                gene_ids.tolist(),
-                minimum_rows=thresholds.minimum_reliability_rows,
-            )
-            program_report = program_reliability(
-                normalized_a[development],
-                normalized_b[development],
-                gene_ids.tolist(),
-                frozen_programs,
-                minimum_rows=thresholds.minimum_reliability_rows,
-            )
-            reliability_by_donor = _group_reliability(
-                normalized_a,
-                normalized_b,
-                gene_ids,
-                frozen_programs,
-                donor_ids,
-                minimum_rows=thresholds.minimum_reliability_rows,
-            )
-            donor_macro_genes = _macro_reliability(
-                reliability_by_donor, development_donors, "genes"
-            )
-            donor_macro_programs = _macro_reliability(
-                reliability_by_donor, development_donors, "programs"
-            )
-            ceiling = target_basis_reliability_ceiling(
-                normalized_a,
-                normalized_b,
-                development_mask=development,
-                rank=thresholds.target_basis_rank,
-                minimum_rows=thresholds.minimum_reliability_rows,
-                fit_weights=development_weights,
-                group_labels=donor_ids,
-                full_targets=frozen_full_target,
-            )
-            ceiling_by_type = _target_basis_ceiling_by_type(
-                normalized_a,
-                normalized_b,
-                frozen_full_target,
-                development,
-                donor_ids,
-                fine_types,
-                rank=thresholds.target_basis_rank,
-                minimum_rows=thresholds.minimum_reliability_rows,
-                minimum_ceiling=thresholds.minimum_target_basis_ceiling,
-            )
-            selected_genes = [
-                gene
-                for gene in gene_ids.tolist()
-                if donor_macro_genes["features"][gene][
-                    "donor_macro_spearman_brown_reliability"
-                ]
-                is not None
-                and donor_macro_genes["features"][gene][
-                    "donor_macro_spearman_brown_reliability"
-                ]
-                >= thresholds.minimum_median_gene_reliability
-            ]
-            selected_panels.append(set(selected_genes))
-            gene_fraction = len(selected_genes) / len(gene_ids)
-            gene_median = donor_macro_genes[
-                "median_donor_macro_spearman_brown_reliability"
-            ]
-            program_median = donor_macro_programs[
-                "median_donor_macro_spearman_brown_reliability"
-            ]
-            variant_pass = bool(
-                gene_median is not None
-                and gene_median >= thresholds.minimum_median_gene_reliability
-                and gene_fraction >= thresholds.minimum_reliable_gene_fraction
-                and program_median is not None
-                and program_median >= thresholds.minimum_median_program_reliability
-                and ceiling_by_type["pass"]
-            )
-            variant_reports[variant] = {
-                "transcripts": variant_transcripts,
-                "split_half_normalization_denominator": normalization_denominator,
-                "target_genes_before_qc": int(len(gene_ids)),
-                "target_genes_after_qc": int(len(selected_genes)),
-                "ordered_reliable_gene_ids": selected_genes,
-                "reliable_gene_fraction": float(gene_fraction),
-                "development_gene_reliability": gene_report,
-                "development_program_reliability": program_report,
-                "development_donor_macro_gene_reliability": donor_macro_genes,
-                "development_donor_macro_program_reliability": donor_macro_programs,
-                "target_basis_measurement_ceiling": ceiling,
-                "target_basis_measurement_ceiling_by_fine_type": ceiling_by_type,
-                "per_section_distributions": _distribution_by_section(
-                    total, section_ids, library_sizes=full_library
-                ),
-                "reliability_by_section": _group_reliability(
-                    normalized_a, normalized_b, gene_ids, frozen_programs, section_ids,
+                    half_a = split.half_a
+                    half_b = split.half_b
+                    variant_transcripts = int(selected_transcripts.sum())
+                    half_a_library = None
+                    half_b_library = None
+                    full_library = None
+                    normalization_denominator = "target_panel_transcripts"
+                else:
+                    half_a, half_b, variant_transcripts = _precomputed_split_counts(
+                        source, variant, rows=rows, genes=len(gene_ids)
+                    )
+                    half_a_library, half_b_library = _precomputed_half_libraries(
+                        source,
+                        variant,
+                        half_a=half_a,
+                        half_b=half_b,
+                        rows=rows,
+                    )
+                    normalization_denominator = "frozen_target_library_transcripts"
+                    full_library = half_a_library + half_b_library
+                    if (
+                        variant == SECONDARY_TARGET_VARIANT
+                        and variant_transcripts != transcript_count
+                    ):
+                        raise ValueError(
+                            "whole-cell split count differs from eligible transcript receipt"
+                        )
+                total = half_a + half_b
+                if affects_primary:
+                    molecular_row_has_target = total.sum(axis=1) > 0
+                normalized_a = normalize_split_counts(half_a, library_sizes=half_a_library)
+                normalized_b = normalize_split_counts(half_b, library_sizes=half_b_library)
+                gene_report = feature_reliability(
+                    normalized_a[development],
+                    normalized_b[development],
+                    gene_ids.tolist(),
                     minimum_rows=thresholds.minimum_reliability_rows,
-                ),
-                "reliability_by_donor": reliability_by_donor,
-                "reliability_by_fine_type": _group_reliability(
-                    normalized_a, normalized_b, gene_ids, frozen_programs, fine_types,
+                )
+                program_a, program_names = program_scores(
+                    normalized_a, gene_ids.tolist(), frozen_programs
+                )
+                program_b, second_program_names = program_scores(
+                    normalized_b, gene_ids.tolist(), frozen_programs
+                )
+                if program_names != second_program_names:
+                    raise RuntimeError("frozen program identities changed")
+                residual_a = cross_fitted_residualize(
+                    program_a,
+                    technical_covariates,
+                    donor_ids,
+                    fine_types,
+                    development_mask=development,
+                    minimum_training_donors=max(
+                        1, thresholds.minimum_reliable_donors_per_fine_type - 1
+                    ),
+                )
+                residual_b = cross_fitted_residualize(
+                    program_b,
+                    technical_covariates,
+                    donor_ids,
+                    fine_types,
+                    development_mask=development,
+                    minimum_training_donors=max(
+                        1, thresholds.minimum_reliable_donors_per_fine_type - 1
+                    ),
+                )
+                if residual_a.fold_training_donors != residual_b.fold_training_donors:
+                    raise RuntimeError("split-half residualization folds differ")
+                finite_program_rows = (
+                    development
+                    & np.isfinite(residual_a.values).all(axis=1)
+                    & np.isfinite(residual_b.values).all(axis=1)
+                )
+                program_report = feature_reliability(
+                    residual_a.values[finite_program_rows],
+                    residual_b.values[finite_program_rows],
+                    program_names,
                     minimum_rows=thresholds.minimum_reliability_rows,
-                ),
-                "pass": variant_pass,
-            }
-    reliable_intersection = (
-        [gene for gene in gene_ids.tolist() if all(gene in panel for panel in selected_panels)]
-        if selected_panels
+                )
+                donor_macro_genes = _donor_macro_feature_reliability(
+                    normalized_a,
+                    normalized_b,
+                    gene_ids.tolist(),
+                    donor_ids,
+                    development,
+                    minimum_rows=thresholds.minimum_reliability_rows,
+                )
+                within_type_genes = _within_type_donor_macro_reliability(
+                    normalized_a,
+                    normalized_b,
+                    gene_ids.tolist(),
+                    donor_ids,
+                    fine_types,
+                    development,
+                    minimum_rows=thresholds.minimum_reliability_rows,
+                )
+                donor_macro_programs = _donor_macro_feature_reliability(
+                    residual_a.values,
+                    residual_b.values,
+                    program_names,
+                    donor_ids,
+                    development,
+                    minimum_rows=thresholds.minimum_reliability_rows,
+                )
+                within_type_programs = _within_type_donor_macro_reliability(
+                    residual_a.values,
+                    residual_b.values,
+                    program_names,
+                    donor_ids,
+                    fine_types,
+                    development,
+                    minimum_rows=thresholds.minimum_reliability_rows,
+                )
+                ceiling = dict(
+                    cross_fitted_target_basis_reliability(
+                        normalized_a,
+                        normalized_b,
+                        donor_ids,
+                        development_mask=development,
+                        rank=thresholds.target_basis_rank,
+                        minimum_rows=thresholds.minimum_reliability_rows,
+                        minimum_training_donors=max(
+                            1, thresholds.minimum_reliable_development_donors - 1
+                        ),
+                        full_targets=frozen_full_target,
+                    )
+                )
+                ceiling_component_coverage = all(
+                    int(component["evaluable_donor_count"])
+                    >= thresholds.minimum_reliable_development_donors
+                    and float(component["evaluable_donor_fraction"])
+                    >= thresholds.minimum_reliable_development_donor_fraction
+                    for component in ceiling["components"].values()
+                )
+                ceiling["pass"] = bool(
+                    ceiling["minimum_component_reliability"] is not None
+                    and float(ceiling["minimum_component_reliability"])
+                    >= thresholds.minimum_target_basis_ceiling
+                    and ceiling_component_coverage
+                )
+                ceiling_by_type = _target_basis_ceiling_by_type(
+                    normalized_a,
+                    normalized_b,
+                    frozen_full_target,
+                    development,
+                    donor_ids,
+                    fine_types,
+                    supported_fine_types,
+                    rank=thresholds.target_basis_rank,
+                    minimum_rows=thresholds.minimum_reliability_rows,
+                    minimum_ceiling=thresholds.minimum_target_basis_ceiling,
+                    minimum_donors=(thresholds.minimum_reliable_donors_per_fine_type),
+                    minimum_donor_fraction=(thresholds.minimum_reliable_development_donor_fraction),
+                )
+                selected_genes = [
+                    gene
+                    for gene in gene_ids.tolist()
+                    if _feature_meets_reliability_contract(
+                        gene,
+                        donor_macro_genes["features"][gene],
+                        within_type_genes,
+                        supported_fine_types,
+                        minimum_reliability=(thresholds.minimum_median_gene_reliability),
+                        minimum_development_donors=(thresholds.minimum_reliable_development_donors),
+                        minimum_development_donor_fraction=(
+                            thresholds.minimum_reliable_development_donor_fraction
+                        ),
+                        minimum_donors_per_fine_type=(
+                            thresholds.minimum_reliable_donors_per_fine_type
+                        ),
+                        minimum_within_type_reliability=(
+                            thresholds.minimum_within_fine_type_reliability
+                        ),
+                    )
+                ]
+                selected_programs = [
+                    name
+                    for name in program_names
+                    if _feature_meets_reliability_contract(
+                        name,
+                        donor_macro_programs["features"][name],
+                        within_type_programs,
+                        supported_fine_types,
+                        minimum_reliability=(thresholds.minimum_median_program_reliability),
+                        minimum_development_donors=(thresholds.minimum_reliable_development_donors),
+                        minimum_development_donor_fraction=(
+                            thresholds.minimum_reliable_development_donor_fraction
+                        ),
+                        minimum_donors_per_fine_type=(
+                            thresholds.minimum_reliable_donors_per_fine_type
+                        ),
+                        minimum_within_type_reliability=(
+                            thresholds.minimum_within_fine_type_reliability
+                        ),
+                    )
+                ]
+                gene_fraction = len(selected_genes) / len(gene_ids)
+                variant_pass = bool(
+                    selected_genes
+                    and gene_fraction >= thresholds.minimum_reliable_gene_fraction
+                    and selected_programs
+                    and ceiling["pass"]
+                    and ceiling_by_type["pass"]
+                )
+                reliability_by_donor = _group_reliability(
+                    normalized_a,
+                    normalized_b,
+                    gene_ids,
+                    frozen_programs,
+                    donor_ids,
+                    minimum_rows=thresholds.minimum_reliability_rows,
+                )
+                variant_reports[variant] = {
+                    "role": role,
+                    "affects_primary_gate": affects_primary,
+                    "transcripts": variant_transcripts,
+                    "split_half_normalization_denominator": (normalization_denominator),
+                    "target_genes_before_qc": int(len(gene_ids)),
+                    "target_genes_after_qc": int(len(selected_genes)),
+                    "ordered_reliable_gene_ids": selected_genes,
+                    "ordered_reliable_gene_panel_sha256": _panel_sha256(selected_genes),
+                    "ordered_reliable_program_ids": selected_programs,
+                    "ordered_reliable_program_panel_sha256": _panel_sha256(selected_programs),
+                    "reliable_gene_fraction": float(gene_fraction),
+                    "development_gene_reliability": gene_report,
+                    "development_residualized_program_reliability": program_report,
+                    "development_donor_macro_gene_reliability": donor_macro_genes,
+                    "development_donor_macro_residualized_program_reliability": (
+                        donor_macro_programs
+                    ),
+                    "within_fine_type_gene_reliability": within_type_genes,
+                    "within_fine_type_residualized_program_reliability": (within_type_programs),
+                    "program_technical_residualization": {
+                        "fit_partition": "leave_one_development_donor_out_within_fine_type",
+                        "heldout_target_used_in_regression_fit": False,
+                        "fold_training_donors": {
+                            name: list(values)
+                            for name, values in sorted(residual_a.fold_training_donors.items())
+                        },
+                    },
+                    "target_basis_measurement_ceiling": ceiling,
+                    "target_basis_measurement_ceiling_by_fine_type": ceiling_by_type,
+                    "per_section_distributions": _distribution_by_section(
+                        total, section_ids, library_sizes=full_library
+                    ),
+                    "reliability_by_section": _group_reliability(
+                        normalized_a,
+                        normalized_b,
+                        gene_ids,
+                        frozen_programs,
+                        section_ids,
+                        minimum_rows=thresholds.minimum_reliability_rows,
+                    ),
+                    "reliability_by_donor": reliability_by_donor,
+                    "reliability_by_fine_type": _group_reliability(
+                        normalized_a,
+                        normalized_b,
+                        gene_ids,
+                        frozen_programs,
+                        fine_types,
+                        minimum_rows=thresholds.minimum_reliability_rows,
+                    ),
+                    "pass": variant_pass,
+                }
+            except ValueError as error:
+                if affects_primary:
+                    raise
+                variant_reports[variant] = {
+                    "role": role,
+                    "affects_primary_gate": False,
+                    "available": False,
+                    "error": str(error),
+                    "pass": False,
+                }
+    primary_report = variant_reports.get(PRIMARY_TARGET_VARIANT)
+    primary_pass = bool(isinstance(primary_report, Mapping) and primary_report.get("pass") is True)
+    reliable_genes = (
+        list(primary_report["ordered_reliable_gene_ids"])
+        if primary_pass and isinstance(primary_report, Mapping)
         else []
     )
-    variant_passes = [bool(report["pass"]) for report in variant_reports.values()]
-    molecular_pass = bool(
-        molecular_prerequisites_pass
-        and len(variant_reports) == len(variants)
-        and all(variant_passes)
-        and reliable_intersection
+    reliable_programs = (
+        list(primary_report["ordered_reliable_program_ids"])
+        if primary_pass and isinstance(primary_report, Mapping)
+        else []
     )
-    median_gene_values = [
-        report["development_donor_macro_gene_reliability"][
-            "median_donor_macro_spearman_brown_reliability"
-        ]
-        for report in variant_reports.values()
-        if report["development_donor_macro_gene_reliability"][
-            "median_donor_macro_spearman_brown_reliability"
-        ]
-        is not None
-    ]
+    molecular_pass = bool(
+        molecular_prerequisites_pass and primary_pass and reliable_genes and reliable_programs
+    )
+    target_selection_definition = {
+        "schema": "heir.measurement_target_selection.v1",
+        "pass": molecular_pass,
+        "selection_partition": "development_only",
+        "locked_test_molecular_outcomes_used": False,
+        "primary_target_variant": PRIMARY_TARGET_VARIANT,
+        "primary_gate_pass": primary_pass,
+        "development_donor_ids": [str(value) for value in development_donors],
+        "ordered_reliable_gene_ids": reliable_genes,
+        "ordered_reliable_gene_panel_sha256": _panel_sha256(reliable_genes),
+        "ordered_reliable_program_ids": reliable_programs,
+        "ordered_reliable_program_panel_sha256": _panel_sha256(reliable_programs),
+        "supported_fine_type_ids": supported_fine_types,
+        "supported_fine_type_panel_sha256": _panel_sha256(supported_fine_types),
+        "fine_type_partition_support": type_selection_support,
+        "reliability_contract": {
+            "minimum_development_donors": (thresholds.minimum_reliable_development_donors),
+            "minimum_development_donor_fraction": (
+                thresholds.minimum_reliable_development_donor_fraction
+            ),
+            "minimum_donors_per_fine_type": (thresholds.minimum_reliable_donors_per_fine_type),
+            "minimum_gene_reliability": (thresholds.minimum_median_gene_reliability),
+            "minimum_program_reliability": (thresholds.minimum_median_program_reliability),
+            "minimum_within_fine_type_reliability": (
+                thresholds.minimum_within_fine_type_reliability
+            ),
+        },
+    }
+    target_selection_core = {
+        **target_selection_definition,
+        "selection_core_sha256": _mapping_sha256(target_selection_definition),
+        "study_manifest_sha256": study_manifest_sha256,
+        "source_sha256": source_sha256,
+        "transcript_identity_manifest_sha256": (transcript_identity_manifest_sha256),
+        "transcript_split_salt_sha256": hashlib.sha256(split_salt.encode("utf-8")).hexdigest(),
+    }
+    target_selection_receipt = {
+        **target_selection_core,
+        "receipt_content_sha256": _mapping_sha256(target_selection_core),
+    }
     program_summary = {
         variant: {
-            name: values["donor_macro_spearman_brown_reliability"]
-            for name, values in report[
-                "development_donor_macro_program_reliability"
-            ]["features"].items()
+            "ordered_reliable_program_ids": report.get("ordered_reliable_program_ids", []),
+            "pass": report.get("pass") is True,
         }
         for variant, report in variant_reports.items()
     }
@@ -1387,12 +2038,24 @@ def evaluate_measurement_gate(
         "split_half_method": SPLIT_HALF_METHOD,
         "split_salt_sha256": hashlib.sha256(split_salt.encode("utf-8")).hexdigest(),
         "target_genes_before_qc": int(len(gene_ids)),
-        "target_genes_after_qc": int(len(reliable_intersection)),
-        "ordered_reliable_gene_ids": reliable_intersection,
-        "ordered_reliable_gene_panel_sha256": _panel_sha256(reliable_intersection),
-        "median_split_half_reliability": (
-            None if not median_gene_values else float(np.median(median_gene_values))
-        ),
+        "target_genes_after_qc": int(len(reliable_genes)),
+        "ordered_reliable_gene_ids": reliable_genes,
+        "ordered_reliable_gene_panel_sha256": _panel_sha256(reliable_genes),
+        "ordered_reliable_program_ids": reliable_programs,
+        "ordered_reliable_program_panel_sha256": _panel_sha256(reliable_programs),
+        "supported_fine_type_ids": supported_fine_types,
+        "primary_target_gate": {
+            "variant": PRIMARY_TARGET_VARIANT,
+            "pass": primary_pass,
+        },
+        "secondary_target_gate": variant_reports.get(SECONDARY_TARGET_VARIANT),
+        "secondary_target_gates": {
+            variant: report
+            for variant, report in variant_reports.items()
+            if variant != PRIMARY_TARGET_VARIANT
+        },
+        "secondary_targets_affect_primary_gate": False,
+        "target_selection_receipt": target_selection_receipt,
         "program_reliability": program_summary,
         "target_variants": variant_reports,
         "pass": molecular_pass,
@@ -1400,8 +2063,10 @@ def evaluate_measurement_gate(
 
     normalized_roles = np.asarray(
         [
-            "reference" if value in {"reference", "reference_pool", "ref"}
-            else "evaluation" if value in {"evaluation", "evaluation_pool", "eval"}
+            "reference"
+            if value in {"reference", "reference_pool", "ref"}
+            else "evaluation"
+            if value in {"evaluation", "evaluation_pool", "eval"}
             else "unknown"
             for value in pool_roles.tolist()
         ],
@@ -1474,10 +2139,14 @@ def evaluate_measurement_gate(
         planned = sorted(declared_planned.tolist())
         if any(len(value.split("|")) != 3 for value in planned):
             raise ValueError("planned coverage strata must be donor|section|fine_type")
+        planned_donor_ids = {value.split("|", 1)[0] for value in planned}
+        if planned_donor_ids & set(locked_test_donors):
+            raise ValueError("H-MEAS coverage plan includes reserved locked donors")
+        if not planned_donor_ids <= set(development_donors):
+            raise ValueError("H-MEAS coverage plan includes non-development donors")
         planned_manifest_sha256 = str(planned_manifest_value)
         coverage_plan_bound = bool(
-            len(planned_manifest_sha256) == 64
-            and planned_manifest_sha256 == _panel_sha256(planned)
+            len(planned_manifest_sha256) == 64 and planned_manifest_sha256 == _panel_sha256(planned)
         )
     unplanned_observed_strata = sorted(set(stratum_ids.tolist()) - set(planned))
     coverage_plan_bound &= not unplanned_observed_strata
@@ -1508,17 +2177,14 @@ def evaluate_measurement_gate(
         selected = candidate_stratum_mask & (fine_types == fine_type)
         donors_for_type = set(donor_ids[selected].tolist())
         development_for_type = sorted(donors_for_type & set(development_donors))
-        locked_for_type = sorted(donors_for_type & set(locked_test_donors))
         type_pass = bool(
-            len(development_for_type)
-            >= thresholds.minimum_development_donors_per_fine_type
-            and len(locked_for_type) >= thresholds.minimum_locked_donors_per_fine_type
+            len(development_for_type) >= thresholds.minimum_development_donors_per_fine_type
         )
         if not type_pass:
             unsupported_types.add(fine_type)
         type_donor_coverage[fine_type] = {
             "development_donor_ids": development_for_type,
-            "locked_test_donor_ids": locked_for_type,
+            "selection_partition": "development_only",
             "pass": type_pass,
         }
     if unsupported_types:
@@ -1565,9 +2231,8 @@ def evaluate_measurement_gate(
         "minimum_development_donors_per_fine_type": (
             thresholds.minimum_development_donors_per_fine_type
         ),
-        "minimum_locked_donors_per_fine_type": (
-            thresholds.minimum_locked_donors_per_fine_type
-        ),
+        "minimum_locked_donors_per_fine_type": (thresholds.minimum_locked_donors_per_fine_type),
+        "locked_test_support_status": "not_opened",
         "fine_type_donor_coverage": type_donor_coverage,
         "support": support,
         "source_pre_artifact_exclusion_counts": source_exclusion_counts,
@@ -1598,13 +2263,99 @@ def evaluate_measurement_gate(
         "thresholds": asdict(thresholds),
         "registration": registration,
         "molecular": molecular,
+        "target_selection_receipt": target_selection_receipt,
         "segmentation": segmentation,
         "crop_qc": crop_qc,
         "reference_evaluation_separation": separation,
         "coverage": coverage,
+        "locked_test_audit": {
+            "status": "not_opened",
+            "reserved_donor_ids": [str(value) for value in locked_test_donors],
+            "source_locked_rows": 0,
+            "source_declares_outcomes_materialized": False,
+            "used_for_authorization": False,
+        },
         "pass": passed,
         "authorizes_morphology_benchmark": passed,
     }
+
+
+def _require_target_selection_receipt(report: Mapping[str, object]) -> None:
+    receipt = report.get("target_selection_receipt")
+    molecular = report.get("molecular")
+    if not isinstance(receipt, Mapping) or not isinstance(molecular, Mapping):
+        raise ValueError("measurement receipt lacks a target-selection receipt")
+    if (
+        receipt.get("schema") != "heir.measurement_target_selection.v1"
+        or receipt.get("pass") is not True
+        or receipt.get("selection_partition") != "development_only"
+        or receipt.get("locked_test_molecular_outcomes_used") is not False
+        or receipt.get("primary_target_variant") != PRIMARY_TARGET_VARIANT
+        or receipt.get("primary_gate_pass") is not True
+    ):
+        raise ValueError("measurement target-selection receipt is not confirmatory")
+    if receipt.get("study_manifest_sha256") != report.get("study_manifest_sha256") or receipt.get(
+        "source_sha256"
+    ) != report.get("source_sha256"):
+        raise ValueError("measurement target selection belongs to different inputs")
+    panel_fields = (
+        ("ordered_reliable_gene_ids", "ordered_reliable_gene_panel_sha256"),
+        ("ordered_reliable_program_ids", "ordered_reliable_program_panel_sha256"),
+        ("supported_fine_type_ids", "supported_fine_type_panel_sha256"),
+    )
+    for panel_name, digest_name in panel_fields:
+        values = receipt.get(panel_name)
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(values) != len(set(values))
+            or receipt.get(digest_name) != _panel_sha256(values)
+        ):
+            raise ValueError("measurement target-selection panel is malformed")
+    claimed_digest = receipt.get("receipt_content_sha256")
+    core = {str(name): value for name, value in receipt.items() if name != "receipt_content_sha256"}
+    if claimed_digest != _mapping_sha256(core):
+        raise ValueError("measurement target-selection receipt content hash differs")
+    binding_fields = {
+        "selection_core_sha256",
+        "study_manifest_sha256",
+        "source_sha256",
+        "transcript_identity_manifest_sha256",
+        "transcript_split_salt_sha256",
+        "receipt_content_sha256",
+    }
+    selection_definition = {
+        str(name): value for name, value in receipt.items() if name not in binding_fields
+    }
+    if receipt.get("selection_core_sha256") != _mapping_sha256(selection_definition):
+        raise ValueError("measurement development-only selection core hash differs")
+    if (
+        molecular.get("target_selection_receipt") != receipt
+        or molecular.get("ordered_reliable_gene_ids") != receipt.get("ordered_reliable_gene_ids")
+        or molecular.get("ordered_reliable_program_ids")
+        != receipt.get("ordered_reliable_program_ids")
+        or molecular.get("supported_fine_type_ids") != receipt.get("supported_fine_type_ids")
+    ):
+        raise ValueError("measurement molecular report differs from target selection")
+    variants = molecular.get("target_variants")
+    primary = variants.get(PRIMARY_TARGET_VARIANT) if isinstance(variants, Mapping) else None
+    if (
+        not isinstance(primary, Mapping)
+        or primary.get("role") != "primary"
+        or primary.get("affects_primary_gate") is not True
+        or primary.get("pass") is not True
+        or primary.get("ordered_reliable_gene_ids") != receipt.get("ordered_reliable_gene_ids")
+        or primary.get("ordered_reliable_program_ids")
+        != receipt.get("ordered_reliable_program_ids")
+    ):
+        raise ValueError("measurement receipt lacks its passing primary nucleus gate")
+    if isinstance(variants, Mapping):
+        for name, variant in variants.items():
+            if name == PRIMARY_TARGET_VARIANT:
+                continue
+            if not isinstance(variant, Mapping) or variant.get("affects_primary_gate") is not False:
+                raise ValueError("a secondary target is allowed to affect the primary gate")
 
 
 def require_passing_measurement_receipt(
@@ -1621,6 +2372,7 @@ def require_passing_measurement_receipt(
         raise ValueError("measurement receipt belongs to a different locked study manifest")
     if expected_source_sha256 is not None and report.get("source_sha256") != expected_source_sha256:
         raise ValueError("measurement receipt belongs to a different registered source")
+    _require_target_selection_receipt(report)
 
 
 def load_passing_measurement_receipt(

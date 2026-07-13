@@ -1,72 +1,209 @@
 {
   "schema": "heir.crop_manifest.v1",
-  "crop_set_id": "hest_native_cell_physical_ladder_v1",
+  "crop_set_id": "hest_registered_cell_context_factorial_v2",
   "source_mpp": 0.2125,
   "padding": "white",
   "primary_crop_id": "crop_112um",
+  "random_mask_salt": "heir-hest-random-shape-location-v1",
+  "blur_sigma_um": 2.0,
   "variants": [
     {
-      "crop_id": "nucleus_mask_only",
-      "role": "nucleus_intrinsic_sensitivity",
-      "diameter_um": 32.0,
+      "crop_id": "crop_112um",
+      "role": "registered_cell_local_context_112um",
+      "comparison_family": "g2_primary",
+      "diameter_um": 112.0,
       "inner_diameter_um": 0.0,
-      "mask_mode": "nucleus"
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "none",
+      "fill_mode": "none"
+    },
+    {
+      "crop_id": "nucleus_mask_only",
+      "role": "nucleus_intrinsic_white_fill",
+      "comparison_family": "intrinsic_common_canvas",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "keep_nucleus",
+      "fill_mode": "white"
+    },
+    {
+      "crop_id": "nucleus_mask_mean_fill_112um",
+      "role": "nucleus_intrinsic_mean_fill",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "keep_nucleus",
+      "fill_mode": "mean_color"
+    },
+    {
+      "crop_id": "nucleus_mask_blurred_112um",
+      "role": "nucleus_intrinsic_blurred_context",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "keep_nucleus",
+      "fill_mode": "blurred"
+    },
+    {
+      "crop_id": "nucleus_shape_random_location_mean_fill_112um",
+      "role": "random_location_nucleus_shape",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "random_keep_nucleus",
+      "fill_mode": "mean_color"
     },
     {
       "crop_id": "cell_mask_only",
-      "role": "cell_intrinsic_sensitivity",
-      "diameter_um": 64.0,
-      "inner_diameter_um": 0.0,
-      "mask_mode": "cell"
-    },
-    {
-      "crop_id": "crop_32um",
-      "role": "local_context",
-      "diameter_um": 32.0,
-      "inner_diameter_um": 0.0,
-      "mask_mode": "none"
-    },
-    {
-      "crop_id": "crop_64um",
-      "role": "local_context",
-      "diameter_um": 64.0,
-      "inner_diameter_um": 0.0,
-      "mask_mode": "none"
-    },
-    {
-      "crop_id": "crop_112um",
-      "role": "full_context_primary",
+      "role": "cell_intrinsic_white_fill",
+      "comparison_family": "intrinsic_common_canvas",
       "diameter_um": 112.0,
       "inner_diameter_um": 0.0,
-      "mask_mode": "none"
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "keep_cell",
+      "fill_mode": "white"
+    },
+    {
+      "crop_id": "cell_mask_mean_fill_112um",
+      "role": "cell_intrinsic_mean_fill",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "keep_cell",
+      "fill_mode": "mean_color"
+    },
+    {
+      "crop_id": "cell_mask_blurred_112um",
+      "role": "cell_intrinsic_blurred_context",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "keep_cell",
+      "fill_mode": "blurred"
+    },
+    {
+      "crop_id": "cell_shape_random_location_mean_fill_112um",
+      "role": "random_location_cell_shape",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "random_keep_cell",
+      "fill_mode": "mean_color"
     },
     {
       "crop_id": "context_ring_32_to_112um",
-      "role": "context_ring_sensitivity",
+      "role": "context_outside_32um",
+      "comparison_family": "context_control",
       "diameter_um": 112.0,
       "inner_diameter_um": 32.0,
-      "mask_mode": "context_ring"
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "remove_context_circle",
+      "fill_mode": "mean_color"
     },
     {
       "crop_id": "context_ring_64_to_112um",
-      "role": "context_ring_sensitivity",
+      "role": "context_outside_64um",
+      "comparison_family": "context_control",
       "diameter_um": 112.0,
       "inner_diameter_um": 64.0,
-      "mask_mode": "context_ring"
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "remove_context_circle",
+      "fill_mode": "mean_color"
     },
     {
       "crop_id": "target_cell_removed_112um",
-      "role": "context_only_sensitivity",
+      "role": "target_cell_removed_white_fill",
+      "comparison_family": "context_control",
       "diameter_um": 112.0,
       "inner_diameter_um": 0.0,
-      "mask_mode": "target_removed"
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "remove_cell",
+      "fill_mode": "white"
+    },
+    {
+      "crop_id": "target_cell_removed_mean_fill_112um",
+      "role": "target_cell_removed_mean_fill",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "remove_cell",
+      "fill_mode": "mean_color"
+    },
+    {
+      "crop_id": "target_cell_removed_blurred_112um",
+      "role": "target_cell_removed_blurred",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "remove_cell",
+      "fill_mode": "blurred"
+    },
+    {
+      "crop_id": "random_location_cell_removed_mean_fill_112um",
+      "role": "random_location_cell_removed",
+      "comparison_family": "mask_artifact_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "random_remove_cell",
+      "fill_mode": "mean_color"
+    },
+    {
+      "crop_id": "crop_32um",
+      "role": "field_of_view_32um_resolution_sensitivity",
+      "comparison_family": "resolution_sensitivity",
+      "diameter_um": 32.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.14285714285714285,
+      "mask_mode": "none",
+      "fill_mode": "none"
+    },
+    {
+      "crop_id": "crop_64um",
+      "role": "field_of_view_64um_resolution_sensitivity",
+      "comparison_family": "resolution_sensitivity",
+      "diameter_um": 64.0,
+      "inner_diameter_um": 0.0,
+      "model_input_pixels": 224,
+      "effective_mpp": 0.2857142857142857,
+      "mask_mode": "none",
+      "fill_mode": "none"
     },
     {
       "crop_id": "blank_patch",
-      "role": "blank_control",
+      "role": "blank_white_negative_control",
+      "comparison_family": "negative_control",
       "diameter_um": 112.0,
       "inner_diameter_um": 0.0,
-      "mask_mode": "blank"
+      "model_input_pixels": 224,
+      "effective_mpp": 0.5,
+      "mask_mode": "blank",
+      "fill_mode": "white"
     }
   ]
 }

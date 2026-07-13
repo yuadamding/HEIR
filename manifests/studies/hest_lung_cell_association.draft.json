@@ -1,14 +1,14 @@
 {
-  "schema": "heir.study_manifest.v1",
+  "schema": "heir.study_manifest.v2",
   "study_id": "hest_lung_cell_association_v1",
+  "study_stage": "confirmatory_morphology",
   "status": "draft",
   "hypothesis_ids": [
-    "H-MEAS",
     "H-CELL",
     "H-INTRINSIC"
   ],
   "git_commit": "",
-  "analysis_plan_sha256": "82f7ab792bdbff740e75f131faf540c879819ed6883b1717c9ad38c95e256f40",
+  "analysis_plan_sha256": "3a9493d6784eccfdc88abc3b7ecffbdcc5190c1e9afa6dfcae54c59c3166514c",
   "container_digest": "",
   "dataset": {
     "repository": "MahmoodLab/hest",
@@ -47,7 +47,9 @@
       "whole_cell_assigned_transcripts"
     ],
     "broad_type_field": "final_lineage",
-    "fine_type_field": "final_CT"
+    "fine_type_field": "final_CT",
+    "supported_fine_type_ids": [],
+    "supported_fine_type_ids_sha256": null
   },
   "encoder": {
     "manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369",
@@ -55,10 +57,60 @@
     "checkpoint_sha256": "6e077eda234bebc595868d918d3458d9dd32a050199b0ff04443b2f46a0a3b1e"
   },
   "crop_protocols": [
-    "c2f518eb9a1f7c32b420efbb7715b955a6267a88a531255003ee1fa77cc68a16"
+    "d92341b6b5c4d2e1464e03191f7cc1fbfdbf1c6d699cdb174098f47b38405d0b"
   ],
-  "target_gene_panel_sha256": "f99d878f565dcb4453b6e369baea3951950fd3f38ae6b12582988381e365cbdc",
-  "type_marker_panel_sha256": "d093ac7d1c5cd384f7e86d28b982d6b50bf9adb51d672dfae94802a93da34189",
+  "reference_splits": {
+    "primary_split_id": "primary",
+    "split_ids": [
+      "primary",
+      "reference_hash_fold_0",
+      "reference_hash_fold_1"
+    ]
+  },
+  "candidate_target_gene_panel_sha256": "f994cac70501e1aa01bde1083f47a93a3138ee5cc0a18b1af15d3b9002e96266",
+  "target_gene_panel_sha256": null,
+  "type_marker_panel_sha256": "f5ecbda147399fe51110aa01df54c9534d1d365e25c8294de5f27ec40e8fd122",
+  "prerequisites": {
+    "measurement_report_sha256": null,
+    "measurement_study_manifest_sha256": null,
+    "measurement_source_sha256": null
+  },
+  "lock_protection": {
+    "reserved_exclusively_for": "H-CELL",
+    "reserved_donor_ids": [
+      "THD0008",
+      "THD0011",
+      "VUILD78",
+      "VUILD96",
+      "TILD117"
+    ],
+    "prior_outcome_access_confirmed_false": true,
+    "hescape_analysis_scope": "development_donors_only_hest_lock_unopened",
+    "hescape_allowed_donor_ids": [
+      "VUILD91",
+      "TILD175",
+      "VUHD069",
+      "VUHD116",
+      "VUILD102",
+      "VUILD105",
+      "VUILD106",
+      "VUILD107",
+      "VUILD110",
+      "VUILD115"
+    ],
+    "forbidden_prior_outcome_uses": [
+      "HESCAPE_locked_regional_outcomes",
+      "crop_or_model_selection_on_reserved_donors",
+      "threshold_adaptation_on_reserved_donors"
+    ]
+  },
+  "label_target_independence": {
+    "strategy": "conservative_proxy_marker_exclusion_pending_exact_annotation_provenance",
+    "marker_panel_sha256": "f5ecbda147399fe51110aa01df54c9534d1d365e25c8294de5f27ec40e8fd122",
+    "candidate_marker_target_overlap_count": 0,
+    "establishes_full_target_independence": false,
+    "limitation": "Known subtype markers are excluded, but the exact final_CT annotation feature set is unavailable; this draft cannot be locked until an exact gene-disjoint marker set or independent annotation model is bound."
+  },
   "technical_covariates": [
     "log1p_library_size",
     "section_id",
@@ -67,14 +119,20 @@
     "batch_id"
   ],
   "controls": [
-    "coordinates_only",
-    "stain_only",
-    "nuclear_morphometrics",
-    "cell_morphometrics",
+    "smooth_coordinates_density_boundary",
+    "local_and_section_stain_quality",
+    "comprehensive_nuclear_morphometrics_texture",
+    "comprehensive_cell_morphometrics_texture",
+    "cellvit_context_sensitivity",
+    "disease_site_batch_section_adjustment",
     "within_roi_derangement",
     "spatial_block_reassignment",
     "blank_patch",
-    "target_cell_removed_112um"
+    "target_cell_removed_112um",
+    "mean_fill_mask_controls",
+    "blurred_replacement_mask_controls",
+    "random_location_shape_matched_mask_controls",
+    "common_112um_0.5mpp_intrinsic_context_canvas"
   ],
   "hyperparameter_grid": {
     "ranks": [
@@ -95,7 +153,7 @@
       29,
       41
     ],
-    "permutations_per_seed": 100,
+    "permutations_per_seed": 333,
     "unit": "donor_x_fine_type_x_spatial_roi"
   },
   "primary_endpoint": {
@@ -106,14 +164,19 @@
   "secondary_endpoints": [
     "whole_cell_target_variant",
     "broad_lineage_upper_bound",
-    "crop_mask_ladder"
+    "crop_mask_ladder",
+    "disease_inclusive_state",
+    "disease_adjusted_state",
+    "crop_32um_64um_resolution_sensitivity_only"
   ],
   "coverage_requirements": {
     "minimum_development_donors_per_fine_type": 3,
     "minimum_locked_donors_per_fine_type": 3,
     "minimum_reference_cells_per_donor_type": 20,
     "minimum_evaluation_cells_per_donor_type": 20,
-    "minimum_positive_supported_fraction": 0.7
+    "minimum_positive_supported_fraction": 0.8,
+    "maximum_reference_evaluation_absolute_smd": 0.25,
+    "maximum_reference_evaluation_categorical_total_variation": 0.25
   },
   "decision_thresholds": {
     "maximum_affine_registration_residual_p95_um": 40.0,
@@ -122,6 +185,23 @@
     "maximum_crop_padding_fraction": 0.5,
     "minimum_shuffled_delta_r2": 0.03,
     "maximum_empirical_p": 0.01
+  },
+  "morphology_gate": {
+    "experiment_role": "primary_hest_uni2h",
+    "scientific_scope": "registered_cell_local_context_association",
+    "final_inference": true,
+    "calibration_receipt_sha256": null,
+    "minimum_final_permutations": 999,
+    "minimum_coordinate_delta": 0.01,
+    "minimum_stain_delta": 0.01,
+    "minimum_null_shuffled_fraction": 0.95,
+    "minimum_strata_coverage": 0.8,
+    "minimum_expression_error_reduction": 0.05,
+    "minimum_basis_ceiling_r2": 0.3,
+    "maximum_direct_contrast_p": 0.05,
+    "minimum_mask_implementation_pass_fraction": 1.0,
+    "donor_bootstrap_iterations": 2000,
+    "donor_bootstrap_seed": 17,
+    "prespecified_fixed_hyperparameters": false
   }
 }
-

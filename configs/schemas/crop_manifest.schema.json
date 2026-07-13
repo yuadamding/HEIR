@@ -4,30 +4,72 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "crop_set_id", "source_mpp", "padding", "primary_crop_id", "variants"
+    "schema",
+    "crop_set_id",
+    "source_mpp",
+    "padding",
+    "primary_crop_id",
+    "random_mask_salt",
+    "blur_sigma_um",
+    "variants"
   ],
   "properties": {
     "schema": {"const": "heir.crop_manifest.v1"},
     "crop_set_id": {"type": "string", "minLength": 1},
-    "source_mpp": {"type": "number", "exclusiveMinimum": 0},
+    "source_mpp": {"const": 0.2125},
     "padding": {"const": "white"},
     "primary_crop_id": {"const": "crop_112um"},
+    "random_mask_salt": {"type": "string", "minLength": 1},
+    "blur_sigma_um": {"type": "number", "exclusiveMinimum": 0},
     "variants": {
       "type": "array",
-      "minItems": 9,
-      "maxItems": 9,
+      "minItems": 18,
+      "maxItems": 18,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["crop_id", "role", "diameter_um", "inner_diameter_um", "mask_mode"],
+        "required": [
+          "crop_id",
+          "role",
+          "comparison_family",
+          "diameter_um",
+          "inner_diameter_um",
+          "model_input_pixels",
+          "effective_mpp",
+          "mask_mode",
+          "fill_mode"
+        ],
         "properties": {
           "crop_id": {"type": "string", "minLength": 1},
           "role": {"type": "string", "minLength": 1},
+          "comparison_family": {
+            "enum": [
+              "g2_primary",
+              "intrinsic_common_canvas",
+              "mask_artifact_control",
+              "context_control",
+              "resolution_sensitivity",
+              "negative_control"
+            ]
+          },
           "diameter_um": {"type": "number", "exclusiveMinimum": 0},
           "inner_diameter_um": {"type": "number", "minimum": 0},
+          "model_input_pixels": {"type": "integer", "minimum": 1},
+          "effective_mpp": {"type": "number", "exclusiveMinimum": 0},
           "mask_mode": {
-            "enum": ["none", "nucleus", "cell", "context_ring", "target_removed", "blank"]
-          }
+            "enum": [
+              "none",
+              "keep_nucleus",
+              "keep_cell",
+              "remove_context_circle",
+              "remove_cell",
+              "random_keep_nucleus",
+              "random_keep_cell",
+              "random_remove_cell",
+              "blank"
+            ]
+          },
+          "fill_mode": {"enum": ["none", "white", "mean_color", "blurred"]}
         }
       }
     }

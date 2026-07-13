@@ -72,6 +72,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         verify_runtime=True,
         repository_root=repository_root,
     )
+    if manifest.study_stage != "measurement_development":
+        raise ValueError("H-MEAS requires a measurement_development study manifest")
     if "H-MEAS" not in manifest.hypothesis_ids:
         raise ValueError("locked study manifest does not authorize H-MEAS")
     observations = manifest.content["observations"]
@@ -89,9 +91,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     source_stat = source_path.stat()
     source_sha256 = sha256_file(source_path)
     with np.load(source_path, allow_pickle=False) as archive:
-        embedded_manifest_sha256 = str(_scalar(archive, "study_manifest_sha256"))
-        if embedded_manifest_sha256 != manifest.sha256:
-            raise ValueError("registered source belongs to a different locked study manifest")
+        # Registered observations are constructed once before either scientific stage.
+        # The immutable source hash is bound into this H-MEAS receipt; the later H-CELL
+        # manifest binds this receipt rather than requiring the source to predict its hash.
         source_identity_receipts = {
             name: _sha256_scalar(archive, name)
             for name in (
@@ -142,6 +144,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "report": str(output_path),
                 "study_manifest_sha256": manifest.sha256,
                 "source_sha256": source_sha256,
+                "target_selection_receipt_sha256": result["target_selection_receipt"][
+                    "receipt_content_sha256"
+                ],
                 "report_sha256": sha256_file(output_path),
             },
             indent=2,

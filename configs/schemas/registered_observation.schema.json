@@ -24,18 +24,27 @@
         "nucleus_target_counts", "whole_cell_target_counts", "normalized_nucleus_targets",
         "normalized_whole_cell_targets", "coordinate_features", "stain_features",
         "nuclear_morphometric_features", "cell_morphometric_features",
-        "cellvit_context_features", "image_features_by_crop_and_encoder"
+        "classical_morphology_features", "composition_features", "spatial_features",
+        "local_density_features", "boundary_features", "full_nuisance_covariates",
+        "disease_adjustment_features", "site_adjustment_features",
+        "batch_adjustment_features", "section_adjustment_features",
+        "cellvit_context_features", "image_features_by_crop_and_encoder",
+        "pool_roles_by_split"
       ]}
     },
     "identities": {
       "type": "array", "uniqueItems": true,
       "items": {"enum": [
         "ordered_gene_ids", "broad_type_marker_gene_ids", "fine_type_marker_gene_ids",
+        "crop_ids", "crop_roles", "crop_comparison_families", "crop_effective_mpp",
+        "crop_mask_modes", "crop_fill_modes", "fine_type_annotation_provenance_json",
+        "reference_split_ids", "fine_type_marker_panel_sha256",
+        "study_stage", "study_manifest_sha256", "source_scope",
+        "locked_donor_outcomes_materialized",
         "source_file_manifest_sha256", "registration_manifest_sha256", "target_manifest_sha256",
         "segmentation_manifest_sha256", "exclusion_policy_sha256", "encoder_manifest_sha256",
-        "crop_manifest_sha256", "study_manifest_sha256"
+        "crop_manifest_sha256"
       ]}
     }
   }
 }
-

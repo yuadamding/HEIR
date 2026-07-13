@@ -1,26 +1,105 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "HEIR molecular reference bank",
+  "title": "HEIR executable molecular reference bank",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "bank_id", "bank_role", "donor_ids", "observation_ids", "source_sample_ids", "assay", "institution", "disease_state", "broad_types", "fine_types", "ordered_gene_ids", "latent_model_sha256", "normalization_sha256", "bank_construction_sha256", "query_overlap_check"],
+  "required": [
+    "schema",
+    "bank_id",
+    "role",
+    "latent",
+    "type_labels",
+    "donor_ids",
+    "observation_ids",
+    "section_ids",
+    "source_sample_ids",
+    "source_material_ids",
+    "specimen_ids",
+    "preservation_methods",
+    "disease_states",
+    "site_ids",
+    "institution_ids",
+    "assay_ids",
+    "quality_bins",
+    "depth_bins",
+    "latent_model_sha256",
+    "normalization_sha256",
+    "assay_harmonization_sha256",
+    "assay_mode",
+    "latent_fit_donor_ids",
+    "assay_harmonization_fit_donor_ids",
+    "assay_harmonization_source_sha256",
+    "calibrated_assay_pairs",
+    "material_relationship_to_query",
+    "independent_tissue_material",
+    "contains_registered_query_cells",
+    "selection_uses_query_truth",
+    "source_sha256"
+  ],
   "properties": {
-    "schema": {"const": "heir.reference_bank.v1"},
+    "schema": {"const": "heir.reference_bank.v2"},
     "bank_id": {"type": "string", "minLength": 1},
-    "bank_role": {"enum": ["matched_donor", "wrong_donor", "hard_wrong_donor", "generic_atlas", "population_leave_query_donor_out"]},
-    "donor_ids": {"type": "array", "items": {"type": "string"}},
-    "observation_ids": {"type": "array", "items": {"type": "string"}},
-    "source_sample_ids": {"type": "array", "items": {"type": "string"}},
-    "assay": {"type": "string"},
-    "institution": {"type": "string"},
-    "disease_state": {"type": "array", "items": {"type": "string"}},
-    "broad_types": {"type": "array", "items": {"type": "string"}},
-    "fine_types": {"type": "array", "items": {"type": "string"}},
-    "ordered_gene_ids": {"type": "array", "items": {"type": "string"}},
-    "latent_model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "normalization_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "bank_construction_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "query_overlap_check": {"type": "object"}
+    "role": {
+      "enum": ["matched", "hard_wrong", "generic", "population_leave_query_out"]
+    },
+    "latent": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "number"}
+      }
+    },
+    "type_labels": {"type": "array", "minItems": 1},
+    "donor_ids": {"$ref": "#/$defs/rowStrings"},
+    "observation_ids": {"$ref": "#/$defs/rowStrings"},
+    "section_ids": {"$ref": "#/$defs/rowStrings"},
+    "source_sample_ids": {"$ref": "#/$defs/rowStrings"},
+    "source_material_ids": {"$ref": "#/$defs/rowStrings"},
+    "specimen_ids": {"$ref": "#/$defs/rowStrings"},
+    "preservation_methods": {"$ref": "#/$defs/rowStrings"},
+    "disease_states": {"$ref": "#/$defs/rowStrings"},
+    "site_ids": {"$ref": "#/$defs/rowStrings"},
+    "institution_ids": {"$ref": "#/$defs/rowStrings"},
+    "assay_ids": {"$ref": "#/$defs/rowStrings"},
+    "quality_bins": {"$ref": "#/$defs/rowStrings"},
+    "depth_bins": {"$ref": "#/$defs/rowStrings"},
+    "latent_model_sha256": {"$ref": "#/$defs/sha256"},
+    "normalization_sha256": {"$ref": "#/$defs/sha256"},
+    "assay_harmonization_sha256": {"$ref": "#/$defs/sha256"},
+    "assay_mode": {
+      "enum": ["same_assay", "cross_assay_development_calibrated"]
+    },
+    "latent_fit_donor_ids": {"$ref": "#/$defs/uniqueStrings"},
+    "assay_harmonization_fit_donor_ids": {"$ref": "#/$defs/uniqueStrings"},
+    "assay_harmonization_source_sha256": {"$ref": "#/$defs/sha256"},
+    "calibrated_assay_pairs": {"$ref": "#/$defs/uniqueStrings"},
+    "material_relationship_to_query": {
+      "enum": [
+        "independent_aliquot",
+        "independent_specimen_block",
+        "different_specimen_same_donor",
+        "external_independent_donor_material"
+      ]
+    },
+    "independent_tissue_material": {"const": true},
+    "contains_registered_query_cells": {"const": false},
+    "selection_uses_query_truth": {"const": false},
+    "source_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rowStrings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "uniqueStrings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
   }
 }
-

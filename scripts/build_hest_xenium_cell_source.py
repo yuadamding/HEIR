@@ -24,6 +24,7 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from heir.data.study_manifest import StudyManifest
 from heir.features import EncoderManifest, FrozenPatchEncoder, create_frozen_encoder
 from heir.features import load_encoder_manifest as _load_encoder_manifest
 
@@ -109,9 +110,13 @@ def _read_json(path: Path) -> Mapping[str, object]:
 class CropVariant:
     crop_id: str
     role: str
+    comparison_family: str
     diameter_um: float
     mask_mode: str
+    fill_mode: str
     inner_diameter_um: float
+    model_input_pixels: int
+    effective_mpp: float
 
 
 @dataclass(frozen=True)
@@ -121,13 +126,23 @@ class CropManifest:
     source_mpp: float
     padding: str
     primary_crop_id: str
+    random_mask_salt: str
+    blur_sigma_um: float
     variants: Tuple[CropVariant, ...]
 
 
 def _load_crop_manifest(path: Path) -> CropManifest:
     resolved = path.expanduser().resolve()
     value = _read_json(resolved)
-    required = {"schema", "source_mpp", "padding", "primary_crop_id", "variants"}
+    required = {
+        "schema",
+        "source_mpp",
+        "padding",
+        "primary_crop_id",
+        "random_mask_salt",
+        "blur_sigma_um",
+        "variants",
+    }
     if value.get("schema") != "heir.crop_manifest.v1" or not required <= set(value):
         raise ValueError("crop manifest is incomplete or unsupported")
     raw_variants = value["variants"]
@@ -140,30 +155,70 @@ def _load_crop_manifest(path: Path) -> CropManifest:
         variant = CropVariant(
             crop_id=str(raw.get("crop_id", "")),
             role=str(raw.get("role", "")),
+            comparison_family=str(raw.get("comparison_family", "")),
             diameter_um=float(raw.get("diameter_um", 0.0)),
             mask_mode=str(raw.get("mask_mode", "")),
+            fill_mode=str(raw.get("fill_mode", "")),
             inner_diameter_um=float(raw.get("inner_diameter_um", 0.0)),
+            model_input_pixels=int(raw.get("model_input_pixels", 0)),
+            effective_mpp=float(raw.get("effective_mpp", 0.0)),
         )
         if (
             not variant.crop_id
             or not variant.role
+            or not variant.comparison_family
             or variant.diameter_um <= 0
             or variant.mask_mode
-            not in {"none", "nucleus", "cell", "context_ring", "target_removed", "blank"}
+            not in {
+                "none",
+                "keep_nucleus",
+                "keep_cell",
+                "remove_context_circle",
+                "remove_cell",
+                "random_keep_nucleus",
+                "random_keep_cell",
+                "random_remove_cell",
+                "blank",
+            }
+            or variant.fill_mode not in {"none", "white", "mean_color", "blurred"}
             or variant.inner_diameter_um < 0
             or variant.inner_diameter_um >= variant.diameter_um
+            or variant.model_input_pixels <= 0
+            or not math.isclose(
+                variant.effective_mpp,
+                variant.diameter_um / variant.model_input_pixels,
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            )
         ):
             raise ValueError("crop manifest variant geometry is invalid")
+        if (
+            (variant.mask_mode == "none" and variant.fill_mode != "none")
+            or (variant.mask_mode != "none" and variant.fill_mode == "none")
+            or (variant.mask_mode == "blank" and variant.fill_mode != "white")
+            or (variant.mask_mode == "remove_context_circle" and variant.inner_diameter_um <= 0)
+            or (variant.mask_mode != "remove_context_circle" and variant.inner_diameter_um != 0)
+        ):
+            raise ValueError("crop manifest mask/fill pairing is invalid")
         variants.append(variant)
     expected = {
-        "nucleus_mask_only",
-        "cell_mask_only",
-        "crop_32um",
-        "crop_64um",
         "crop_112um",
+        "nucleus_mask_only",
+        "nucleus_mask_mean_fill_112um",
+        "nucleus_mask_blurred_112um",
+        "nucleus_shape_random_location_mean_fill_112um",
+        "cell_mask_only",
+        "cell_mask_mean_fill_112um",
+        "cell_mask_blurred_112um",
+        "cell_shape_random_location_mean_fill_112um",
         "context_ring_32_to_112um",
         "context_ring_64_to_112um",
         "target_cell_removed_112um",
+        "target_cell_removed_mean_fill_112um",
+        "target_cell_removed_blurred_112um",
+        "random_location_cell_removed_mean_fill_112um",
+        "crop_32um",
+        "crop_64um",
         "blank_patch",
     }
     crop_ids = tuple(variant.crop_id for variant in variants)
@@ -171,14 +226,53 @@ def _load_crop_manifest(path: Path) -> CropManifest:
         raise ValueError("crop manifest must contain the frozen physical crop/mask ladder")
     if str(value["primary_crop_id"]) != "crop_112um":
         raise ValueError("unmasked crop_112um must remain the context-association primary")
+    primary = variants[crop_ids.index("crop_112um")]
+    if (
+        primary.role != "registered_cell_local_context_112um"
+        or primary.comparison_family != "g2_primary"
+        or primary.diameter_um != 112.0
+        or primary.effective_mpp != 0.5
+        or primary.mask_mode != "none"
+        or primary.fill_mode != "none"
+    ):
+        raise ValueError("G2 primary must be the unmasked registered-cell 112-um context arm")
+    common_canvas = {
+        variant.crop_id
+        for variant in variants
+        if variant.comparison_family
+        in {"intrinsic_common_canvas", "mask_artifact_control", "context_control"}
+    }
+    if not common_canvas or any(
+        variant.diameter_um != 112.0
+        or variant.effective_mpp != 0.5
+        or variant.model_input_pixels != 224
+        for variant in variants
+        if variant.crop_id in common_canvas
+    ):
+        raise ValueError("intrinsic/context mask comparisons must share a 112-um 0.5-MPP canvas")
+    resolution_ids = {
+        variant.crop_id
+        for variant in variants
+        if variant.comparison_family == "resolution_sensitivity"
+    }
+    if resolution_ids != {"crop_32um", "crop_64um"}:
+        raise ValueError("32/64-um crops must be resolution sensitivities only")
     if float(value["source_mpp"]) != SOURCE_MPP or value["padding"] != "white":
         raise ValueError("crop manifest source MPP or padding differs from HEST")
+    random_mask_salt = str(value["random_mask_salt"])
+    blur_sigma_um = float(value["blur_sigma_um"])
+    if not random_mask_salt.strip():
+        raise ValueError("crop manifest random-mask salt is empty")
+    if not math.isfinite(blur_sigma_um) or blur_sigma_um <= 0:
+        raise ValueError("crop manifest blur sigma must be finite and positive")
     return CropManifest(
         path=resolved,
         sha256=_sha256_file(resolved),
         source_mpp=float(value["source_mpp"]),
         padding=str(value["padding"]),
         primary_crop_id=str(value["primary_crop_id"]),
+        random_mask_salt=random_mask_salt,
+        blur_sigma_um=blur_sigma_um,
         variants=tuple(variants),
     )
 
@@ -208,12 +302,7 @@ def _parse_file(value: object, label: str) -> InputFile:
     relative = str(value.get("path", ""))
     digest = value.get("sha256")
     candidate = Path(relative)
-    if (
-        not relative
-        or candidate.is_absolute()
-        or ".." in candidate.parts
-        or not _is_sha256(digest)
-    ):
+    if not relative or candidate.is_absolute() or ".." in candidate.parts or not _is_sha256(digest):
         raise ValueError("HEST %s file identity is unsafe or unpinned" % label)
     return InputFile(relative, str(digest))
 
@@ -286,7 +375,8 @@ def _validate_protocol(
 ) -> Tuple[Sample, ...]:
     exact = {
         "schema": PROTOCOL_SCHEMA,
-        "scientific_scope": "nucleus_centered_local_context_association",
+        "scientific_scope": "registered_cell_local_context_112um_association",
+        "g2_claim_scope": "registered_cell_local_context_112um",
         "authorizes_nucleus_intrinsic_claim": False,
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
@@ -300,15 +390,29 @@ def _validate_protocol(
     for name, expected in exact.items():
         if protocol.get(name) != expected:
             raise ValueError("HEST protocol %s differs from the pinned design" % name)
+    if tuple(protocol.get("disease_estimands", ())) != (
+        "disease_inclusive",
+        "disease_adjusted",
+    ):
+        raise ValueError("HEST disease estimands are not frozen")
+    if tuple(protocol.get("nuisance_fields", ())) != (
+        "log1p_library_size",
+        "section_id",
+        "disease_status",
+        "site_id",
+        "batch_id",
+        "stain_quality",
+        "nuclear_morphology",
+        "cell_morphology",
+        "local_density",
+        "boundary_position",
+        "smooth_spatial_basis",
+    ):
+        raise ValueError("HEST nuisance feature registry is not frozen")
     if protocol.get("encoder_manifest_sha256") != encoder_manifest.sha256:
         raise ValueError("HEST protocol differs from the supplied encoder manifest")
     if protocol.get("crop_manifest_sha256") != crop_manifest.sha256:
         raise ValueError("HEST protocol differs from the supplied crop manifest")
-    if (
-        not _is_sha256(protocol.get("study_manifest_sha256"))
-        or protocol.get("study_manifest_sha256") == "0" * 64
-    ):
-        raise ValueError("HEST protocol must bind a frozen study manifest SHA-256")
     development = tuple(str(value) for value in protocol.get("development_donors", ()))
     locked = tuple(str(value) for value in protocol.get("locked_test_donors", ()))
     if development != DEVELOPMENT_DONORS or locked != LOCKED_TEST_DONORS:
@@ -325,19 +429,34 @@ def _validate_protocol(
         if not genes:
             raise ValueError("every HEST type needs RNA-only markers")
         flattened.extend(genes)
+    fine_markers = tuple(str(value) for value in protocol.get("fine_type_marker_gene_ids", ()))
+    annotation_provenance = protocol.get("fine_type_annotation_provenance")
     gene_ids = tuple(str(value) for value in protocol.get("gene_ids", ()))
     if (
         len(flattened) != len(set(flattened))
+        or not fine_markers
+        or len(fine_markers) != len(set(fine_markers))
         or not gene_ids
         or len(gene_ids) != len(set(gene_ids))
         or set(flattened) & set(gene_ids)
+        or set(flattened) & set(fine_markers)
+        or set(fine_markers) & set(gene_ids)
         or any(
             gene.startswith(prefix)
-            for gene in flattened + list(gene_ids)
+            for gene in flattened + list(fine_markers) + list(gene_ids)
             for prefix in CONTROL_PREFIXES
         )
     ):
-        raise ValueError("HEST marker and evaluation genes must be unique and disjoint")
+        raise ValueError("HEST broad/fine marker and evaluation genes must be unique and disjoint")
+    if (
+        not isinstance(annotation_provenance, Mapping)
+        or annotation_provenance.get("source_field") != "final_CT"
+        or annotation_provenance.get("source_export") != "GSE250346_corrected_Seurat_metadata"
+        or annotation_provenance.get("exclusion_policy") != "conservative_predeclared_proxy"
+        or annotation_provenance.get("exact_annotation_marker_panel_available") is not False
+        or annotation_provenance.get("establishes_full_target_independence") is not False
+    ):
+        raise ValueError("HEST fine-type annotation provenance is incomplete or overstated")
     for name in (
         "minimum_transcripts_per_cell",
         "minimum_transcript_qv",
@@ -383,6 +502,30 @@ def _validate_protocol(
     salt = protocol.get("pool_assignment_salt")
     if not isinstance(salt, str) or not salt.strip():
         raise ValueError("HEST spatial pool assignment salt is not frozen")
+    reference_splits = protocol.get("reference_splits")
+    if not isinstance(reference_splits, Mapping):
+        raise ValueError("HEST alternate reference splits are not frozen")
+    alternates = reference_splits.get("alternate_splits")
+    if (
+        reference_splits.get("primary_split_id") != "primary"
+        or reference_splits.get("selection_unit") != "spatial_block"
+        or reference_splits.get("primary_evaluation_rows_fixed") is not True
+        or not isinstance(alternates, list)
+        or [value.get("split_id") for value in alternates if isinstance(value, Mapping)]
+        != ["reference_hash_fold_0", "reference_hash_fold_1"]
+    ):
+        raise ValueError("HEST alternate reference-split contract is malformed")
+    alternate_salts = []
+    for declaration in alternates:
+        if not isinstance(declaration, Mapping):
+            raise ValueError("HEST alternate reference split is malformed")
+        split_salt = str(declaration.get("salt", ""))
+        retention = float(declaration.get("initial_reference_retention_fraction", -1.0))
+        if not split_salt.strip() or not 0.5 <= retention < 1.0:
+            raise ValueError("HEST alternate reference split settings are invalid")
+        alternate_salts.append(split_salt)
+    if len(set(alternate_salts)) != len(alternate_salts):
+        raise ValueError("HEST alternate reference split salts must be unique")
     transcript_split_salt = protocol.get("transcript_split_salt")
     if not isinstance(transcript_split_salt, str) or not transcript_split_salt.strip():
         raise ValueError("HEST transcript split-half salt is not frozen")
@@ -539,7 +682,9 @@ class AnnotationCell:
     percent_negative_or_unassigned: float
 
 
-def _read_annotations(path: Path) -> Dict[str, Dict[str, AnnotationCell]]:
+def _read_annotations(
+    path: Path, *, allowed_sample_ids: Optional[Sequence[str]] = None
+) -> Dict[str, Dict[str, AnnotationCell]]:
     required = {
         "hest_id",
         "sample",
@@ -558,9 +703,14 @@ def _read_annotations(path: Path) -> Dict[str, Dict[str, AnnotationCell]]:
         "nFeature_RNA",
         "perc_negcontrolorunassigned",
     }
-    result: Dict[str, Dict[str, AnnotationCell]] = {
-        sample_id: {} for sample_id in SECTION_IDENTITIES
-    }
+    allowed = (
+        set(SECTION_IDENTITIES)
+        if allowed_sample_ids is None
+        else {str(value) for value in allowed_sample_ids}
+    )
+    if not allowed or not allowed <= set(SECTION_IDENTITIES):
+        raise ValueError("HEST annotation sample scope is empty or unknown")
+    result: Dict[str, Dict[str, AnnotationCell]] = {sample_id: {} for sample_id in allowed}
     rows = 0
     try:
         with gzip.open(path, "rt", encoding="utf-8", newline="") as handle:
@@ -574,6 +724,12 @@ def _read_annotations(path: Path) -> Dict[str, Dict[str, AnnotationCell]]:
                 expected_donor, expected_source_sample = SECTION_IDENTITIES[sample_id]
                 if row["patient"] != expected_donor or row["sample"] != expected_source_sample:
                     raise ValueError("HEST annotation differs from corrected donor identities")
+                rows += 1
+                # Locked-donor molecular outcomes must not be parsed or materialized while
+                # constructing the measurement-development source. The combined public
+                # export is streamed only far enough to identify and skip those rows.
+                if sample_id not in allowed:
+                    continue
                 lineage = row["final_lineage"]
                 fine_type = row["final_CT"].strip()
                 disease = row["disease_status"].strip()
@@ -614,11 +770,10 @@ def _read_annotations(path: Path) -> Dict[str, Dict[str, AnnotationCell]]:
                     nfeature_rna=nfeature,
                     percent_negative_or_unassigned=negative,
                 )
-                rows += 1
     except (OSError, UnicodeError, csv.Error) as error:
         raise ValueError("HEST GSE250346 annotation export cannot be read") from error
     if rows != ANNOTATION_ROWS or any(not values for values in result.values()):
-        raise ValueError("HEST annotation must contain 938,345 cells across all 20 sections")
+        raise ValueError("HEST annotation must contain the pinned cohort and every allowed section")
     return result
 
 
@@ -730,9 +885,7 @@ def _aggregate_expression(
     try:
         connection.register("registered_cells", pa.table({"cell_id": ordered_ids}))
         connection.register("segmented_cells", pa.table({"cell_id": segmented_ids}))
-        exclusion = "".join(
-            " AND NOT starts_with(t.feature_name, ?)" for _ in excluded_prefixes
-        )
+        exclusion = "".join(" AND NOT starts_with(t.feature_name, ?)" for _ in excluded_prefixes)
         invalid_qv = connection.execute(
             """
             SELECT COUNT(*)::BIGINT
@@ -743,13 +896,17 @@ def _aggregate_expression(
         ).fetchone()[0]
         if int(invalid_qv):
             raise ValueError("HEST transcripts contain invalid QV values")
-        unknown_query = """
+        unknown_query = (
+            """
             SELECT COUNT(*)::BIGINT
             FROM read_parquet(?) AS t
             WHERE t.qv >= ? AND (
                 t.feature_name IS NULL OR (
                     NOT (t.feature_name = ANY(?))
-        """ + exclusion + "))"
+        """
+            + exclusion
+            + "))"
+        )
         unknown_parameters: list[object] = [str(path), float(minimum_qv), list(known)]
         unknown_parameters.extend(excluded_prefixes)
         unknown_features = connection.execute(unknown_query, unknown_parameters).fetchone()[0]
@@ -767,17 +924,21 @@ def _aggregate_expression(
         ).fetchone()[0]
         if int(unsegmented):
             raise ValueError("HEST high-QV transcript is assigned to an unsegmented cell")
-        duplicate_query = """
+        duplicate_query = (
+            """
             SELECT COUNT(*)::BIGINT
             FROM (
                 SELECT t.transcript_id
                 FROM read_parquet(?) AS t
                 WHERE t.qv >= ? AND t.cell_id IS NOT NULL AND t.cell_id != 'UNASSIGNED'
-        """ + exclusion + """
+        """
+            + exclusion
+            + """
                 GROUP BY t.transcript_id
                 HAVING t.transcript_id IS NULL OR COUNT(*) != 1 OR COUNT(DISTINCT t.cell_id) != 1
             ) AS duplicated
         """
+        )
         duplicate_parameters: list[object] = [str(path), float(minimum_qv)]
         duplicate_parameters.extend(excluded_prefixes)
         duplicated = connection.execute(duplicate_query, duplicate_parameters).fetchone()[0]
@@ -795,12 +956,17 @@ def _aggregate_expression(
             np.ndarray,
             np.ndarray,
         ]:
-            totals_query = """
+            totals_query = (
+                """
                 SELECT t.cell_id, COUNT(DISTINCT t.transcript_id)::BIGINT AS library_size
                 FROM read_parquet(?) AS t
                 INNER JOIN registered_cells AS r USING (cell_id)
                 WHERE t.qv >= ?
-            """ + overlap_clause + exclusion + " GROUP BY t.cell_id"
+            """
+                + overlap_clause
+                + exclusion
+                + " GROUP BY t.cell_id"
+            )
             base_parameters: list[object] = [str(path), float(minimum_qv)]
             base_parameters.extend(excluded_prefixes)
             totals = np.zeros(len(ordered_ids), dtype=np.int64)
@@ -818,7 +984,8 @@ def _aggregate_expression(
                     totals[row_for_id[str(cell_id)]] = int(count)
             library_half_a = np.zeros(len(ordered_ids), dtype=np.int64)
             library_half_b = np.zeros(len(ordered_ids), dtype=np.int64)
-            library_half_query = """
+            library_half_query = (
+                """
                 SELECT t.cell_id,
                        CASE WHEN RIGHT(SHA256(? || CAST(t.transcript_id AS VARCHAR)), 1)
                                       IN ('1','3','5','7','9','b','d','f')
@@ -827,7 +994,11 @@ def _aggregate_expression(
                 FROM read_parquet(?) AS t
                 INNER JOIN registered_cells AS r USING (cell_id)
                 WHERE t.qv >= ?
-            """ + overlap_clause + exclusion + " GROUP BY t.cell_id, split_half"
+            """
+                + overlap_clause
+                + exclusion
+                + " GROUP BY t.cell_id, split_half"
+            )
             library_half_parameters: list[object] = [
                 split_salt + "\0",
                 str(path),
@@ -843,7 +1014,8 @@ def _aggregate_expression(
                 raise ValueError(
                     "HEST transcript split-half library sizes do not reconstruct totals"
                 )
-            selected_query = """
+            selected_query = (
+                """
                 SELECT t.cell_id, t.feature_name,
                        CASE WHEN RIGHT(SHA256(? || CAST(t.transcript_id AS VARCHAR)), 1)
                                       IN ('1','3','5','7','9','b','d','f')
@@ -852,10 +1024,13 @@ def _aggregate_expression(
                 FROM read_parquet(?) AS t
                 INNER JOIN registered_cells AS r USING (cell_id)
                 WHERE t.qv >= ?
-            """ + overlap_clause + """
+            """
+                + overlap_clause
+                + """
                 AND t.feature_name = ANY(?)
                 GROUP BY t.cell_id, t.feature_name, split_half
             """
+            )
             counts = np.zeros((len(ordered_ids), len(genes)), dtype=np.float32)
             half_a = np.zeros_like(counts)
             half_b = np.zeros_like(counts)
@@ -909,13 +1084,17 @@ def _aggregate_expression(
             whole_library_half_b,
         ) = aggregate("")
         qv_summary = np.zeros((len(ordered_ids), 3), dtype=np.float32)
-        qv_query = """
+        qv_query = (
+            """
             SELECT t.cell_id, MIN(t.qv) AS minimum_qv, MEDIAN(t.qv) AS median_qv,
                    AVG(t.qv) AS mean_qv
             FROM read_parquet(?) AS t
             INNER JOIN registered_cells AS r USING (cell_id)
             WHERE t.qv >= ?
-        """ + exclusion + " GROUP BY t.cell_id"
+        """
+            + exclusion
+            + " GROUP BY t.cell_id"
+        )
         qv_parameters: list[object] = [str(path), float(minimum_qv)]
         qv_parameters.extend(excluded_prefixes)
         for cell_id, qv_minimum, qv_median, qv_mean in connection.execute(
@@ -1015,6 +1194,71 @@ def _log_cpm(counts: np.ndarray, library_sizes: np.ndarray) -> np.ndarray:
 def _block_role(sample_id: str, block_x: int, block_y: int, salt: str) -> str:
     key = "%s:%d:%d:%s" % (sample_id, block_x, block_y, salt)
     return "reference" if hashlib.sha256(key.encode("utf-8")).digest()[0] & 1 else "evaluation"
+
+
+def _reference_split_matrix(
+    donors: np.ndarray,
+    fine_type_labels: np.ndarray,
+    block_ids: np.ndarray,
+    primary_roles: np.ndarray,
+    split_protocol: Mapping[str, object],
+    *,
+    minimum_reference: int,
+) -> tuple[tuple[str, ...], np.ndarray]:
+    """Freeze alternate reference-block subsets while keeping evaluation rows fixed."""
+
+    primary_id = str(split_protocol["primary_split_id"])
+    alternates = split_protocol["alternate_splits"]
+    if primary_id != "primary" or not isinstance(alternates, list) or len(alternates) != 2:
+        raise ValueError("HEST reference-split registry is malformed")
+    split_ids = (primary_id,) + tuple(str(value["split_id"]) for value in alternates)
+    roles = np.full((len(donors), len(split_ids)), "excluded", dtype="<U10")
+    roles[:, 0] = primary_roles.astype(str)
+    primary_evaluation = primary_roles.astype(str) == "evaluation"
+    primary_reference = primary_roles.astype(str) == "reference"
+    for split_index, declaration in enumerate(alternates, start=1):
+        salt = str(declaration["salt"])
+        retention = float(declaration["initial_reference_retention_fraction"])
+        roles[primary_evaluation, split_index] = "evaluation"
+        for donor in sorted(set(donors.astype(str).tolist())):
+            donor_reference = primary_reference & (donors.astype(str) == donor)
+            candidate_blocks = sorted(set(block_ids[donor_reference].astype(str).tolist()))
+            scores = {
+                block: int.from_bytes(
+                    hashlib.sha256((donor + "\0" + block + "\0" + salt).encode("utf-8")).digest()[
+                        :8
+                    ],
+                    "big",
+                )
+                / 2**64
+                for block in candidate_blocks
+            }
+            selected = {block for block in candidate_blocks if scores[block] < retention}
+            donor_types = sorted(set(fine_type_labels[donor_reference].tolist()))
+
+            def supported(block_selection: set[str]) -> bool:
+                selected_rows = donor_reference & np.isin(
+                    block_ids.astype(str), np.asarray(sorted(block_selection), dtype=str)
+                )
+                return all(
+                    np.count_nonzero(selected_rows & (fine_type_labels == type_index))
+                    >= minimum_reference
+                    for type_index in donor_types
+                )
+
+            for block in sorted(candidate_blocks, key=lambda value: (scores[value], value)):
+                if supported(selected):
+                    break
+                selected.add(block)
+            if not supported(selected):
+                raise ValueError("an alternate HEST reference split lacks donor/type support")
+            selected_rows = donor_reference & np.isin(
+                block_ids.astype(str), np.asarray(sorted(selected), dtype=str)
+            )
+            roles[selected_rows, split_index] = "reference"
+    if not np.all(roles[primary_evaluation, :] == "evaluation"):
+        raise ValueError("alternate reference splits changed primary evaluation rows")
+    return split_ids, roles
 
 
 @dataclass(frozen=True)
@@ -1159,19 +1403,82 @@ class _TiffPatchReader:
         self.close()
 
 
+def _randomly_translated_polygon(
+    vertices: np.ndarray,
+    *,
+    x0: int,
+    y0: int,
+    size: int,
+    key: str,
+) -> list[Tuple[float, float]]:
+    """Translate an exact native shape to a deterministic non-target canvas location."""
+
+    local = np.asarray(vertices, dtype=np.float64) - np.asarray([x0, y0], dtype=np.float64)
+    minimum = local.min(axis=0)
+    maximum = local.max(axis=0)
+    width, height = maximum - minimum
+    if width >= size - 4 or height >= size - 4:
+        raise ValueError("native mask cannot be translated within the frozen canvas")
+    shape_centre = (minimum + maximum) / 2.0
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    low = np.asarray([width / 2.0 + 2.0, height / 2.0 + 2.0])
+    high = np.asarray([size - width / 2.0 - 2.0, size - height / 2.0 - 2.0])
+    fractions = np.asarray([digest[0] / 255.0, digest[1] / 255.0])
+    destination = low + fractions * (high - low)
+    canvas_centre = np.asarray([size / 2.0, size / 2.0])
+    minimum_displacement = max(width, height, size * 0.2)
+    if np.linalg.norm(destination - canvas_centre) < minimum_displacement:
+        corners = np.asarray(
+            [
+                [low[0], low[1]],
+                [low[0], high[1]],
+                [high[0], low[1]],
+                [high[0], high[1]],
+            ]
+        )
+        destination = corners[digest[2] % len(corners)]
+    translated = local + (destination - shape_centre)
+    return [(float(x), float(y)) for x, y in translated]
+
+
+def _mask_replacement(
+    patch: np.ndarray,
+    fill_mode: str,
+    *,
+    blur_sigma_pixels: float,
+) -> np.ndarray:
+    if fill_mode == "white":
+        return np.full_like(patch, 255)
+    if fill_mode == "mean_color":
+        tissue = np.any(patch < 245, axis=2)
+        pixels = patch[tissue] if np.any(tissue) else patch.reshape(-1, 3)
+        colour = np.rint(pixels.mean(axis=0)).astype(np.uint8)
+        return np.broadcast_to(colour, patch.shape).copy()
+    if fill_mode == "blurred":
+        try:
+            from PIL import Image, ImageFilter
+        except ImportError as error:  # pragma: no cover
+            raise RuntimeError("install HEIR with the hest optional dependencies") from error
+        image = Image.fromarray(patch, mode="RGB")
+        return np.asarray(
+            image.filter(ImageFilter.GaussianBlur(radius=blur_sigma_pixels)), dtype=np.uint8
+        ).copy()
+    raise ValueError("masked crop needs a supported non-empty fill mode")
+
+
 def _render_crop_variant(
     slide: _TiffPatchReader,
     centre: Tuple[float, float],
     nucleus_vertices: np.ndarray,
     cell_vertices: np.ndarray,
     variant: CropVariant,
-    source_mpp: float,
+    crop_manifest: CropManifest,
 ) -> Tuple[np.ndarray, float, float]:
     try:
         from PIL import Image, ImageDraw
     except ImportError as error:  # pragma: no cover
         raise RuntimeError("install HEIR with the hest optional dependencies") from error
-    size = int(round(variant.diameter_um / source_mpp))
+    size = int(round(variant.diameter_um / crop_manifest.source_mpp))
     patch, padding_fraction, x0, y0 = slide.read_with_padding(centre, size)
     if variant.mask_mode == "none":
         return patch, padding_fraction, 0.0
@@ -1179,12 +1486,37 @@ def _render_crop_variant(
         return np.full_like(patch, 255), padding_fraction, 1.0
     mask_image = Image.new("L", (size, size), color=0)
     draw = ImageDraw.Draw(mask_image)
-    if variant.mask_mode in {"nucleus", "cell", "target_removed"}:
-        vertices = nucleus_vertices if variant.mask_mode == "nucleus" else cell_vertices
-        polygon = [(float(x - x0), float(y - y0)) for x, y in vertices]
+    if variant.mask_mode in {
+        "keep_nucleus",
+        "keep_cell",
+        "remove_cell",
+        "random_keep_nucleus",
+        "random_keep_cell",
+        "random_remove_cell",
+    }:
+        uses_nucleus = variant.mask_mode in {"keep_nucleus", "random_keep_nucleus"}
+        vertices = nucleus_vertices if uses_nucleus else cell_vertices
+        if variant.mask_mode.startswith("random_"):
+            polygon = _randomly_translated_polygon(
+                vertices,
+                x0=x0,
+                y0=y0,
+                size=size,
+                key=(
+                    "%s|%s|%.6f|%.6f"
+                    % (
+                        crop_manifest.random_mask_salt,
+                        variant.crop_id,
+                        centre[0],
+                        centre[1],
+                    )
+                ),
+            )
+        else:
+            polygon = [(float(x - x0), float(y - y0)) for x, y in vertices]
         draw.polygon(polygon, fill=1)
-    elif variant.mask_mode == "context_ring":
-        radius = variant.inner_diameter_um / (2.0 * source_mpp)
+    elif variant.mask_mode == "remove_context_circle":
+        radius = variant.inner_diameter_um / (2.0 * crop_manifest.source_mpp)
         local_x, local_y = centre[0] - x0, centre[1] - y0
         draw.ellipse(
             (local_x - radius, local_y - radius, local_x + radius, local_y + radius),
@@ -1193,11 +1525,497 @@ def _render_crop_variant(
     else:  # pragma: no cover - manifest validation is exhaustive
         raise ValueError("unsupported crop mask mode")
     mask = np.asarray(mask_image, dtype=np.bool_)
-    if variant.mask_mode in {"nucleus", "cell"}:
-        patch[~mask] = 255
+    replacement = _mask_replacement(
+        patch,
+        variant.fill_mode,
+        blur_sigma_pixels=crop_manifest.blur_sigma_um / crop_manifest.source_mpp,
+    )
+    if variant.mask_mode in {
+        "keep_nucleus",
+        "keep_cell",
+        "random_keep_nucleus",
+        "random_keep_cell",
+    }:
+        patch[~mask] = replacement[~mask]
     else:
-        patch[mask] = 255
+        patch[mask] = replacement[mask]
     return patch, padding_fraction, float(mask.mean())
+
+
+GEOMETRY_FEATURE_NAMES = (
+    "area_um2",
+    "perimeter_um",
+    "equivalent_diameter_um",
+    "major_axis_um",
+    "minor_axis_um",
+    "eccentricity",
+    "circularity",
+    "solidity",
+    "convexity",
+    "aspect_ratio",
+    "extent",
+    "orientation_sin_2theta",
+    "orientation_cos_2theta",
+)
+REGION_TEXTURE_FEATURE_NAMES = (
+    "rgb_mean_r",
+    "rgb_mean_g",
+    "rgb_mean_b",
+    "rgb_std_r",
+    "rgb_std_g",
+    "rgb_std_b",
+    "gray_mean",
+    "gray_std",
+    "hematoxylin_od_mean",
+    "hematoxylin_od_std",
+    "eosin_od_mean",
+    "eosin_od_std",
+    "gray_entropy_16bin",
+    "gradient_mean",
+    "glcm_contrast",
+    "glcm_homogeneity",
+    "glcm_energy",
+    "glcm_correlation",
+)
+STAIN_QUALITY_FEATURE_NAMES = (
+    "rgb_mean_r",
+    "rgb_mean_g",
+    "rgb_mean_b",
+    "rgb_std_r",
+    "rgb_std_g",
+    "rgb_std_b",
+    "rgb_q25_r",
+    "rgb_q25_g",
+    "rgb_q25_b",
+    "rgb_q75_r",
+    "rgb_q75_g",
+    "rgb_q75_b",
+    "od_mean_r",
+    "od_mean_g",
+    "od_mean_b",
+    "od_std_r",
+    "od_std_g",
+    "od_std_b",
+    "hematoxylin_od_mean",
+    "hematoxylin_od_std",
+    "hematoxylin_od_q90",
+    "eosin_od_mean",
+    "eosin_od_std",
+    "eosin_od_q90",
+    "gray_entropy_32bin",
+    "laplacian_variance",
+    "gradient_mean",
+    "gradient_q90",
+    "edge_fraction",
+    "white_background_fraction",
+    "tissue_fraction",
+    "saturation_mean",
+    "saturation_std",
+    "center_to_background_um",
+    "central_background_fraction",
+)
+LOCAL_DENSITY_FEATURE_NAMES = (
+    "nearest_neighbor_distance_um",
+    "mean_3_neighbor_distance_um",
+    "mean_5_neighbor_distance_um",
+    "neighbor_count_25um",
+    "neighbor_count_50um",
+    "neighbor_count_100um",
+    "density_50um_per_mm2",
+    "density_100um_per_mm2",
+)
+COORDINATE_BASE_FEATURE_NAMES = (
+    "he_x_normalized",
+    "he_y_normalized",
+    "he_x_squared",
+    "he_y_squared",
+    "he_xy",
+    "he_x_sin_2pi",
+    "he_x_cos_2pi",
+    "he_y_sin_2pi",
+    "he_y_cos_2pi",
+    "he_x_sin_4pi",
+    "he_x_cos_4pi",
+    "he_y_sin_4pi",
+    "he_y_cos_4pi",
+    "distance_to_wsi_edge_um",
+)
+SPATIAL_FEATURE_NAMES = (
+    *COORDINATE_BASE_FEATURE_NAMES,
+    *LOCAL_DENSITY_FEATURE_NAMES,
+    "center_to_local_background_um",
+    "central_background_fraction",
+)
+
+
+def _convex_hull(vertices: np.ndarray) -> np.ndarray:
+    points = sorted({(float(x), float(y)) for x, y in np.asarray(vertices)})
+    if len(points) <= 2:
+        return np.asarray(points, dtype=np.float64)
+
+    def cross(
+        origin: Tuple[float, float],
+        first: Tuple[float, float],
+        second: Tuple[float, float],
+    ) -> float:
+        return (first[0] - origin[0]) * (second[1] - origin[1]) - (first[1] - origin[1]) * (
+            second[0] - origin[0]
+        )
+
+    lower: list[Tuple[float, float]] = []
+    for point in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[Tuple[float, float]] = []
+    for point in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=np.float64)
+
+
+def _closed_perimeter(vertices: np.ndarray) -> float:
+    values = np.asarray(vertices, dtype=np.float64)
+    if len(values) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.roll(values, -1, axis=0) - values, axis=1).sum())
+
+
+def _shoelace_area(vertices: np.ndarray) -> float:
+    values = np.asarray(vertices, dtype=np.float64)
+    if len(values) < 3:
+        return 0.0
+    shifted = np.roll(values, -1, axis=0)
+    return float(abs(np.sum(values[:, 0] * shifted[:, 1] - shifted[:, 0] * values[:, 1])) / 2.0)
+
+
+def _classical_geometry_features(
+    vertices: np.ndarray, area_pixels2: float, source_mpp: float
+) -> np.ndarray:
+    values = np.asarray(vertices, dtype=np.float64)
+    perimeter_pixels = _closed_perimeter(values)
+    centred = values - values.mean(axis=0)
+    covariance = np.cov(centred, rowvar=False, bias=True)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+    order = np.argsort(eigenvalues)[::-1]
+    major_variance, minor_variance = eigenvalues[order]
+    major_axis_pixels = 4.0 * math.sqrt(float(major_variance))
+    minor_axis_pixels = 4.0 * math.sqrt(float(minor_variance))
+    eccentricity = (
+        math.sqrt(max(0.0, 1.0 - minor_variance / major_variance)) if major_variance > 0 else 0.0
+    )
+    major_vector = eigenvectors[:, order[0]]
+    orientation = math.atan2(float(major_vector[1]), float(major_vector[0]))
+    hull = _convex_hull(values)
+    hull_area = _shoelace_area(hull)
+    hull_perimeter = _closed_perimeter(hull)
+    width, height = np.maximum(values.max(axis=0) - values.min(axis=0), 1.0e-12)
+    area_um2 = area_pixels2 * source_mpp**2
+    perimeter_um = perimeter_pixels * source_mpp
+    return np.asarray(
+        [
+            area_um2,
+            perimeter_um,
+            2.0 * math.sqrt(area_um2 / math.pi),
+            major_axis_pixels * source_mpp,
+            minor_axis_pixels * source_mpp,
+            eccentricity,
+            4.0 * math.pi * area_pixels2 / max(perimeter_pixels**2, 1.0e-12),
+            area_pixels2 / max(hull_area, 1.0e-12),
+            hull_perimeter / max(perimeter_pixels, 1.0e-12),
+            major_axis_pixels / max(minor_axis_pixels, 1.0e-12),
+            area_pixels2 / (width * height),
+            math.sin(2.0 * orientation),
+            math.cos(2.0 * orientation),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _stain_concentrations(rgb: np.ndarray) -> np.ndarray:
+    pixels = np.asarray(rgb, dtype=np.float64).reshape(-1, 3)
+    optical_density = -np.log(np.clip((pixels + 1.0) / 256.0, 1.0e-6, 1.0))
+    stain_matrix = np.asarray([[0.650, 0.072], [0.704, 0.990], [0.286, 0.105]], dtype=np.float64)
+    return optical_density @ np.linalg.pinv(stain_matrix).T
+
+
+def _histogram_entropy(values: np.ndarray, bins: int) -> float:
+    quantized = np.asarray(values, dtype=np.uint8).ravel().astype(np.int32)
+    counts = np.bincount(quantized * bins // 256, minlength=bins)
+    probabilities = counts[counts > 0].astype(np.float64)
+    probabilities /= probabilities.sum()
+    return float(-(probabilities * np.log2(probabilities)).sum())
+
+
+def _glcm_features(gray: np.ndarray, mask: np.ndarray) -> Tuple[float, float, float, float]:
+    quantized = np.minimum(np.asarray(gray, dtype=np.uint8) // 32, 7)
+    valid = mask[:, :-1] & mask[:, 1:]
+    if not np.any(valid):
+        return (0.0, 0.0, 0.0, 0.0)
+    first = quantized[:, :-1][valid]
+    second = quantized[:, 1:][valid]
+    matrix = np.zeros((8, 8), dtype=np.float64)
+    np.add.at(matrix, (first, second), 1.0)
+    matrix += matrix.T
+    matrix /= matrix.sum()
+    row, column = np.indices(matrix.shape)
+    contrast = float(np.sum(matrix * (row - column) ** 2))
+    homogeneity = float(np.sum(matrix / (1.0 + (row - column) ** 2)))
+    energy = float(np.sum(matrix**2))
+    mean_row = float(np.sum(matrix * row))
+    mean_column = float(np.sum(matrix * column))
+    std_row = math.sqrt(float(np.sum(matrix * (row - mean_row) ** 2)))
+    std_column = math.sqrt(float(np.sum(matrix * (column - mean_column) ** 2)))
+    correlation = float(
+        np.sum(matrix * (row - mean_row) * (column - mean_column))
+        / max(std_row * std_column, 1.0e-12)
+    )
+    return contrast, homogeneity, energy, correlation
+
+
+def _polygon_region_texture(
+    patch: np.ndarray,
+    vertices: np.ndarray,
+    *,
+    x0: int,
+    y0: int,
+) -> np.ndarray:
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as error:  # pragma: no cover
+        raise RuntimeError("install HEIR with the hest optional dependencies") from error
+    local = np.asarray(vertices, dtype=np.float64) - np.asarray([x0, y0])
+    left = max(int(math.floor(local[:, 0].min())) - 1, 0)
+    top = max(int(math.floor(local[:, 1].min())) - 1, 0)
+    right = min(int(math.ceil(local[:, 0].max())) + 2, patch.shape[1])
+    bottom = min(int(math.ceil(local[:, 1].max())) + 2, patch.shape[0])
+    if right <= left or bottom <= top:
+        raise ValueError("native polygon does not intersect its registered H&E crop")
+    region = patch[top:bottom, left:right]
+    mask_image = Image.new("L", (right - left, bottom - top), color=0)
+    draw = ImageDraw.Draw(mask_image)
+    draw.polygon([(float(x - left), float(y - top)) for x, y in local], fill=1)
+    mask = np.asarray(mask_image, dtype=np.bool_)
+    if not np.any(mask):
+        raise ValueError("native polygon has no rasterized H&E pixels")
+    pixels = region[mask].astype(np.float64)
+    gray_image = np.rint(
+        region[..., 0] * 0.299 + region[..., 1] * 0.587 + region[..., 2] * 0.114
+    ).astype(np.uint8)
+    gray = gray_image[mask].astype(np.float64)
+    stains = _stain_concentrations(pixels)
+    gradient_x = np.abs(np.diff(gray_image.astype(np.float64), axis=1))
+    gradient_y = np.abs(np.diff(gray_image.astype(np.float64), axis=0))
+    gradient_mean = (
+        float(
+            (gradient_x.mean() if gradient_x.size else 0.0)
+            + (gradient_y.mean() if gradient_y.size else 0.0)
+        )
+        / 2.0
+    )
+    return np.asarray(
+        [
+            *pixels.mean(axis=0),
+            *pixels.std(axis=0),
+            gray.mean(),
+            gray.std(),
+            stains[:, 0].mean(),
+            stains[:, 0].std(),
+            stains[:, 1].mean(),
+            stains[:, 1].std(),
+            _histogram_entropy(gray.astype(np.uint8), 16),
+            gradient_mean,
+            *_glcm_features(gray_image, mask),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _stain_quality_features(patch: np.ndarray, diameter_um: float) -> np.ndarray:
+    stride = max(1, int(math.floor(min(patch.shape[:2]) / 64)))
+    sample = patch[::stride, ::stride, :]
+    pixels = sample.reshape(-1, 3).astype(np.float64)
+    gray = np.rint(sample[..., 0] * 0.299 + sample[..., 1] * 0.587 + sample[..., 2] * 0.114).astype(
+        np.uint8
+    )
+    optical_density = -np.log(np.clip((pixels + 1.0) / 256.0, 1.0e-6, 1.0))
+    stains = _stain_concentrations(pixels)
+    gray_float = gray.astype(np.float64)
+    laplacian = (
+        -4.0 * gray_float[1:-1, 1:-1]
+        + gray_float[:-2, 1:-1]
+        + gray_float[2:, 1:-1]
+        + gray_float[1:-1, :-2]
+        + gray_float[1:-1, 2:]
+    )
+    gx = np.diff(gray_float, axis=1)
+    gy = np.diff(gray_float, axis=0)
+    common_height = min(gx.shape[0], gy.shape[0])
+    common_width = min(gx.shape[1], gy.shape[1])
+    gradient = np.hypot(gx[:common_height, :common_width], gy[:common_height, :common_width])
+    maximum = pixels.max(axis=1)
+    saturation = np.divide(
+        maximum - pixels.min(axis=1),
+        maximum,
+        out=np.zeros_like(maximum),
+        where=maximum > 0,
+    )
+    white = (gray > 240) & ((sample.max(axis=2) - sample.min(axis=2)) < 15)
+    centre_y, centre_x = np.asarray(gray.shape) // 2
+    white_coordinates = np.argwhere(white)
+    if len(white_coordinates):
+        distance_pixels = float(
+            np.linalg.norm(white_coordinates - np.asarray([centre_y, centre_x]), axis=1).min()
+        )
+        center_to_background_um = distance_pixels * diameter_um / max(gray.shape)
+    else:
+        center_to_background_um = diameter_um / 2.0
+    radius = max(1, int(round(min(gray.shape) * 0.125)))
+    central = white[
+        max(centre_y - radius, 0) : centre_y + radius + 1,
+        max(centre_x - radius, 0) : centre_x + radius + 1,
+    ]
+    return np.asarray(
+        [
+            *pixels.mean(axis=0),
+            *pixels.std(axis=0),
+            *np.quantile(pixels, 0.25, axis=0),
+            *np.quantile(pixels, 0.75, axis=0),
+            *optical_density.mean(axis=0),
+            *optical_density.std(axis=0),
+            stains[:, 0].mean(),
+            stains[:, 0].std(),
+            np.quantile(stains[:, 0], 0.9),
+            stains[:, 1].mean(),
+            stains[:, 1].std(),
+            np.quantile(stains[:, 1], 0.9),
+            _histogram_entropy(gray, 32),
+            float(laplacian.var()) if laplacian.size else 0.0,
+            float(gradient.mean()) if gradient.size else 0.0,
+            float(np.quantile(gradient, 0.9)) if gradient.size else 0.0,
+            float(np.mean(gradient > 20.0)) if gradient.size else 0.0,
+            float(white.mean()),
+            float(1.0 - white.mean()),
+            float(saturation.mean()),
+            float(saturation.std()),
+            center_to_background_um,
+            float(central.mean()),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _local_density_features(
+    query_centres: Sequence[Tuple[float, float]],
+    population_centres: Sequence[Tuple[float, float]],
+    source_mpp: float,
+) -> np.ndarray:
+    maximum_radius_pixels = 100.0 / source_mpp
+    bin_size = maximum_radius_pixels
+    population = np.asarray(population_centres, dtype=np.float64).reshape(-1, 2)
+    bins: Dict[Tuple[int, int], list[int]] = {}
+    for index, (x, y) in enumerate(population):
+        bins.setdefault((int(x // bin_size), int(y // bin_size)), []).append(index)
+    result = np.empty((len(query_centres), len(LOCAL_DENSITY_FEATURE_NAMES)), dtype=np.float32)
+    for row, (x, y) in enumerate(query_centres):
+        cell_bin = (int(x // bin_size), int(y // bin_size))
+        candidates = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                candidates.extend(bins.get((cell_bin[0] + dx, cell_bin[1] + dy), ()))
+        distances_um = (
+            np.linalg.norm(
+                population[np.asarray(candidates, dtype=np.int64)] - np.asarray([x, y]), axis=1
+            )
+            * source_mpp
+        )
+        distances_um = np.sort(distances_um[distances_um > 1.0e-6])
+        nearest = float(distances_um[0]) if len(distances_um) else 100.0
+        mean_three = float(distances_um[:3].mean()) if len(distances_um) else 100.0
+        mean_five = float(distances_um[:5].mean()) if len(distances_um) else 100.0
+        count_25 = int(np.count_nonzero(distances_um <= 25.0))
+        count_50 = int(np.count_nonzero(distances_um <= 50.0))
+        count_100 = int(np.count_nonzero(distances_um <= 100.0))
+        result[row] = (
+            nearest,
+            mean_three,
+            mean_five,
+            count_25,
+            count_50,
+            count_100,
+            count_50 / (math.pi * 0.05**2),
+            count_100 / (math.pi * 0.1**2),
+        )
+    return result
+
+
+def _categorical_one_hot(values: Sequence[str], prefix: str) -> Tuple[np.ndarray, Tuple[str, ...]]:
+    names = tuple(sorted({str(value) for value in values}))
+    index = {name: column for column, name in enumerate(names)}
+    matrix = np.zeros((len(values), len(names)), dtype=np.float32)
+    for row, value in enumerate(values):
+        matrix[row, index[str(value)]] = 1.0
+    return matrix, tuple("%s=%s" % (prefix, name) for name in names)
+
+
+def _reference_evaluation_balance(
+    donor_ids: np.ndarray,
+    pool_roles: np.ndarray,
+    continuous: Mapping[str, np.ndarray],
+    categorical: Mapping[str, Sequence[str]],
+) -> Dict[str, object]:
+    """Summarize frozen-pool balance without using molecular outcomes."""
+
+    result: Dict[str, object] = {}
+    for donor in sorted(set(donor_ids.astype(str).tolist())):
+        donor_mask = donor_ids.astype(str) == donor
+        reference = donor_mask & (pool_roles.astype(str) == "reference")
+        evaluation = donor_mask & (pool_roles.astype(str) == "evaluation")
+        if not np.any(reference) or not np.any(evaluation):
+            raise ValueError("reference/evaluation balance needs both roles per donor")
+        donor_summary: Dict[str, object] = {}
+        for family, raw in continuous.items():
+            matrix = np.asarray(raw, dtype=np.float64)
+            if matrix.ndim == 1:
+                matrix = matrix[:, None]
+            if matrix.shape[0] != len(donor_ids) or not np.isfinite(matrix).all():
+                raise ValueError("reference/evaluation balance matrix is malformed")
+            reference_values = matrix[reference]
+            evaluation_values = matrix[evaluation]
+            pooled = np.sqrt((reference_values.var(axis=0) + evaluation_values.var(axis=0)) / 2.0)
+            global_scale = matrix[donor_mask].std(axis=0)
+            scale = np.maximum.reduce((pooled, global_scale, np.full(matrix.shape[1], 1.0e-6)))
+            absolute_smd = (
+                np.abs(reference_values.mean(axis=0) - evaluation_values.mean(axis=0)) / scale
+            )
+            donor_summary[family] = {
+                "columns": int(matrix.shape[1]),
+                "maximum_absolute_standardized_mean_difference": float(
+                    absolute_smd.max(initial=0.0)
+                ),
+                "median_absolute_standardized_mean_difference": float(np.median(absolute_smd)),
+            }
+        for family, raw in categorical.items():
+            values = np.asarray(tuple(str(value) for value in raw))
+            if values.shape != (len(donor_ids),):
+                raise ValueError("reference/evaluation categorical balance is malformed")
+            levels = sorted(set(values[donor_mask].tolist()))
+            reference_fraction = np.asarray(
+                [np.mean(values[reference] == level) for level in levels]
+            )
+            evaluation_fraction = np.asarray(
+                [np.mean(values[evaluation] == level) for level in levels]
+            )
+            donor_summary[family] = {
+                "levels": levels,
+                "total_variation_distance": float(
+                    0.5 * np.abs(reference_fraction - evaluation_fraction).sum()
+                ),
+            }
+        result[donor] = donor_summary
+    return result
 
 
 @dataclass
@@ -1253,6 +2071,7 @@ class _Rows:
     cellvit: list[np.ndarray]
     cellvit_centres: list[Tuple[float, float]]
     cellvit_distances_um: list[float]
+    local_density: list[np.ndarray]
     cellvit_names: Optional[Tuple[str, ...]] = None
 
 
@@ -1298,6 +2117,7 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
 
 def build_source(
     protocol_path: Path,
+    study_manifest_path: Path,
     encoder_manifest_path: Path,
     crop_manifest_path: Path,
     data_root: Path,
@@ -1311,6 +2131,7 @@ def build_source(
     encoder: Optional[FrozenPatchEncoder] = None,
 ) -> None:
     protocol_path = protocol_path.expanduser().resolve()
+    study_manifest_path = study_manifest_path.expanduser().resolve()
     encoder_manifest_path = encoder_manifest_path.expanduser().resolve()
     crop_manifest_path = crop_manifest_path.expanduser().resolve()
     data_root = data_root.expanduser().resolve()
@@ -1318,14 +2139,45 @@ def build_source(
     output_path = output_path.expanduser().resolve()
     plan_output_path = plan_output_path.expanduser().resolve()
     qc_output_path = qc_output_path.expanduser().resolve()
+    study_manifest = StudyManifest.load(
+        study_manifest_path,
+        require_status="locked",
+        verify_runtime=True,
+        repository_root=Path(__file__).resolve().parents[1],
+    )
     encoder_manifest = _load_encoder_manifest(encoder_manifest_path)
     crop_manifest = _load_crop_manifest(crop_manifest_path)
     protocol = _read_json(protocol_path)
     samples = _validate_protocol(protocol, encoder_manifest, crop_manifest)
+    if study_manifest.content["analysis_plan_sha256"] != _sha256_file(protocol_path):
+        raise ValueError("locked study manifest does not bind the HEST protocol")
+    if study_manifest.development_donors != tuple(
+        protocol["development_donors"]
+    ) or study_manifest.locked_test_donors != tuple(protocol["locked_test_donors"]):
+        raise ValueError("locked study manifest donor partitions differ from the protocol")
+    if study_manifest.content["candidate_target_gene_panel_sha256"] != _canonical_sha256(
+        list(protocol["gene_ids"])
+    ):
+        raise ValueError("locked study manifest candidate target panel differs from the protocol")
+    if study_manifest.content["type_marker_panel_sha256"] != _canonical_sha256(
+        list(protocol["fine_type_marker_gene_ids"])
+    ):
+        raise ValueError("locked study manifest fine-type marker panel differs from the protocol")
+    if study_manifest.study_stage == "measurement_development":
+        samples = tuple(sample for sample in samples if sample.split_id == "development")
+        source_scope = "development_donors_only"
+    elif study_manifest.study_stage == "confirmatory_morphology":
+        samples = tuple(samples)
+        source_scope = "development_and_locked_after_confirmatory_lock"
+    else:  # StudyManifest.load already rejects this; retain a local fail-closed guard.
+        raise ValueError("unsupported HEST study stage")
+    active_donors = tuple(sorted({sample.donor_id for sample in samples}))
+    active_sample_ids = tuple(sample.sample_id for sample in samples)
     if (
         output_path
         in {
             protocol_path,
+            study_manifest_path,
             encoder_manifest_path,
             crop_manifest_path,
             data_root,
@@ -1334,10 +2186,18 @@ def build_source(
             qc_output_path,
         }
         or plan_output_path
-        in {protocol_path, encoder_manifest_path, crop_manifest_path, data_root, model_dir}
+        in {
+            protocol_path,
+            study_manifest_path,
+            encoder_manifest_path,
+            crop_manifest_path,
+            data_root,
+            model_dir,
+        }
         or qc_output_path
         in {
             protocol_path,
+            study_manifest_path,
             encoder_manifest_path,
             crop_manifest_path,
             data_root,
@@ -1353,13 +2213,14 @@ def build_source(
         for name, values in protocol["type_markers"].items()
     }
     marker_genes = tuple(gene for name in broad_type_names for gene in markers[name])
+    fine_marker_genes = tuple(str(value) for value in protocol["fine_type_marker_gene_ids"])
     target_genes = tuple(str(value) for value in protocol["gene_ids"])
     salt = str(protocol.get("pool_assignment_salt", "hest-xenium-v1"))
     annotation_declaration = _parse_file(
         protocol["annotation_export"], "GSE250346 annotation export"
     )
     annotation_path = _resolve_input(data_root, annotation_declaration)
-    annotations = _read_annotations(annotation_path)
+    annotations = _read_annotations(annotation_path, allowed_sample_ids=active_sample_ids)
     rows = _Rows(
         observation_ids=[],
         cell_ids=[],
@@ -1412,6 +2273,7 @@ def build_source(
         cellvit=[],
         cellvit_centres=[],
         cellvit_distances_um=[],
+        local_density=[],
     )
     resolved_provenance = []
     planned_strata: set[str] = set()
@@ -1437,9 +2299,7 @@ def build_source(
             fine_type = annotated[cell_id].fine_type
             if "|" in fine_type:
                 raise ValueError("HEST fine type cannot contain the stratum delimiter")
-            planned_strata.add(
-                "%s|%s|%s" % (sample.donor_id, sample.sample_id, fine_type)
-            )
+            planned_strata.add("%s|%s|%s" % (sample.donor_id, sample.sample_id, fine_type))
         exclusion_counts["native_cells_outside_high_qc_annotation"] += len(
             (set(cell_centres) | set(nucleus_centres)) - set(annotated)
         )
@@ -1453,6 +2313,11 @@ def build_source(
         annotation_he = coordinate_registration.transform(
             [annotated[cell_id].source_centroid for cell_id in registered]
         )
+        registered_local_density = _local_density_features(
+            [nucleus_centres[cell_id].centroid for cell_id in registered],
+            [geometry.centroid for geometry in nucleus_centres.values()],
+            sample.pixel_size_um,
+        )
         registered_nucleus_centres = np.asarray(
             [nucleus_centres[cell_id].centroid for cell_id in registered], dtype=np.float64
         )
@@ -1464,12 +2329,9 @@ def build_source(
             * sample.pixel_size_um
         )
         annotation_cell_distances = (
-            np.linalg.norm(annotation_he - registered_cell_centres, axis=1)
-            * sample.pixel_size_um
+            np.linalg.norm(annotation_he - registered_cell_centres, axis=1) * sample.pixel_size_um
         )
-        annotation_distance_limit = float(
-            protocol["maximum_annotation_nucleus_distance_p95_um"]
-        )
+        annotation_distance_limit = float(protocol["maximum_annotation_nucleus_distance_p95_um"])
         annotation_distance_p95 = float(np.quantile(annotation_nucleus_distances, 0.95))
         registration_outlier_fraction = float(
             np.mean(annotation_nucleus_distances > annotation_distance_limit)
@@ -1478,16 +2340,14 @@ def build_source(
             raise ValueError(
                 "HEST annotation-to-nucleus registration distance exceeds the protocol"
             )
-        if registration_outlier_fraction > float(
-            protocol["maximum_registration_outlier_fraction"]
-        ):
+        if registration_outlier_fraction > float(protocol["maximum_registration_outlier_fraction"]):
             raise ValueError("HEST annotation-to-nucleus registration outlier fraction is too high")
         expression_targets = _aggregate_expression(
             transcript_path,
             registered,
             tuple(cell_centres),
             target_genes,
-            marker_genes + target_genes,
+            marker_genes + fine_marker_genes + target_genes,
             minimum_qv=float(protocol["minimum_transcript_qv"]),
             excluded_prefixes=tuple(str(value) for value in protocol["excluded_feature_prefixes"]),
             split_salt=str(protocol["transcript_split_salt"]),
@@ -1567,9 +2427,7 @@ def build_source(
             rows.affine_residual_p95_um.append(coordinate_registration.residual_p95_um)
             rows.ncount_rna.append(annotation.ncount_rna)
             rows.nfeature_rna.append(annotation.nfeature_rna)
-            rows.percent_negative_or_unassigned.append(
-                annotation.percent_negative_or_unassigned
-            )
+            rows.percent_negative_or_unassigned.append(annotation.percent_negative_or_unassigned)
             rows.targets.append(nucleus_expression[index].astype(np.float32))
             rows.whole_cell_targets.append(whole_cell_expression[index].astype(np.float32))
             rows.target_counts.append(expression_targets.nucleus_counts[index].astype(np.float32))
@@ -1588,9 +2446,7 @@ def build_source(
             rows.whole_cell_half_b_counts.append(
                 expression_targets.whole_cell_half_b_counts[index].astype(np.float32)
             )
-            rows.nucleus_library_sizes.append(
-                int(expression_targets.nucleus_library_sizes[index])
-            )
+            rows.nucleus_library_sizes.append(int(expression_targets.nucleus_library_sizes[index]))
             rows.whole_cell_library_sizes.append(
                 int(expression_targets.whole_cell_library_sizes[index])
             )
@@ -1615,6 +2471,7 @@ def build_source(
             rows.transcript_qv_summaries.append(
                 expression_targets.whole_cell_qv_summary[index].astype(np.float32)
             )
+            rows.local_density.append(registered_local_density[index])
             rows.technical.append(
                 math.log1p(float(expression_targets.nucleus_library_sizes[index]))
             )
@@ -1647,9 +2504,7 @@ def build_source(
                 "native_nucleus_count": len(nucleus_centres),
                 "high_qc_annotation_count": len(annotated),
                 "native_registered_intersection_count": len(registered),
-                "retained_observation_count_before_fine_type_support": (
-                    sample_end - sample_start
-                ),
+                "retained_observation_count_before_fine_type_support": (sample_end - sample_start),
                 "wsi_sha256": sample.wsi.sha256,
                 "transcripts_sha256": sample.transcripts.sha256,
                 "cell_seg_sha256": sample.cell_seg.sha256,
@@ -1667,9 +2522,7 @@ def build_source(
                     np.quantile(annotation_nucleus_distances, 0.5)
                 ),
                 "annotation_nucleus_distance_p95_um": annotation_distance_p95,
-                "annotation_nucleus_distance_max_um": float(
-                    annotation_nucleus_distances.max()
-                ),
+                "annotation_nucleus_distance_max_um": float(annotation_nucleus_distances.max()),
                 "annotation_cell_distance_p95_um": float(
                     np.quantile(annotation_cell_distances, 0.95)
                 ),
@@ -1685,9 +2538,7 @@ def build_source(
                         ]
                     )
                 ),
-                "nucleus_eligible_transcripts": (
-                    expression_targets.nucleus_eligible_transcripts
-                ),
+                "nucleus_eligible_transcripts": (expression_targets.nucleus_eligible_transcripts),
                 "whole_cell_eligible_transcripts": (
                     expression_targets.whole_cell_eligible_transcripts
                 ),
@@ -1716,8 +2567,7 @@ def build_source(
         for type_index in sorted(set(preliminary_labels[donor_mask].tolist())):
             local = donor_mask & (preliminary_labels == type_index)
             if (
-                np.count_nonzero(local & (preliminary_roles == "reference"))
-                < minimum_reference
+                np.count_nonzero(local & (preliminary_roles == "reference")) < minimum_reference
                 or np.count_nonzero(local & (preliminary_roles == "evaluation"))
                 < minimum_evaluation
             ):
@@ -1731,10 +2581,14 @@ def build_source(
         locked_support = len(
             set(preliminary_donors[local & (preliminary_splits == "locked_test")].tolist())
         )
-        if (
-            development_support < int(protocol["minimum_development_donors_per_fine_type"])
-            or locked_support < int(protocol["minimum_locked_donors_per_fine_type"])
-        ):
+        insufficient_development = development_support < int(
+            protocol["minimum_development_donors_per_fine_type"]
+        )
+        insufficient_locked = (
+            study_manifest.study_stage == "confirmatory_morphology"
+            and locked_support < int(protocol["minimum_locked_donors_per_fine_type"])
+        )
+        if insufficient_development or insufficient_locked:
             retained[preliminary_labels == type_index] = False
     exclusion_counts["unsupported_donor_fine_type"] = int(np.count_nonzero(~retained))
     old_sample_rows = tuple(rows.sample_rows)
@@ -1785,6 +2639,7 @@ def build_source(
         "nucleus_detected_target_genes",
         "whole_cell_detected_target_genes",
         "transcript_qv_summaries",
+        "local_density",
         "technical",
     )
     for field in row_fields:
@@ -1833,7 +2688,7 @@ def build_source(
     blocks = np.asarray(rows.block_ids)
     minimum_reference = int(protocol["minimum_reference_cells_per_donor_type"])
     minimum_evaluation = int(protocol["minimum_evaluation_cells_per_donor_type"])
-    for donor in tuple(protocol["development_donors"]) + tuple(protocol["locked_test_donors"]):
+    for donor in active_donors:
         donor_mask = donors == str(donor)
         if set(roles[donor_mask].tolist()) != {"reference", "evaluation"}:
             raise ValueError("each HEST donor needs spatially disjoint reference/evaluation cells")
@@ -1850,6 +2705,14 @@ def build_source(
             blocks[donor_mask & (roles == "evaluation")]
         ):
             raise ValueError("HEST reference/evaluation spatial blocks overlap")
+    reference_split_ids, pool_roles_by_split = _reference_split_matrix(
+        donors,
+        labels,
+        blocks,
+        roles,
+        protocol["reference_splits"],
+        minimum_reference=minimum_reference,
+    )
 
     if encoder is None:
         encoder = create_frozen_encoder(model_dir, encoder_manifest, device)
@@ -1865,10 +2728,27 @@ def build_source(
         (observations, len(crop_manifest.variants), encoder_manifest.feature_width),
         dtype=np.float32,
     )
-    crop_padding_fractions = np.empty(
-        (observations, len(crop_manifest.variants)), dtype=np.float32
-    )
+    crop_padding_fractions = np.empty((observations, len(crop_manifest.variants)), dtype=np.float32)
     crop_mask_fractions = np.empty_like(crop_padding_fractions)
+    stain_quality_local = np.empty(
+        (observations, len(STAIN_QUALITY_FEATURE_NAMES)), dtype=np.float32
+    )
+    nucleus_texture_features = np.empty(
+        (observations, len(REGION_TEXTURE_FEATURE_NAMES)), dtype=np.float32
+    )
+    cell_texture_features = np.empty_like(nucleus_texture_features)
+    nucleus_geometry_features = np.stack(
+        [
+            _classical_geometry_features(vertices, area / SOURCE_MPP**2, SOURCE_MPP)
+            for vertices, area in zip(rows.nucleus_vertices, rows.nucleus_areas_um2)
+        ]
+    )
+    cell_geometry_features = np.stack(
+        [
+            _classical_geometry_features(vertices, area / SOURCE_MPP**2, SOURCE_MPP)
+            for vertices, area in zip(rows.cell_vertices, rows.cell_areas_um2)
+        ]
+    )
     cellvit_nearest_features = (
         np.empty((observations, encoder_manifest.feature_width), dtype=np.float32)
         if rows.cellvit_names is not None
@@ -1877,7 +2757,9 @@ def build_source(
     cellvit_nearest_padding_fractions = (
         np.empty(observations, dtype=np.float32) if rows.cellvit_names is not None else None
     )
-    coordinate_features = np.empty((observations, 5), dtype=np.float32)
+    coordinate_base_features = np.empty(
+        (observations, len(COORDINATE_BASE_FEATURE_NAMES)), dtype=np.float32
+    )
     for start, end, sample, wsi_path in rows.sample_rows:
         if start == end:
             continue
@@ -1895,7 +2777,7 @@ def build_source(
                             local_nucleus_vertices[index],
                             local_cell_vertices[index],
                             variant,
-                            sample.pixel_size_um,
+                            crop_manifest,
                         )
                         for index in range(batch_start, batch_end)
                     ]
@@ -1909,9 +2791,32 @@ def build_source(
                     crop_padding_fractions[output_slice, crop_index] = [
                         value[1] for value in rendered
                     ]
-                    crop_mask_fractions[output_slice, crop_index] = [
-                        value[2] for value in rendered
-                    ]
+                    crop_mask_fractions[output_slice, crop_index] = [value[2] for value in rendered]
+                    if crop_index == primary_crop_index:
+                        primary_size = int(
+                            round(primary_variant.diameter_um / crop_manifest.source_mpp)
+                        )
+                        for local_index, value in enumerate(rendered, start=batch_start):
+                            patch = value[0]
+                            centre = local_centres[local_index]
+                            x0 = int(round(centre[0] - primary_size / 2.0))
+                            y0 = int(round(centre[1] - primary_size / 2.0))
+                            output_index = start + local_index
+                            stain_quality_local[output_index] = _stain_quality_features(
+                                patch, primary_variant.diameter_um
+                            )
+                            nucleus_texture_features[output_index] = _polygon_region_texture(
+                                patch,
+                                local_nucleus_vertices[local_index],
+                                x0=x0,
+                                y0=y0,
+                            )
+                            cell_texture_features[output_index] = _polygon_region_texture(
+                                patch,
+                                local_cell_vertices[local_index],
+                                x0=x0,
+                                y0=y0,
+                            )
             if cellvit_nearest_features is not None:
                 local_cellvit_centres = rows.cellvit_centres[start:end]
                 for batch_start in range(0, end - start, batch_size):
@@ -1923,7 +2828,7 @@ def build_source(
                             local_nucleus_vertices[index],
                             local_cell_vertices[index],
                             primary_variant,
-                            sample.pixel_size_um,
+                            crop_manifest,
                         )
                         for index in range(batch_start, batch_end)
                     ]
@@ -1942,14 +2847,49 @@ def build_source(
                     ]
             xy = np.asarray(local_centres, dtype=np.float64)
             normalized = np.column_stack((xy[:, 0] / slide.width, xy[:, 1] / slide.height))
-            coordinate_features[start:end] = np.column_stack(
+            edge_distance_um = (
+                np.minimum.reduce(
+                    (
+                        xy[:, 0],
+                        slide.width - xy[:, 0],
+                        xy[:, 1],
+                        slide.height - xy[:, 1],
+                    )
+                )
+                * sample.pixel_size_um
+            )
+            coordinate_base_features[start:end] = np.column_stack(
                 (
                     normalized,
                     normalized[:, 0] ** 2,
                     normalized[:, 1] ** 2,
                     normalized[:, 0] * normalized[:, 1],
+                    np.sin(2.0 * math.pi * normalized[:, 0]),
+                    np.cos(2.0 * math.pi * normalized[:, 0]),
+                    np.sin(2.0 * math.pi * normalized[:, 1]),
+                    np.cos(2.0 * math.pi * normalized[:, 1]),
+                    np.sin(4.0 * math.pi * normalized[:, 0]),
+                    np.cos(4.0 * math.pi * normalized[:, 0]),
+                    np.sin(4.0 * math.pi * normalized[:, 1]),
+                    np.cos(4.0 * math.pi * normalized[:, 1]),
+                    edge_distance_um,
                 )
             )
+
+    section_stain_summary = np.empty_like(stain_quality_local)
+    for start, end, _, _ in rows.sample_rows:
+        if start < end:
+            section_stain_summary[start:end] = np.median(stain_quality_local[start:end], axis=0)
+    stain_features = np.column_stack((stain_quality_local, section_stain_summary))
+    stain_feature_names = (
+        *("local_%s" % name for name in STAIN_QUALITY_FEATURE_NAMES),
+        *("section_median_%s" % name for name in STAIN_QUALITY_FEATURE_NAMES),
+    )
+    local_density_features = np.asarray(rows.local_density, dtype=np.float32)
+    boundary_features = stain_quality_local[:, [-2, -1]]
+    coordinate_features = np.column_stack(
+        (coordinate_base_features, local_density_features, boundary_features)
+    ).astype(np.float32)
 
     features = image_features[:, primary_crop_index]
     maximum_padding = float(crop_padding_fractions.max())
@@ -1979,18 +2919,10 @@ def build_source(
         raise ValueError("HEST split-half totals differ from eligible target transcript receipt")
     nucleus_library_sizes = np.asarray(rows.nucleus_library_sizes, dtype=np.int64)
     whole_cell_library_sizes = np.asarray(rows.whole_cell_library_sizes, dtype=np.int64)
-    nucleus_library_size_half_a = np.asarray(
-        rows.nucleus_library_size_half_a, dtype=np.int64
-    )
-    nucleus_library_size_half_b = np.asarray(
-        rows.nucleus_library_size_half_b, dtype=np.int64
-    )
-    whole_cell_library_size_half_a = np.asarray(
-        rows.whole_cell_library_size_half_a, dtype=np.int64
-    )
-    whole_cell_library_size_half_b = np.asarray(
-        rows.whole_cell_library_size_half_b, dtype=np.int64
-    )
+    nucleus_library_size_half_a = np.asarray(rows.nucleus_library_size_half_a, dtype=np.int64)
+    nucleus_library_size_half_b = np.asarray(rows.nucleus_library_size_half_b, dtype=np.int64)
+    whole_cell_library_size_half_a = np.asarray(rows.whole_cell_library_size_half_a, dtype=np.int64)
+    whole_cell_library_size_half_b = np.asarray(rows.whole_cell_library_size_half_b, dtype=np.int64)
     if not np.array_equal(
         nucleus_library_sizes, nucleus_library_size_half_a + nucleus_library_size_half_b
     ) or not np.array_equal(
@@ -2002,9 +2934,9 @@ def build_source(
     native_cell_centres = np.asarray(rows.cell_centres, dtype=np.float64)
     annotation_centres = np.asarray(rows.source_centres, dtype=np.float64)
     annotation_he_centres = np.asarray(rows.annotation_he_centres, dtype=np.float64)
-    cell_nucleus_distances_um = np.linalg.norm(
-        native_cell_centres - nucleus_centres, axis=1
-    ) * SOURCE_MPP
+    cell_nucleus_distances_um = (
+        np.linalg.norm(native_cell_centres - nucleus_centres, axis=1) * SOURCE_MPP
+    )
     nucleus_areas_um2 = np.asarray(rows.nucleus_areas_um2, dtype=np.float64)
     cell_areas_um2 = np.asarray(rows.cell_areas_um2, dtype=np.float64)
     area_ratio = np.divide(
@@ -2012,6 +2944,80 @@ def build_source(
         cell_areas_um2,
         out=np.zeros_like(nucleus_areas_um2),
         where=cell_areas_um2 > 0,
+    )
+    nuclear_morphometric_feature_names = (
+        *("nucleus_%s" % name for name in GEOMETRY_FEATURE_NAMES),
+        *("nucleus_%s" % name for name in REGION_TEXTURE_FEATURE_NAMES),
+        "nucleus_to_cell_area_ratio",
+        "cell_nucleus_centroid_distance_um",
+        "nucleus_centroid_inside_cell",
+    )
+    nuclear_morphometric_features = np.column_stack(
+        (
+            nucleus_geometry_features,
+            nucleus_texture_features,
+            area_ratio,
+            cell_nucleus_distances_um,
+            rows.nucleus_centroid_inside_cell,
+        )
+    ).astype(np.float32)
+    cell_morphometric_feature_names = (
+        *("cell_%s" % name for name in GEOMETRY_FEATURE_NAMES),
+        *("cell_%s" % name for name in REGION_TEXTURE_FEATURE_NAMES),
+        "nucleus_to_cell_area_ratio",
+        "cell_nucleus_centroid_distance_um",
+    )
+    cell_morphometric_features = np.column_stack(
+        (
+            cell_geometry_features,
+            cell_texture_features,
+            area_ratio,
+            cell_nucleus_distances_um,
+        )
+    ).astype(np.float32)
+    classical_morphology_feature_names = (
+        *nuclear_morphometric_feature_names,
+        *cell_morphometric_feature_names,
+    )
+    classical_morphology_features = np.column_stack(
+        (nuclear_morphometric_features, cell_morphometric_features)
+    ).astype(np.float32)
+    if rows.cellvit_names is None:
+        composition_features = local_density_features
+        composition_feature_names = LOCAL_DENSITY_FEATURE_NAMES
+    else:
+        composition_features = np.column_stack(
+            (local_density_features, np.asarray(rows.cellvit, dtype=np.float32))
+        ).astype(np.float32)
+        composition_feature_names = (*LOCAL_DENSITY_FEATURE_NAMES, *rows.cellvit_names)
+    disease_adjustment_features, disease_adjustment_feature_names = _categorical_one_hot(
+        rows.disease_statuses, "disease_status"
+    )
+    site_adjustment_features, site_adjustment_feature_names = _categorical_one_hot(
+        rows.site_ids, "site_id"
+    )
+    batch_adjustment_features, batch_adjustment_feature_names = _categorical_one_hot(
+        rows.batch_ids, "batch_id"
+    )
+    section_adjustment_features, section_adjustment_feature_names = _categorical_one_hot(
+        rows.sample_ids, "section_id"
+    )
+    technical_covariates = np.asarray(rows.technical, dtype=np.float32)[:, None]
+    full_nuisance_covariates = np.column_stack(
+        (
+            technical_covariates,
+            section_adjustment_features,
+            disease_adjustment_features,
+            site_adjustment_features,
+            batch_adjustment_features,
+        )
+    ).astype(np.float32)
+    full_nuisance_covariate_names = (
+        "log1p_library_size",
+        *section_adjustment_feature_names,
+        *disease_adjustment_feature_names,
+        *site_adjustment_feature_names,
+        *batch_adjustment_feature_names,
     )
     registration_qc_names = (
         "annotation_nCount_RNA",
@@ -2062,12 +3068,11 @@ def build_source(
         )
     ).astype(np.float32)
     registration_qc_pass = (
-        (np.asarray(rows.annotation_nucleus_distances_um) <= float(
-            protocol["maximum_annotation_nucleus_distance_p95_um"]
-        ))
-        & (np.asarray(rows.affine_residual_p95_um) <= float(
-            protocol["maximum_affine_registration_residual_p95_um"]
-        ))
+        np.asarray(rows.annotation_nucleus_distances_um)
+        <= float(protocol["maximum_annotation_nucleus_distance_p95_um"])
+    ) & (
+        np.asarray(rows.affine_residual_p95_um)
+        <= float(protocol["maximum_affine_registration_residual_p95_um"])
     )
     target_qc_pass = (
         (np.asarray(rows.nucleus_library_sizes) >= int(protocol["minimum_transcripts_per_cell"]))
@@ -2106,28 +3111,24 @@ def build_source(
                 "minimum_transcript_qv",
                 "excluded_feature_prefixes",
                 "type_markers",
+                "fine_type_marker_gene_ids",
+                "fine_type_annotation_provenance",
                 "spatial_block_um",
                 "spatial_roi_um",
                 "opposite_pool_guard_um",
                 "pool_assignment_salt",
+                "reference_splits",
             )
         }
     )
     target_source_sha256 = _canonical_sha256(
-        [
-            (sample["sample_id"], sample["transcripts_sha256"])
-            for sample in resolved_provenance
-        ]
+        [(sample["sample_id"], sample["transcripts_sha256"]) for sample in resolved_provenance]
     )
     source_file_manifest_sha256 = _canonical_sha256(
         {
             "annotation": annotation_declaration.sha256,
             "samples": [
-                {
-                    key: value
-                    for key, value in sample.items()
-                    if key.endswith("_sha256")
-                }
+                {key: value for key, value in sample.items() if key.endswith("_sha256")}
                 for sample in resolved_provenance
             ],
         }
@@ -2147,6 +3148,9 @@ def build_source(
         {
             "source_sha256": target_source_sha256,
             "gene_ids": list(target_genes),
+            "broad_type_marker_gene_ids": list(marker_genes),
+            "fine_type_marker_gene_ids": list(fine_marker_genes),
+            "marker_target_overlap": 0,
             "minimum_qv": protocol["minimum_transcript_qv"],
             "excluded_feature_prefixes": list(protocol["excluded_feature_prefixes"]),
             "variants": [
@@ -2157,14 +3161,18 @@ def build_source(
     )
     program_names = tuple(str(name) for name in protocol["target_programs"])
     gene_index = {gene: index for index, gene in enumerate(target_genes)}
-    program_gene_membership = np.zeros(
-        (len(program_names), len(target_genes)), dtype=np.bool_
-    )
+    program_gene_membership = np.zeros((len(program_names), len(target_genes)), dtype=np.bool_)
     for program_index, name in enumerate(program_names):
         for gene in protocol["target_programs"][name]:
             program_gene_membership[program_index, gene_index[str(gene)]] = True
     provenance = {
         "schema": SOURCE_SCHEMA,
+        "study_stage": study_manifest.study_stage,
+        "study_manifest_sha256": study_manifest.sha256,
+        "source_scope": source_scope,
+        "locked_donor_outcomes_materialized": (
+            study_manifest.study_stage == "confirmatory_morphology"
+        ),
         "protocol_sha256": _sha256_file(protocol_path),
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
@@ -2179,13 +3187,18 @@ def build_source(
         "annotation_rows": ANNOTATION_ROWS,
         "label_field_primary": "final_CT",
         "label_field_secondary": "final_lineage",
+        "fine_type_annotation_provenance": protocol["fine_type_annotation_provenance"],
+        "fine_type_marker_exclusion": {
+            "gene_ids": list(fine_marker_genes),
+            "target_overlap": 0,
+            "exact_annotation_marker_panel_available": False,
+            "establishes_full_target_independence": False,
+        },
         "target_transcript_filters": {
             "primary_nucleus": (
                 "overlaps_nucleus==1,qv>=20,non-control,COUNT(DISTINCT transcript_id)"
             ),
-            "secondary_whole_cell": (
-                "qv>=20,non-control,COUNT(DISTINCT transcript_id)"
-            ),
+            "secondary_whole_cell": ("qv>=20,non-control,COUNT(DISTINCT transcript_id)"),
         },
         "duplicate_transcript_ids_allowed": False,
         "crop_metadata": {
@@ -2197,14 +3210,24 @@ def build_source(
                 {
                     "crop_id": variant.crop_id,
                     "role": variant.role,
+                    "comparison_family": variant.comparison_family,
                     "diameter_um": variant.diameter_um,
                     "inner_diameter_um": variant.inner_diameter_um,
+                    "model_input_pixels": variant.model_input_pixels,
+                    "effective_mpp": variant.effective_mpp,
                     "mask_mode": variant.mask_mode,
+                    "fill_mode": variant.fill_mode,
                 }
                 for variant in crop_manifest.variants
             ],
+            "blur_sigma_um": crop_manifest.blur_sigma_um,
+            "random_mask_salt_sha256": hashlib.sha256(
+                crop_manifest.random_mask_salt.encode("utf-8")
+            ).hexdigest(),
         },
-        "claim_scope": "nucleus_centered_local_context_association",
+        "claim_scope": "registered_cell_local_context_112um",
+        "nucleus_hypothesis_tested": False,
+        "cell_intrinsic_hypothesis_tested": False,
         "authorizes_nucleus_intrinsic_claim": False,
         "native_xenium_registration_only": True,
         "cellvit_target_registration": False,
@@ -2213,6 +3236,12 @@ def build_source(
     }
     payload: Dict[str, object] = {
         "schema_version": np.asarray(SOURCE_SCHEMA),
+        "study_stage": np.asarray(study_manifest.study_stage),
+        "study_manifest_sha256": np.asarray(study_manifest.sha256),
+        "source_scope": np.asarray(source_scope),
+        "locked_donor_outcomes_materialized": np.asarray(
+            study_manifest.study_stage == "confirmatory_morphology"
+        ),
         "observation_ids": np.asarray(rows.observation_ids),
         "observation_id": np.asarray(rows.observation_ids),
         "cell_id": np.asarray(rows.cell_ids),
@@ -2242,6 +3271,8 @@ def build_source(
         "roi_id": np.asarray(rows.roi_ids),
         "pool_roles": roles,
         "pool_role": roles,
+        "reference_split_ids": np.asarray(reference_split_ids),
+        "pool_roles_by_split": pool_roles_by_split,
         "type_labels": labels,
         "fine_type_label": labels,
         "type_names": np.asarray(fine_type_names),
@@ -2261,6 +3292,26 @@ def build_source(
         "image_features": image_features,
         "image_features_by_crop_and_encoder": image_features,
         "crop_ids": np.asarray(crop_ids),
+        "crop_roles": np.asarray([variant.role for variant in crop_manifest.variants]),
+        "crop_comparison_families": np.asarray(
+            [variant.comparison_family for variant in crop_manifest.variants]
+        ),
+        "crop_diameters_um": np.asarray(
+            [variant.diameter_um for variant in crop_manifest.variants], dtype=np.float32
+        ),
+        "crop_inner_diameters_um": np.asarray(
+            [variant.inner_diameter_um for variant in crop_manifest.variants],
+            dtype=np.float32,
+        ),
+        "crop_model_input_pixels": np.asarray(
+            [variant.model_input_pixels for variant in crop_manifest.variants],
+            dtype=np.int64,
+        ),
+        "crop_effective_mpp": np.asarray(
+            [variant.effective_mpp for variant in crop_manifest.variants], dtype=np.float32
+        ),
+        "crop_mask_modes": np.asarray([variant.mask_mode for variant in crop_manifest.variants]),
+        "crop_fill_modes": np.asarray([variant.fill_mode for variant in crop_manifest.variants]),
         "crop_padding_fractions": crop_padding_fractions,
         "crop_mask_fractions": crop_mask_fractions,
         "primary_crop_id": np.asarray(crop_manifest.primary_crop_id),
@@ -2291,15 +3342,36 @@ def build_source(
         "ordered_gene_ids": np.asarray(target_genes),
         "type_marker_gene_ids": np.asarray(marker_genes),
         "broad_type_marker_gene_ids": np.asarray(marker_genes),
-        "fine_type_marker_gene_ids": np.asarray([], dtype=str),
+        "fine_type_marker_gene_ids": np.asarray(fine_marker_genes),
+        "fine_type_marker_panel_sha256": np.asarray(_canonical_sha256(list(fine_marker_genes))),
+        "fine_type_annotation_provenance_json": np.asarray(
+            json.dumps(protocol["fine_type_annotation_provenance"], sort_keys=True)
+        ),
         "program_names": np.asarray(program_names),
         "program_gene_membership": program_gene_membership,
         "coordinate_features": coordinate_features,
-        "coordinate_feature_names": np.asarray(
-            ["he_x_normalized", "he_y_normalized", "he_x_squared", "he_y_squared", "he_xy"]
+        "coordinate_feature_names": np.asarray(SPATIAL_FEATURE_NAMES),
+        "spatial_features": coordinate_features,
+        "spatial_feature_names": np.asarray(SPATIAL_FEATURE_NAMES),
+        "local_density_features": local_density_features,
+        "local_density_feature_names": np.asarray(LOCAL_DENSITY_FEATURE_NAMES),
+        "boundary_features": boundary_features,
+        "boundary_feature_names": np.asarray(
+            ["center_to_local_background_um", "central_background_fraction"]
         ),
-        "technical_covariates": np.asarray(rows.technical, dtype=np.float32)[:, None],
+        "technical_covariates": technical_covariates,
         "technical_covariate_names": np.asarray(["log1p_library_size"]),
+        "full_nuisance_covariates": full_nuisance_covariates,
+        "full_nuisance_covariate_names": np.asarray(full_nuisance_covariate_names),
+        "disease_adjustment_features": disease_adjustment_features,
+        "disease_adjustment_feature_names": np.asarray(disease_adjustment_feature_names),
+        "site_adjustment_features": site_adjustment_features,
+        "site_adjustment_feature_names": np.asarray(site_adjustment_feature_names),
+        "batch_adjustment_features": batch_adjustment_features,
+        "batch_adjustment_feature_names": np.asarray(batch_adjustment_feature_names),
+        "section_adjustment_features": section_adjustment_features,
+        "section_adjustment_feature_names": np.asarray(section_adjustment_feature_names),
+        "disease_estimands": np.asarray(protocol["disease_estimands"]),
         "x_coordinate_um": (nucleus_centres[:, 0] * SOURCE_MPP).astype(np.float32),
         "y_coordinate_um": (nucleus_centres[:, 1] * SOURCE_MPP).astype(np.float32),
         "cell_centroid_x_um": (native_cell_centres[:, 0] * SOURCE_MPP).astype(np.float32),
@@ -2321,35 +3393,19 @@ def build_source(
         "cell_area_um2": cell_areas_um2.astype(np.float32),
         "nucleus_area_um2": nucleus_areas_um2.astype(np.float32),
         "library_size": np.asarray(rows.nucleus_library_sizes, dtype=np.int64),
-        "detected_target_genes": np.asarray(
-            rows.nucleus_detected_target_genes, dtype=np.int64
-        ),
+        "detected_target_genes": np.asarray(rows.nucleus_detected_target_genes, dtype=np.int64),
         "transcript_qv_summary": np.stack(rows.transcript_qv_summaries).astype(np.float32),
-        "transcript_qv_summary_names": np.asarray(
-            ["minimum_qv", "median_qv", "mean_qv"]
-        ),
-        "stain_features": np.empty((observations, 0), dtype=np.float32),
-        "stain_feature_names": np.asarray([], dtype=str),
-        "composition_features": np.empty((observations, 0), dtype=np.float32),
-        "composition_feature_names": np.asarray([], dtype=str),
-        "nuclear_morphometric_features": np.column_stack(
-            (
-                nucleus_areas_um2,
-                area_ratio,
-                cell_nucleus_distances_um,
-                rows.nucleus_centroid_inside_cell,
-            )
-        ).astype(np.float32),
-        "nuclear_morphometric_feature_names": np.asarray(
-            [
-                "nucleus_area_um2",
-                "nucleus_to_cell_area_ratio",
-                "cell_nucleus_centroid_distance_um",
-                "nucleus_centroid_inside_cell",
-            ]
-        ),
-        "cell_morphometric_features": cell_areas_um2.astype(np.float32)[:, None],
-        "cell_morphometric_feature_names": np.asarray(["cell_area_um2"]),
+        "transcript_qv_summary_names": np.asarray(["minimum_qv", "median_qv", "mean_qv"]),
+        "stain_features": stain_features,
+        "stain_feature_names": np.asarray(stain_feature_names),
+        "composition_features": composition_features,
+        "composition_feature_names": np.asarray(composition_feature_names),
+        "nuclear_morphometric_features": nuclear_morphometric_features,
+        "nuclear_morphometric_feature_names": np.asarray(nuclear_morphometric_feature_names),
+        "cell_morphometric_features": cell_morphometric_features,
+        "cell_morphometric_feature_names": np.asarray(cell_morphometric_feature_names),
+        "classical_morphology_features": classical_morphology_features,
+        "classical_morphology_feature_names": np.asarray(classical_morphology_feature_names),
         "registration_qc_features": registration_qc,
         "registration_qc_feature_names": np.asarray(registration_qc_names),
         "registration_qc_pass": registration_qc_pass,
@@ -2373,7 +3429,7 @@ def build_source(
         "crop_manifest_sha256": np.asarray(crop_manifest.sha256),
         "registration_method": np.asarray(protocol["registration_method"]),
         "encoder_name": np.asarray(encoder_manifest.repository),
-        "crop_scale": np.asarray("nucleus_centered"),
+        "crop_scale": np.asarray("registered_cell_local_context_112um"),
         "crop_role": np.asarray(primary_variant.role),
         "crop_diameter_um": np.asarray(primary_variant.diameter_um),
         "source_mpp": np.asarray(crop_manifest.source_mpp),
@@ -2381,6 +3437,9 @@ def build_source(
         "model_input_pixels": np.asarray(encoder_manifest.input_pixels),
         "mask_mode": np.asarray(primary_variant.mask_mode),
         "authorizes_nucleus_intrinsic_claim": np.asarray(False),
+        "nucleus_hypothesis_tested": np.asarray(False),
+        "cell_intrinsic_hypothesis_tested": np.asarray(False),
+        "g2_claim_scope": np.asarray("registered_cell_local_context_112um"),
         "cohort_id": np.asarray("HEST"),
         "cohort_release": np.asarray(DATASET_REVISION),
         "assay": np.asarray(protocol["assay"]),
@@ -2395,11 +3454,8 @@ def build_source(
         "exclusion_policy_sha256": np.asarray(exclusion_policy_sha256),
         "target_source_sha256": np.asarray(target_source_sha256),
         "target_manifest_sha256": np.asarray(target_manifest_sha256),
-        "study_manifest_sha256": np.asarray(protocol["study_manifest_sha256"]),
         "planned_stratum_ids": np.asarray(planned_stratum_ids),
-        "planned_stratum_manifest_sha256": np.asarray(
-            planned_stratum_manifest_sha256
-        ),
+        "planned_stratum_manifest_sha256": np.asarray(planned_stratum_manifest_sha256),
         "transcript_split_method": np.asarray("sha256-final-byte-lsb-v1"),
         "transcript_minimum_qv": np.asarray(
             float(protocol["minimum_transcript_qv"]), dtype=np.float32
@@ -2407,12 +3463,8 @@ def build_source(
         "transcript_split_salt_sha256": np.asarray(
             hashlib.sha256(str(protocol["transcript_split_salt"]).encode("utf-8")).hexdigest()
         ),
-        "transcript_identity_manifest_sha256": np.asarray(
-            transcript_identity_hasher.hexdigest()
-        ),
-        "eligible_target_transcripts": np.asarray(
-            eligible_target_transcripts, dtype=np.int64
-        ),
+        "transcript_identity_manifest_sha256": np.asarray(transcript_identity_hasher.hexdigest()),
+        "eligible_target_transcripts": np.asarray(eligible_target_transcripts, dtype=np.int64),
         "duplicate_transcript_ids": np.asarray(0, dtype=np.int64),
         "transcripts_assigned_to_multiple_cells": np.asarray(0, dtype=np.int64),
         "invalid_qv_transcripts": np.asarray(0, dtype=np.int64),
@@ -2433,9 +3485,7 @@ def build_source(
         payload["cellvit_nearest_distance_um"] = np.asarray(
             rows.cellvit_distances_um, dtype=np.float32
         )
-        payload["cellvit_nearest_crop_padding_fraction"] = (
-            cellvit_nearest_padding_fractions
-        )
+        payload["cellvit_nearest_crop_padding_fraction"] = cellvit_nearest_padding_fractions
         payload["cellvit_nearest_crop_id"] = np.asarray(crop_manifest.primary_crop_id)
     else:
         payload["cellvit_context_features"] = np.empty((observations, 0), dtype=np.float32)
@@ -2450,7 +3500,7 @@ def build_source(
                 if donor_id == donor
             }
         )
-        for donor in DEVELOPMENT_DONORS + LOCKED_TEST_DONORS
+        for donor in active_donors
     }
     observation_manifest_sha256 = _canonical_sha256(
         [
@@ -2462,6 +3512,12 @@ def build_source(
     )
     plan = {
         "schema": "heir.morphology_ridge_preparation_plan.v1",
+        "study_stage": study_manifest.study_stage,
+        "study_manifest_sha256": study_manifest.sha256,
+        "source_scope": source_scope,
+        "locked_donor_outcomes_materialized": (
+            study_manifest.study_stage == "confirmatory_morphology"
+        ),
         "source_schema": SOURCE_SCHEMA,
         "source_schema_sha256": _canonical_sha256(SOURCE_SCHEMA),
         "source_observations_sha256": source_sha256,
@@ -2478,30 +3534,37 @@ def build_source(
             "sha256": crop_manifest.sha256,
         },
         "experiment_role": "primary_hest_uni2h",
-        "scientific_scope": "nucleus_centered_local_context_association",
+        "scientific_scope": "registered_cell_local_context_112um_association",
+        "g2_claim_scope": "registered_cell_local_context_112um",
+        "nucleus_hypothesis_tested": False,
+        "cell_intrinsic_hypothesis_tested": False,
         "authorizes_nucleus_intrinsic_claim": False,
-        "development_donors": list(DEVELOPMENT_DONORS),
-        "locked_test_donors": list(LOCKED_TEST_DONORS),
+        "development_donors": list(study_manifest.development_donors),
+        "locked_test_donors": list(study_manifest.locked_test_donors),
+        "materialized_donors": list(active_donors),
         "donor_sections": donor_sections,
         "gene_ids": list(target_genes),
         "type_names": list(fine_type_names),
         "broad_type_names": list(broad_type_names),
         "type_marker_gene_ids": list(marker_genes),
+        "broad_type_marker_gene_ids": list(marker_genes),
+        "fine_type_marker_gene_ids": list(fine_marker_genes),
+        "fine_type_marker_panel_sha256": _canonical_sha256(list(fine_marker_genes)),
+        "fine_type_annotation_provenance": protocol["fine_type_annotation_provenance"],
         "technical_covariate_names": ["log1p_library_size"],
+        "full_nuisance_covariate_names": list(full_nuisance_covariate_names),
         "frozen_feature_names": [
             "%s_%04d" % (feature_name_prefix, index)
             for index in range(encoder_manifest.feature_width)
         ],
         "crop_ids": list(crop_ids),
-        "coordinate_feature_names": [
-            "he_x_normalized",
-            "he_y_normalized",
-            "he_x_squared",
-            "he_y_squared",
-            "he_xy",
-        ],
-        "stain_feature_names": [],
-        "composition_feature_names": [],
+        "coordinate_feature_names": list(SPATIAL_FEATURE_NAMES),
+        "spatial_feature_names": list(SPATIAL_FEATURE_NAMES),
+        "local_density_feature_names": list(LOCAL_DENSITY_FEATURE_NAMES),
+        "stain_feature_names": list(stain_feature_names),
+        "composition_feature_names": list(composition_feature_names),
+        "nuclear_morphometric_feature_names": list(nuclear_morphometric_feature_names),
+        "cell_morphometric_feature_names": list(cell_morphometric_feature_names),
         "feature_space_id": feature_space_id,
         "feature_checkpoint_sha256": encoder_manifest.checkpoint_sha256,
         "encoder_manifest_sha256": encoder_manifest.sha256,
@@ -2512,7 +3575,7 @@ def build_source(
         "exclusion_policy_sha256": exclusion_policy_sha256,
         "registration_method": str(protocol["registration_method"]),
         "encoder_name": encoder_manifest.repository,
-        "crop_scale": "nucleus_centered",
+        "crop_scale": "registered_cell_local_context_112um",
         "crop_metadata": {
             "primary_crop_id": crop_manifest.primary_crop_id,
             "crop_role": primary_variant.role,
@@ -2521,7 +3584,22 @@ def build_source(
             "model_mpp": encoder_manifest.model_mpp,
             "model_input_pixels": encoder_manifest.input_pixels,
             "mask_mode": primary_variant.mask_mode,
+            "fill_mode": primary_variant.fill_mode,
             "padding": crop_manifest.padding,
+            "variants": [
+                {
+                    "crop_id": variant.crop_id,
+                    "role": variant.role,
+                    "comparison_family": variant.comparison_family,
+                    "diameter_um": variant.diameter_um,
+                    "inner_diameter_um": variant.inner_diameter_um,
+                    "model_input_pixels": variant.model_input_pixels,
+                    "effective_mpp": variant.effective_mpp,
+                    "mask_mode": variant.mask_mode,
+                    "fill_mode": variant.fill_mode,
+                }
+                for variant in crop_manifest.variants
+            ],
         },
         "cohort_id": "HEST",
         "cohort_release": DATASET_REVISION,
@@ -2558,8 +3636,9 @@ def build_source(
             "donor_sections": donor_sections,
         },
         "partitions": {
-            "development_donors": list(DEVELOPMENT_DONORS),
-            "locked_test_donors": list(LOCKED_TEST_DONORS),
+            "development_donors": list(study_manifest.development_donors),
+            "locked_test_donors": list(study_manifest.locked_test_donors),
+            "materialized_donors": list(active_donors),
         },
         "encoder": {
             "repository": encoder_manifest.repository,
@@ -2569,7 +3648,7 @@ def build_source(
             "feature_width": encoder_manifest.feature_width,
         },
         "preprocessing": {
-            "implementation": "native_xenium_nucleus_centered_physical_crop_ladder",
+            "implementation": "native_xenium_registered_cell_factorial_crop_ladder",
             "implementation_sha256": crop_manifest.sha256,
             "crop_role": primary_variant.role,
             "crop_diameter_um": primary_variant.diameter_um,
@@ -2579,6 +3658,10 @@ def build_source(
             "mask_mode": primary_variant.mask_mode,
             "primary_crop_id": crop_manifest.primary_crop_id,
             "crop_ids": list(crop_ids),
+            "comparison_families": [
+                variant.comparison_family for variant in crop_manifest.variants
+            ],
+            "effective_mpp": [variant.effective_mpp for variant in crop_manifest.variants],
         },
         "target": {
             "primary": "nucleus_overlapping_xenium_transcripts",
@@ -2592,9 +3675,7 @@ def build_source(
             "split_salt_sha256": hashlib.sha256(
                 str(protocol["transcript_split_salt"]).encode("utf-8")
             ).hexdigest(),
-            "transcript_identity_manifest_sha256": (
-                transcript_identity_hasher.hexdigest()
-            ),
+            "transcript_identity_manifest_sha256": (transcript_identity_hasher.hexdigest()),
         },
         "labels": {
             "primary": "final_CT",
@@ -2602,6 +3683,8 @@ def build_source(
             "fine_type_names": list(fine_type_names),
             "broad_type_names": list(broad_type_names),
             "source_sha256": annotation_declaration.sha256,
+            "fine_type_marker_gene_ids": list(fine_marker_genes),
+            "annotation_provenance": protocol["fine_type_annotation_provenance"],
         },
         "reference_mode": "simulated_spatially_disjoint_unpaired_rna",
         "reference_pool": {
@@ -2610,6 +3693,12 @@ def build_source(
             "minimum_per_donor_type": minimum_reference,
             "observation_manifest_sha256": observation_manifest_sha256,
         },
+        "reference_splits": {
+            "primary_split_id": reference_split_ids[0],
+            "split_ids": list(reference_split_ids),
+            "primary_evaluation_rows_fixed": True,
+            "selection_unit": "spatial_block",
+        },
         "nuisance_covariates": [
             "log1p_library_size",
             "section_id",
@@ -2617,6 +3706,7 @@ def build_source(
             "site_id",
             "batch_id",
         ],
+        "disease_estimands": list(protocol["disease_estimands"]),
         "registration_qc_feature_names": list(registration_qc_names),
         "gate": {
             "ranks": [2, 4, 6],
@@ -2625,7 +3715,9 @@ def build_source(
             "permutations_per_seed": 100,
             "minimum_support": minimum_evaluation,
             "minimum_development_donors": 5,
-            "minimum_locked_donors": 5,
+            "minimum_locked_donors": (
+                5 if study_manifest.study_stage == "confirmatory_morphology" else 0
+            ),
             "minimum_coverage_fraction": 0.7,
             "minimum_shuffled_fraction": 0.7,
             "nulls": ["within_roi_derangement", "spatial_block_reassignment"],
@@ -2648,6 +3740,25 @@ def build_source(
         for index, crop_id in enumerate(crop_ids)
     }
     registration_distances = np.asarray(rows.annotation_nucleus_distances_um, dtype=np.float64)
+    reference_evaluation_balance = _reference_evaluation_balance(
+        donors,
+        roles,
+        {
+            "library_size": technical_covariates,
+            "spatial": coordinate_features,
+            "stain": stain_features,
+            "nuclear_morphology": nuclear_morphometric_features,
+            "cell_morphology": cell_morphometric_features,
+            "local_density": local_density_features,
+        },
+        {
+            "fine_type": rows.fine_type_ids,
+            "section": rows.sample_ids,
+            "disease": rows.disease_statuses,
+            "site": rows.site_ids,
+            "batch": rows.batch_ids,
+        },
+    )
     registration_gate_pass = all(
         float(sample["coordinate_registration_residual_p95_um"])
         <= float(protocol["maximum_affine_registration_residual_p95_um"])
@@ -2659,6 +3770,12 @@ def build_source(
     )
     qc = {
         "schema": "heir.hest_xenium_cell_qc.v1",
+        "study_stage": study_manifest.study_stage,
+        "study_manifest_sha256": study_manifest.sha256,
+        "source_scope": source_scope,
+        "locked_donor_outcomes_materialized": (
+            study_manifest.study_stage == "confirmatory_morphology"
+        ),
         "source_observations": {
             "path": str(output_path),
             "sha256": source_sha256,
@@ -2676,28 +3793,18 @@ def build_source(
             "method": str(protocol["registration_method"]),
             "one_to_one": True,
             "duplicate_observation_ids": 0,
-            "annotation_nucleus_distance_p50_um": float(
-                np.quantile(registration_distances, 0.5)
-            ),
+            "annotation_nucleus_distance_p50_um": float(np.quantile(registration_distances, 0.5)),
             "median_annotation_nucleus_distance_um": float(
                 np.quantile(registration_distances, 0.5)
             ),
-            "annotation_nucleus_distance_p95_um": float(
-                np.quantile(registration_distances, 0.95)
-            ),
-            "p95_annotation_nucleus_distance_um": float(
-                np.quantile(registration_distances, 0.95)
-            ),
-            "maximum_allowed_p95_um": float(
-                protocol["maximum_annotation_nucleus_distance_p95_um"]
-            ),
+            "annotation_nucleus_distance_p95_um": float(np.quantile(registration_distances, 0.95)),
+            "p95_annotation_nucleus_distance_um": float(np.quantile(registration_distances, 0.95)),
+            "maximum_allowed_p95_um": float(protocol["maximum_annotation_nucleus_distance_p95_um"]),
             "annotation_nucleus_distance_max_um": float(registration_distances.max()),
             "nucleus_centroid_outside_cell_fraction": float(
                 1.0 - np.mean(rows.nucleus_centroid_inside_cell)
             ),
-            "row_within_distance_threshold_fraction": float(
-                np.mean(registration_qc_pass)
-            ),
+            "row_within_distance_threshold_fraction": float(np.mean(registration_qc_pass)),
             "pass": registration_gate_pass,
             "samples": resolved_provenance,
         },
@@ -2708,35 +3815,76 @@ def build_source(
             "unknown_noncontrol_features": 0,
             "invalid_qv_rows": 0,
             "unsegmented_high_qv_assignments": 0,
-            "nucleus_eligible_transcripts": int(sum(
-                int(value["nucleus_eligible_transcripts"]) for value in resolved_provenance
-            )),
-            "whole_cell_eligible_transcripts": int(sum(
-                int(value["whole_cell_eligible_transcripts"])
-                for value in resolved_provenance
-            )),
-            "eligible_target_transcripts": eligible_target_transcripts,
-            "transcript_identity_manifest_sha256": (
-                transcript_identity_hasher.hexdigest()
+            "nucleus_eligible_transcripts": int(
+                sum(int(value["nucleus_eligible_transcripts"]) for value in resolved_provenance)
             ),
+            "whole_cell_eligible_transcripts": int(
+                sum(int(value["whole_cell_eligible_transcripts"]) for value in resolved_provenance)
+            ),
+            "eligible_target_transcripts": eligible_target_transcripts,
+            "transcript_identity_manifest_sha256": (transcript_identity_hasher.hexdigest()),
             "all_row_qc_pass": bool(target_qc_pass.all()),
         },
         "crops": {
             "primary_crop_id": crop_manifest.primary_crop_id,
-            "maximum_allowed_padding_fraction": float(
-                protocol["maximum_crop_padding_fraction"]
-            ),
+            "g2_claim_scope": "registered_cell_local_context_112um",
+            "nucleus_hypothesis_tested": False,
+            "cell_intrinsic_hypothesis_tested": False,
+            "common_canvas": {
+                "diameter_um": 112.0,
+                "effective_mpp": 0.5,
+                "model_input_pixels": 224,
+            },
+            "resolution_sensitivity_crop_ids": ["crop_32um", "crop_64um"],
+            "mask_control_fill_modes": ["white", "mean_color", "blurred"],
+            "random_location_shape_matched_controls": True,
+            "inpainting_control_available": False,
+            "inpainting_substitute": "blurred_replacement",
+            "maximum_allowed_padding_fraction": float(protocol["maximum_crop_padding_fraction"]),
             "all_row_qc_pass": bool(crop_qc_pass.all()),
             "by_crop_id": padding_summary,
+        },
+        "feature_families": {
+            "stain_quality_columns": len(stain_feature_names),
+            "nuclear_morphology_columns": len(nuclear_morphometric_feature_names),
+            "cell_morphology_columns": len(cell_morphometric_feature_names),
+            "spatial_columns": len(SPATIAL_FEATURE_NAMES),
+            "composition_columns": len(composition_feature_names),
+            "full_nuisance_columns": len(full_nuisance_covariate_names),
+            "disease_estimands": ["disease_inclusive", "disease_adjusted"],
+        },
+        "fine_type_marker_exclusion": {
+            "gene_ids": list(fine_marker_genes),
+            "target_overlap": 0,
+            "annotation_provenance": protocol["fine_type_annotation_provenance"],
+        },
+        "reference_evaluation_balance": reference_evaluation_balance,
+        "reference_splits": {
+            split_id: {
+                "reference_rows": int(
+                    np.count_nonzero(pool_roles_by_split[:, index] == "reference")
+                ),
+                "evaluation_rows": int(
+                    np.count_nonzero(pool_roles_by_split[:, index] == "evaluation")
+                ),
+                "excluded_rows": int(np.count_nonzero(pool_roles_by_split[:, index] == "excluded")),
+                "membership_sha256": _canonical_sha256(
+                    [
+                        (observation_id, role)
+                        for observation_id, role in zip(
+                            rows.observation_ids, pool_roles_by_split[:, index].tolist()
+                        )
+                    ]
+                ),
+            }
+            for index, split_id in enumerate(reference_split_ids)
         },
         "exclusion_counts": exclusion_counts,
         "planned_strata": {
             "ids": list(planned_stratum_ids),
             "manifest_sha256": planned_stratum_manifest_sha256,
         },
-        "pass": bool(
-            registration_gate_pass and target_qc_pass.all() and crop_qc_pass.all()
-        ),
+        "pass": bool(registration_gate_pass and target_qc_pass.all() and crop_qc_pass.all()),
     }
     _write_json(qc_output_path, qc)
 
@@ -2744,6 +3892,7 @@ def build_source(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
+    parser.add_argument("--study-manifest", type=Path, required=True)
     parser.add_argument("--encoder-manifest", type=Path, required=True)
     parser.add_argument("--crop-manifest", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
@@ -2756,6 +3905,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     build_source(
         args.protocol,
+        args.study_manifest,
         args.encoder_manifest,
         args.crop_manifest,
         args.data_root,

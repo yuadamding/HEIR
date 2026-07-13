@@ -19,9 +19,7 @@ def test_donor_balanced_scaling_equalizes_unequal_row_counts() -> None:
     donors = np.asarray(["large"] * 99 + ["small"])
     values = np.concatenate((np.zeros((99, 1)), np.asarray([[10.0]])), axis=0)
     weights = donor_weights(donors)
-    assert weights[donors == "large"].sum() == pytest.approx(
-        weights[donors == "small"].sum()
-    )
+    assert weights[donors == "large"].sum() == pytest.approx(weights[donors == "small"].sum())
     mean, scale = weighted_standardization(values, weights)
     np.testing.assert_allclose(mean, [5.0])
     np.testing.assert_allclose(scale, [5.0])
@@ -59,34 +57,20 @@ def test_exact_donor_randomization_and_dominance_are_deterministic() -> None:
     assert dominance["largest_positive_share"] == pytest.approx(0.5)
 
 
-def test_calibration_receipt_fails_closed_for_final_inference() -> None:
+def test_calibration_receipt_fails_closed_for_final_inference(
+    calibration_receipt,
+) -> None:
     with pytest.raises(ValueError, match="requires a calibration receipt"):
         validate_calibration_receipt(None, required=True)
-    receipt = {
-        "schema": "heir.morphology_gate_calibration.v1",
-        "simulation_sha256": "1" * 64,
-        "thresholds_sha256": "2" * 64,
-        "maximum_complete_gate_false_pass_probability": 0.05,
-        "power_at_minimum_meaningful_effect": 0.80,
-        "locked_outcomes_used": False,
-        "complete_gate_executed": True,
-        "scenario_families": [
-            "no_image_effect",
-            "weak_image_effect",
-            "minimum_meaningful_effect",
-            "larger_image_effect",
-            "donor_heterogeneity",
-            "section_heterogeneity",
-            "spatial_autocorrelation",
-            "missing_donor_type_strata",
-            "measurement_reliability",
-        ],
-    }
-    validated = validate_calibration_receipt(receipt, required=True)
+    validated = validate_calibration_receipt(calibration_receipt, required=True)
     assert validated["available"] is True
-    with pytest.raises(ValueError, match="error and power requirements"):
+    with pytest.raises(ValueError, match="aggregate error or power"):
         validate_calibration_receipt(
-            {**receipt, "power_at_minimum_meaningful_effect": 0.79}, required=True
+            {
+                **calibration_receipt,
+                "power_at_minimum_meaningful_effect": 0.79,
+            },
+            required=True,
         )
 
 
@@ -104,12 +88,50 @@ def test_control_registry_exposes_morphometric_context_and_combined_families() -
         context_features=np.ones((rows, 7)),
         nucleus_mask_features=np.ones((rows, 8)),
         cell_mask_features=np.ones((rows, 9)),
+        image_feature_tensor=np.stack(
+            (
+                np.full((rows, 5), 1.0),
+                np.full((rows, 5), 2.0),
+                np.full((rows, 5), 3.0),
+                np.full((rows, 5), 4.0),
+            ),
+            axis=1,
+        ).astype(np.float32),
+        crop_ids=(
+            "crop_112um",
+            "nucleus_mask_only",
+            "cell_mask_only",
+            "target_cell_removed_112um",
+        ),
+        crop_roles=(
+            "registered_cell_local_context_112um",
+            "nucleus_intrinsic_white_fill",
+            "cell_intrinsic_white_fill",
+            "target_cell_removed_white_fill",
+        ),
+        crop_comparison_families=(
+            "g2_primary",
+            "intrinsic_common_canvas",
+            "intrinsic_common_canvas",
+            "context_control",
+        ),
+        primary_crop_id="crop_112um",
+        disease_states=np.asarray(["Control", "Disease", "Control", "Disease"]),
+        site_ids=np.repeat("site", rows),
+        batch_ids=np.repeat("batch", rows),
+        section_ids=np.asarray(["s1", "s1", "s2", "s2"]),
     )
     registry = feature_family_registry(artifact)
     assert registry["nuclear_morphometrics_only"].shape == (rows, 4)
     assert registry["cell_morphometrics_only"].shape == (rows, 6)
-    assert registry["context_only"].shape == (rows, 7)
-    assert registry["nucleus_mask_image"].shape == (rows, 8)
-    assert registry["cell_mask_image"].shape == (rows, 9)
+    assert registry["context_only"].shape == (rows, 5)
+    assert registry["nucleus_mask_image"].shape == (rows, 5)
+    assert registry["cell_mask_image"].shape == (rows, 5)
     assert registry["full_context_image"].shape == (rows, 5)
     assert registry["image_plus_morphometrics"].shape == (rows, 15)
+    assert registry["crop_image::nucleus_mask_only"].shape == (rows, 5)
+    assert np.all(registry["nucleus_mask_image"] == 2.0)
+    assert np.all(registry["target_cell_removed_context_image"] == 4.0)
+    assert registry["crop_image::nucleus_mask_only"].dtype == np.float32
+    assert registry["disease_site_batch_only"].shape == (rows, 1)
+    assert registry["disease_site_batch_section_only"].shape == (rows, 2)
