@@ -5,8 +5,10 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+import heir.evaluation.morphology_ridge as ridge_module
 from heir.data import MorphologyRidgeDatasetArtifact
 from heir.evaluation import (
+    donor_type_block_permutation,
     evaluate_morphology_ridge_gate,
     fit_oracle_ridge_probe,
     predict_oracle_ridge,
@@ -32,7 +34,9 @@ def _artifact(
     observation_ids = []
     for donor_position, donor in enumerate(donors):
         for type_index in range(2):
-            state = np.linspace(-1.0, 1.0, 12)
+            state = np.asarray(
+                [-1.0, 0.7, -0.2, 0.4, 0.9, -0.8, 0.1, -0.5, 0.3, -0.4, 1.0, -0.9]
+            )
             local_coordinate = np.sin(
                 np.arange(12, dtype=np.float64) * 2.3 + donor_position + type_index
             )
@@ -51,8 +55,15 @@ def _artifact(
             coordinates.append(np.column_stack((local_coordinate, np.square(local_coordinate))))
             labels.extend([type_index] * 12)
             donor_ids.extend([donor] * 12)
-            block_ids.extend([f"{donor}_evaluation"] * 12)
-            roi_ids.extend([f"{donor}_type_{type_index}"] * 12)
+            block_ids.extend(
+                [f"{donor}/section_{donor}/block_{index // 4}" for index in range(12)]
+            )
+            roi_ids.extend(
+                [
+                    f"{donor}/section_{donor}/type_{type_index}/roi_{index // 4}"
+                    for index in range(12)
+                ]
+            )
             observation_ids.extend([f"{donor}_{type_index}_{index}" for index in range(12)])
     cells = len(labels)
     return MorphologyRidgeDatasetArtifact(
@@ -132,6 +143,59 @@ def test_oracle_per_type_ridge_uses_supplied_matched_reference_means() -> None:
     assert not np.allclose(fit.coefficients[0], fit.coefficients[1])
 
 
+def test_spatial_block_permutation_is_deterministic_and_crosses_blocks() -> None:
+    artifact = _artifact(
+        ("development_1", "development_2", "development_3"),
+        role="development",
+        source_offset=4,
+    )
+    first = donor_type_block_permutation(
+        artifact.donor_ids, artifact.type_labels, artifact.block_ids, seed=17
+    )
+    second = donor_type_block_permutation(
+        artifact.donor_ids, artifact.type_labels, artifact.block_ids, seed=17
+    )
+    np.testing.assert_array_equal(first, second)
+    np.testing.assert_array_equal(artifact.donor_ids, artifact.donor_ids[first])
+    np.testing.assert_array_equal(artifact.type_labels, artifact.type_labels[first])
+    assert np.mean(artifact.block_ids != artifact.block_ids[first]) == 1.0
+
+
+def test_multicandidate_null_reselects_pipeline_hyperparameters() -> None:
+    development = _artifact(
+        tuple(f"development_{index}" for index in range(5)),
+        role="development",
+        source_offset=4,
+    )
+    locked = _artifact(
+        tuple(f"locked_{index}" for index in range(5)),
+        role="locked_test",
+        source_offset=8,
+    )
+    control = ridge_module._evaluate_permutation_null(
+        development,
+        locked,
+        null_kind="local_within_roi",
+        matched=1.0,
+        ranks=(1, 2),
+        alphas=(0.1, 1.0),
+        permutation_seeds=(17,),
+        total_permutations=2,
+        minimum_support=8,
+        minimum_shuffle_delta=0.0,
+        maximum_permutation_p=1.0,
+        minimum_shuffled_fraction=0.5,
+        include_composition=False,
+        prespecified_fixed_hyperparameters=False,
+        device="cpu",
+    )
+    assert control["full_pipeline_hyperparameters_reselected"] is True
+    assert control["hyperparameter_selection"] == "repeated_development_donor_fold_selection"
+    assert sum(
+        row["count"] for row in control["selected_hyperparameter_counts"]
+    ) == 2
+
+
 def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None:
     development = _artifact(
         tuple(f"development_{index}" for index in range(5)),
@@ -151,6 +215,7 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
         permutation_seeds=(17, 29, 41),
         permutations_per_seed=100,
         minimum_support=8,
+        prespecified_fixed_hyperparameters=True,
         device="cpu",
     )
     assert report["component_pass"] is True
@@ -158,10 +223,21 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
     assert report["oracle_type_only"] is True
     control = report["permutation_control"]
     assert control["training_probe_refit_for_each_permutation"] is True
+    assert control["hyperparameter_selection"] == "manifest_prespecified_single_candidate"
     assert control["total_permutations"] == 300
+    assert control["unique_permutations"] is True
+    assert control["one_combined_scientific_permutation_pool"] is True
+    assert control["seeds_are_generation_streams_not_independent_tests"] is True
     assert all(row["empirical_p"] < 0.01 for row in control["seeds"])
+    block_control = report["spatial_block_permutation_control"]
+    assert block_control["total_permutations"] == 300
+    assert all(row["minimum_cross_block_fraction"] == 1.0 for row in block_control["seeds"])
     assert report["primary_metrics"]["donor_equal_type_equal_residual_coordinate_r2"] > 0.95
     assert report["checks"]["beats_coordinate_only"] is True
+    assert report["coverage"]["locked_donor_type"]["supported_fraction"] == 1.0
+    assert report["stratification"]["section"]["available"] is True
+    assert len(report["leave_one_locked_donor_out"]["matched_macro_r2"]) == 5
+    assert report["donor_bootstrap"]["matched_macro_r2"]["ci_95"][0] > 0.0
 
     repeated = evaluate_morphology_ridge_gate(
         development,
@@ -171,9 +247,11 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
         permutation_seeds=(17, 29, 41),
         permutations_per_seed=100,
         minimum_support=8,
+        prespecified_fixed_hyperparameters=True,
         device="cpu",
     )
     assert repeated["permutation_control"] == control
+    assert repeated["spatial_block_permutation_control"] == block_control
 
 
 def test_ridge_gate_rejects_too_few_permutations_and_coordinate_only_signal() -> None:
@@ -189,7 +267,7 @@ def test_ridge_gate_rejects_too_few_permutations_and_coordinate_only_signal() ->
         source_offset=8,
         coordinate_signal=True,
     )
-    with pytest.raises(ValueError, match="at least 100 permutations"):
+    with pytest.raises(ValueError, match="at least 100 total permutations"):
         evaluate_morphology_ridge_gate(
             development,
             locked,
@@ -197,6 +275,7 @@ def test_ridge_gate_rejects_too_few_permutations_and_coordinate_only_signal() ->
             alphas=(1.0,),
             permutation_seeds=(17, 29, 41),
             permutations_per_seed=99,
+            total_permutations=99,
             minimum_support=8,
             device="cpu",
         )
@@ -209,10 +288,65 @@ def test_ridge_gate_rejects_too_few_permutations_and_coordinate_only_signal() ->
         permutation_seeds=(17, 29, 41),
         permutations_per_seed=100,
         minimum_support=8,
+        prespecified_fixed_hyperparameters=True,
         device="cpu",
     )
     assert report["checks"]["beats_coordinate_only"] is False
     assert report["component_pass"] is False
+
+
+def test_final_inference_requires_calibration_and_999_unique_permutations() -> None:
+    development = _artifact(
+        tuple(f"development_{index}" for index in range(5)),
+        role="development",
+        source_offset=4,
+    )
+    locked = _artifact(
+        tuple(f"locked_{index}" for index in range(5)),
+        role="locked_test",
+        source_offset=8,
+    )
+    with pytest.raises(ValueError, match="requires a calibration receipt"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            ranks=(1,),
+            alphas=(1.0,),
+            total_permutations=999,
+            final_inference=True,
+            device="cpu",
+        )
+    receipt = {
+        "schema": "heir.morphology_gate_calibration.v1",
+        "simulation_sha256": "a" * 64,
+        "thresholds_sha256": "b" * 64,
+        "maximum_complete_gate_false_pass_probability": 0.05,
+        "power_at_minimum_meaningful_effect": 0.80,
+        "locked_outcomes_used": False,
+        "complete_gate_executed": True,
+        "scenario_families": [
+            "no_image_effect",
+            "weak_image_effect",
+            "minimum_meaningful_effect",
+            "larger_image_effect",
+            "donor_heterogeneity",
+            "section_heterogeneity",
+            "spatial_autocorrelation",
+            "missing_donor_type_strata",
+            "measurement_reliability",
+        ],
+    }
+    with pytest.raises(ValueError, match="at least 999 unique permutations"):
+        evaluate_morphology_ridge_gate(
+            development,
+            locked,
+            ranks=(1,),
+            alphas=(1.0,),
+            total_permutations=998,
+            final_inference=True,
+            calibration_receipt=receipt,
+            device="cpu",
+        )
 
 
 def test_ridge_artifact_rejects_marker_leakage_and_donor_overlap() -> None:
@@ -324,6 +458,7 @@ def test_uni2h_regional_gate_reports_raw_and_composition_adjusted_endpoints() ->
         permutation_seeds=(17, 29, 41),
         permutations_per_seed=100,
         minimum_support=8,
+        prespecified_fixed_hyperparameters=True,
         device="cpu",
     )
     assert report["component_pass"] is True

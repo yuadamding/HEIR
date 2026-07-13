@@ -26,6 +26,7 @@ hescape = [
 hest = [
   "duckdb>=1.1,<2",
   "imagecodecs>=2023.9.18,<2025",
+  "Pillow>=10",
   "pyarrow>=14,<23",
   "safetensors>=0.4",
   "tifffile>=2024.2,<2025.5",

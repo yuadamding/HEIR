@@ -1,0 +1,37 @@
+"""Local adapter for the access-controlled H0-mini encoder."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .base import EncoderManifest, TorchPatchEncoder, load_local_state_dict, verified_model_file
+
+H0MINI_REPOSITORY = "bioptimus/H0-mini"
+
+
+class H0MiniEncoder(TorchPatchEncoder):
+    """Load H0-mini only after a real checkpoint is pinned in its manifest."""
+
+    def __init__(self, model_dir: Path, manifest: EncoderManifest, device: str = "cuda"):
+        try:
+            import timm
+            import torch
+        except ImportError as error:  # pragma: no cover
+            raise RuntimeError("install HEIR with the hest optional dependencies") from error
+        if not manifest.available:
+            raise ValueError("H0-mini is inaccessible: %s" % manifest.status_reason)
+        if manifest.repository != H0MINI_REPOSITORY or manifest.implementation != "timm_local":
+            raise ValueError("H0-mini manifest differs from the supported adapter")
+        checkpoint = verified_model_file(
+            model_dir, manifest.checkpoint_filename, manifest.checkpoint_sha256
+        )
+        model = timm.create_model(
+            manifest.architecture,
+            pretrained=False,
+            num_classes=0,
+            mlp_layer=timm.layers.SwiGLUPacked,
+            act_layer=torch.nn.SiLU,
+        )
+        state = load_local_state_dict(checkpoint)
+        model.load_state_dict(state, strict=True)
+        super().__init__(model, manifest, device)

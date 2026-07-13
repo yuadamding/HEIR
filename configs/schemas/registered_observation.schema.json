@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HEIR registered observation artifact descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "row_fields", "matrices", "identities"],
+  "properties": {
+    "schema": {"const": "heir.registered_observations.v3"},
+    "row_fields": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": [
+        "observation_id", "donor_id", "patient_id", "section_id", "source_sample_id",
+        "cell_id", "broad_type_label", "fine_type_label", "disease_state", "site_id",
+        "batch_id", "block_id", "roi_id", "pool_role", "x_coordinate_um", "y_coordinate_um",
+        "cell_centroid_x_um", "cell_centroid_y_um", "nucleus_centroid_x_um",
+        "nucleus_centroid_y_um", "annotation_centroid_x_um", "annotation_centroid_y_um",
+        "registration_distance_um", "cell_area_um2", "nucleus_area_um2", "library_size",
+        "detected_target_genes", "transcript_qv_summary", "target_qc_pass", "registration_qc_pass"
+      ]}
+    },
+    "matrices": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": [
+        "nucleus_target_counts", "whole_cell_target_counts", "normalized_nucleus_targets",
+        "normalized_whole_cell_targets", "coordinate_features", "stain_features",
+        "nuclear_morphometric_features", "cell_morphometric_features",
+        "cellvit_context_features", "image_features_by_crop_and_encoder"
+      ]}
+    },
+    "identities": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": [
+        "ordered_gene_ids", "broad_type_marker_gene_ids", "fine_type_marker_gene_ids",
+        "source_file_manifest_sha256", "registration_manifest_sha256", "target_manifest_sha256",
+        "segmentation_manifest_sha256", "exclusion_policy_sha256", "encoder_manifest_sha256",
+        "crop_manifest_sha256", "study_manifest_sha256"
+      ]}
+    }
+  }
+}
+

@@ -1,0 +1,27 @@
+{
+  "schema": "heir.encoder_manifest.v1",
+  "encoder_id": "hoptimus1_3592cb22_inaccessible",
+  "availability": "inaccessible",
+  "status_reason": "The Hugging Face repository is access-controlled and no authorized local checkpoint was available on 2026-07-12; this arm must not run until real bytes and hashes replace the sentinels.",
+  "implementation": "timm_local",
+  "repository": "bioptimus/H-optimus-1",
+  "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+  "architecture": "vit_giant_patch14_reg4_dinov2",
+  "config_filename": "config.json",
+  "config_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "checkpoint_filename": "model.safetensors",
+  "checkpoint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "feature_width": 1536,
+  "input_pixels": 224,
+  "model_mpp": 0.5,
+  "normalization": {
+    "mean": [0.707223, 0.578729, 0.703617],
+    "std": [0.211883, 0.230117, 0.177517]
+  },
+  "interpolation": "bicubic",
+  "pooling_rule": "direct_features",
+  "license": "CC-BY-NC-ND-4.0",
+  "known_training_datasets": [],
+  "evaluation_overlap": "unknown",
+  "fine_tuning": "prohibited"
+}

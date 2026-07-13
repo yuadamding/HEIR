@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Sequence, Union
@@ -16,9 +19,9 @@ PathLike = Union[str, os.PathLike]
 
 def resolve_device(requested: str = "auto") -> torch.device:
     value = requested.strip().lower()
-    device = torch.device("cuda" if value == "auto" and torch.cuda.is_available() else value)
-    if value == "auto" and not torch.cuda.is_available():
-        device = torch.device("cpu")
+    if value == "auto":
+        value = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(value)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
     return device
@@ -69,4 +72,45 @@ def atomic_json_dump(payload: Dict[str, Any], path: PathLike) -> None:
         raise
 
 
-__all__ = ["atomic_json_dump", "reject_output_input_collisions", "resolve_device", "sha256_file"]
+def runtime_environment() -> Dict[str, Any]:
+    """Record the software and accelerator identity needed to audit a benchmark."""
+
+    packages = {}
+    for name in ("numpy", "torch", "timm", "torchvision"):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    gpu = None
+    if torch.cuda.is_available():
+        index = torch.cuda.current_device()
+        properties = torch.cuda.get_device_properties(index)
+        gpu = {
+            "index": index,
+            "name": properties.name,
+            "total_memory_bytes": properties.total_memory,
+            "compute_capability": [properties.major, properties.minor],
+        }
+    return {
+        "python": sys.version,
+        "python_implementation": platform.python_implementation(),
+        "packages": packages,
+        "pytorch_cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+        "gpu": gpu,
+        "os": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "container_digest": os.environ.get("HEIR_CONTAINER_DIGEST"),
+    }
+
+
+__all__ = [
+    "atomic_json_dump",
+    "reject_output_input_collisions",
+    "resolve_device",
+    "runtime_environment",
+    "sha256_file",
+]

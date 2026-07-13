@@ -40,7 +40,7 @@ EXPECTED_SECTIONS = 20
 EXPECTED_DONORS = 15
 EXPECTED_GENES = 343
 FEATURE_WIDTH = 1_536
-SOURCE_SCHEMA = "heir.hescape_regional_source.v1"
+SOURCE_SCHEMA = "heir.hescape_regional_source.v2"
 PLAN_SCHEMA = "heir.morphology_ridge_preparation_plan.v1"
 CSV_SHA256 = {
     "train.csv": "5124fbb6f235648ba6810b7de77d925fee4022ec3225659774d1bafed017b556",
@@ -92,6 +92,7 @@ COMPOSITION_FEATURE_NAMES = (
     "composition_stromal",
     "composition_endothelial",
 )
+TYPE_NAMES = ("epithelial", "immune", "stromal", "endothelial")
 STAIN_FEATURE_NAMES = (
     "rgb_red_mean",
     "rgb_green_mean",
@@ -105,6 +106,63 @@ STAIN_FEATURE_NAMES = (
     "eosin_variance",
     "edge_density",
     "grayscale_entropy",
+)
+CROP_PROTOCOLS = {
+    "target_matched_55um": {
+        "structure": "center_square",
+        "source_pixels": 256,
+        "inner_mask_source_pixels": 0,
+        "masked_center_fill": "none",
+        "stain_inclusion_mask": "all_resized_pixels",
+        "physical_width_um": 54.4,
+        "nominal_target_width_um": 55.0,
+        "resize_pixels": 224,
+        "effective_model_mpp": 0.24285714285714285,
+        "crop_scale": "target_matched_55um",
+    },
+    "context_108um": {
+        "structure": "center_square",
+        "source_pixels": 512,
+        "inner_mask_source_pixels": 0,
+        "masked_center_fill": "none",
+        "stain_inclusion_mask": "all_resized_pixels",
+        "physical_width_um": 108.8,
+        "nominal_target_width_um": 55.0,
+        "resize_pixels": 224,
+        "effective_model_mpp": 0.4857142857142857,
+        "crop_scale": "context_108um_sensitivity",
+    },
+    "context_annulus_55_to_109um": {
+        "structure": "center_annulus",
+        "source_pixels": 512,
+        "inner_mask_source_pixels": 256,
+        "masked_center_fill": "rounded_imagenet_mean_rgb",
+        "stain_inclusion_mask": "strict_outer_annulus_after_bilinear_resize",
+        "physical_width_um": 108.8,
+        "nominal_target_width_um": 55.0,
+        "resize_pixels": 224,
+        "effective_model_mpp": 0.4857142857142857,
+        "crop_scale": "context_only_annulus_55_to_109um",
+    },
+}
+COORDINATE_FEATURE_NAMES = (
+    "section_normalized_x",
+    "section_normalized_y",
+    "section_normalized_x_squared",
+    "section_normalized_y_squared",
+    "section_normalized_xy",
+    "log1p_local_pseudospot_density_r512",
+    "normalized_distance_to_section_bounding_box",
+)
+TECHNICAL_COVARIATE_NAMES = ("log1p_library_size",)
+FROZEN_FEATURE_NAMES = tuple("uni2h_%04d" % index for index in range(FEATURE_WIDTH))
+ROW_METADATA_NAMES = (
+    "donor_id",
+    "section_id",
+    "disease_state",
+    "site_id",
+    "batch_id",
+    "hescape_patient_id",
 )
 
 
@@ -139,6 +197,15 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _ordered_schema_sha256(name: str, fields: Sequence[str]) -> str:
+    values = tuple(str(field) for field in fields)
+    if not name.strip() or not values or any(not value.strip() for value in values):
+        raise ValueError("ordered schema names cannot be empty")
+    if len(set(values)) != len(values):
+        raise ValueError("ordered schema names must be unique")
+    return _canonical_sha256({"schema_name": name, "ordered_fields": values})
+
+
 def _read_json(path: Path) -> Mapping[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -151,8 +218,9 @@ def _read_json(path: Path) -> Mapping[str, object]:
 
 def _validate_protocol(protocol: Mapping[str, object]) -> None:
     exact = {
-        "schema": "heir.hescape_regional_protocol.v2",
+        "schema": "heir.hescape_regional_protocol.v3",
         "scientific_scope": "regional_pseudospot_exploratory",
+        "authorization_ceiling": "regional_pseudospot_only_no_cell_or_nucleus_claims",
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
         "dataset_config": DATASET_CONFIG,
@@ -167,8 +235,11 @@ def _validate_protocol(protocol: Mapping[str, object]) -> None:
         "source_annotation_sha256": SOURCE_ANNOTATION_SHA256,
         "official_hescape_split_is_donor_safe": False,
         "normalization": "log1p_cpm_10000",
-        "primary_crop_source_pixels": 512,
-        "primary_resize_pixels": 224,
+        "source_pixel_size_um": 0.2125,
+        "primary_crop_role": "target_matched_55um",
+        "crop_protocols": CROP_PROTOCOLS,
+        "site_definition": "official_hescape_organ",
+        "batch_definition": "conservative_section_identity_no_finer_released_batch",
         "technical_covariates": ["log1p_library_size"],
         "minimum_reference_per_donor_niche": 10,
         "minimum_evaluation_per_donor_niche": 10,
@@ -225,6 +296,16 @@ def _validate_protocol(protocol: Mapping[str, object]) -> None:
         or float(protocol.get("minimum_niche_margin", -1)) <= 0
     ):
         raise ValueError("HESCAPE dominant-niche exclusion thresholds are invalid")
+
+
+def _resolve_crop_protocol(protocol: Mapping[str, object], crop_role: str) -> Mapping[str, object]:
+    _validate_protocol(protocol)
+    if crop_role not in CROP_PROTOCOLS:
+        raise ValueError("HESCAPE crop role is not prespecified")
+    crop = dict(protocol["crop_protocols"][crop_role])
+    if crop != CROP_PROTOCOLS[crop_role]:
+        raise ValueError("HESCAPE crop structure differs from the frozen protocol")
+    return crop
 
 
 def _git_revision(root: Path) -> str:
@@ -391,6 +472,9 @@ class RawRows:
     section_ids: np.ndarray
     donor_ids: np.ndarray
     disease_states: np.ndarray
+    site_ids: np.ndarray
+    batch_ids: np.ndarray
+    hescape_patient_ids: np.ndarray
     coordinates: np.ndarray
     counts: np.ndarray
     shard_sha256: Tuple[str, ...]
@@ -406,6 +490,9 @@ def _read_rows(shards: Sequence[Path], sections: Mapping[str, OfficialSection]) 
     section_values = []
     donor_values = []
     disease_values = []
+    site_values = []
+    batch_values = []
+    hescape_patient_values = []
     coordinate_values = []
     count_values = []
     shard_hashes = []
@@ -460,6 +547,11 @@ def _read_rows(shards: Sequence[Path], sections: Mapping[str, OfficialSection]) 
         local_sections = np.asarray([local_names[index] for index in codes])
         local_donors = np.asarray([sections[value].donor_id for value in local_sections])
         local_disease = np.asarray([sections[value].disease_state for value in local_sections])
+        local_sites = np.asarray(["lung"] * rows)
+        local_batches = local_sections.copy()
+        local_hescape_patients = np.asarray(
+            [sections[value].hescape_patient_id for value in local_sections]
+        )
         coordinates = np.asarray(table["cell_coords"].to_pylist(), dtype=np.float64).reshape(
             rows, 2
         )
@@ -489,6 +581,9 @@ def _read_rows(shards: Sequence[Path], sections: Mapping[str, OfficialSection]) 
         section_values.append(local_sections)
         donor_values.append(local_donors)
         disease_values.append(local_disease)
+        site_values.append(local_sites)
+        batch_values.append(local_batches)
+        hescape_patient_values.append(local_hescape_patients)
         coordinate_values.append(coordinates)
         count_values.append(counts)
         digest, verification = _verified_content_sha256(shard)
@@ -498,6 +593,9 @@ def _read_rows(shards: Sequence[Path], sections: Mapping[str, OfficialSection]) 
         section_ids=np.concatenate(section_values),
         donor_ids=np.concatenate(donor_values),
         disease_states=np.concatenate(disease_values),
+        site_ids=np.concatenate(site_values),
+        batch_ids=np.concatenate(batch_values),
+        hescape_patient_ids=np.concatenate(hescape_patient_values),
         coordinates=np.concatenate(coordinate_values),
         counts=np.concatenate(count_values),
         shard_sha256=tuple(shard_hashes),
@@ -753,6 +851,141 @@ def _supported_strata_mask(
     return retained
 
 
+def _coverage_tables(
+    donor_ids: np.ndarray,
+    section_ids: np.ndarray,
+    disease_states: np.ndarray,
+    site_ids: np.ndarray,
+    batch_ids: np.ndarray,
+    labels: np.ndarray,
+    nonzero_library: np.ndarray,
+    pools: SpatialPools,
+    retained: np.ndarray,
+    *,
+    num_niches: int,
+) -> Tuple[Sequence[Mapping[str, object]], Sequence[Mapping[str, object]]]:
+    donors = np.asarray(donor_ids).astype(str)
+    sections = np.asarray(section_ids).astype(str)
+    diseases = np.asarray(disease_states).astype(str)
+    sites = np.asarray(site_ids).astype(str)
+    batches = np.asarray(batch_ids).astype(str)
+    label_values = np.asarray(labels, dtype=np.int64)
+    nonzero = np.asarray(nonzero_library, dtype=np.bool_)
+    kept = np.asarray(retained, dtype=np.bool_)
+    if (
+        not (
+            donors.shape
+            == sections.shape
+            == diseases.shape
+            == sites.shape
+            == batches.shape
+            == label_values.shape
+            == nonzero.shape
+            == kept.shape
+            == pools.roles.shape
+            == pools.guard_pass.shape
+        )
+        or num_niches <= 0
+    ):
+        raise ValueError("HESCAPE coverage inputs are misaligned")
+    coverage = []
+    exclusions = []
+    for section in sorted(set(sections.tolist())):
+        section_mask = sections == section
+        identities = {
+            "donor_id": sorted(set(donors[section_mask].tolist())),
+            "disease_state": sorted(set(diseases[section_mask].tolist())),
+            "site_id": sorted(set(sites[section_mask].tolist())),
+            "batch_id": sorted(set(batches[section_mask].tolist())),
+        }
+        if any(len(values) != 1 for values in identities.values()):
+            raise ValueError("a HESCAPE section has ambiguous audit metadata")
+        identity = {name: values[0] for name, values in identities.items()}
+        for type_index in range(num_niches):
+            labeled = section_mask & nonzero & (label_values == type_index)
+            guarded = labeled & pools.guard_pass
+            coverage.append(
+                {
+                    **identity,
+                    "section_id": section,
+                    "type_index": type_index,
+                    "labeled_before_guard": int(np.count_nonzero(labeled)),
+                    "guard_excluded": int(np.count_nonzero(labeled & ~pools.guard_pass)),
+                    "unsupported_stratum_excluded": int(np.count_nonzero(guarded & ~kept)),
+                    "retained_reference": int(
+                        np.count_nonzero(kept & labeled & (pools.roles == "reference"))
+                    ),
+                    "retained_evaluation": int(
+                        np.count_nonzero(kept & labeled & (pools.roles == "evaluation"))
+                    ),
+                }
+            )
+        partition = {
+            "release": int(np.count_nonzero(section_mask)),
+            "zero_library_excluded": int(np.count_nonzero(section_mask & ~nonzero)),
+            "ambiguous_niche_excluded": int(
+                np.count_nonzero(section_mask & nonzero & (label_values < 0))
+            ),
+            "guard_excluded": int(
+                np.count_nonzero(section_mask & nonzero & (label_values >= 0) & ~pools.guard_pass)
+            ),
+            "unsupported_stratum_excluded": int(
+                np.count_nonzero(
+                    section_mask & nonzero & (label_values >= 0) & pools.guard_pass & ~kept
+                )
+            ),
+            "retained": int(np.count_nonzero(section_mask & kept)),
+        }
+        if partition["release"] != sum(
+            value for name, value in partition.items() if name != "release"
+        ):
+            raise RuntimeError("HESCAPE section exclusions do not partition release rows")
+        exclusions.append({**identity, "section_id": section, **partition})
+    return coverage, exclusions
+
+
+def _coverage_source_arrays(
+    coverage: Sequence[Mapping[str, object]], exclusions: Sequence[Mapping[str, object]]
+) -> Mapping[str, np.ndarray]:
+    coverage_string_fields = ("donor_id", "section_id", "disease_state", "site_id", "batch_id")
+    coverage_integer_fields = (
+        "type_index",
+        "labeled_before_guard",
+        "guard_excluded",
+        "unsupported_stratum_excluded",
+        "retained_reference",
+        "retained_evaluation",
+    )
+    exclusion_string_fields = coverage_string_fields
+    exclusion_integer_fields = (
+        "release",
+        "zero_library_excluded",
+        "ambiguous_niche_excluded",
+        "guard_excluded",
+        "unsupported_stratum_excluded",
+        "retained",
+    )
+    result = {
+        **{
+            "coverage_" + field: np.asarray([row[field] for row in coverage])
+            for field in coverage_string_fields
+        },
+        **{
+            "coverage_" + field: np.asarray([row[field] for row in coverage], dtype=np.int64)
+            for field in coverage_integer_fields
+        },
+        **{
+            "exclusion_" + field: np.asarray([row[field] for row in exclusions])
+            for field in exclusion_string_fields
+        },
+        **{
+            "exclusion_" + field: np.asarray([row[field] for row in exclusions], dtype=np.int64)
+            for field in exclusion_integer_fields
+        },
+    }
+    return result
+
+
 def _load_uni2(model_dir: Path, checkpoint: Path):
     try:
         import timm
@@ -808,26 +1041,35 @@ def _load_uni2(model_dir: Path, checkpoint: Path):
     return model
 
 
-def _stain_statistics(rgb: np.ndarray) -> np.ndarray:
+def _stain_statistics(rgb: np.ndarray, inclusion_mask: Optional[np.ndarray] = None) -> np.ndarray:
     values = np.asarray(rgb, dtype=np.float64)
     if values.ndim != 3 or values.shape[2] != 3 or not np.isfinite(values).all():
         raise ValueError("stain statistics require a finite RGB image")
     if values.max() > 1.0 or values.min() < 0.0:
         raise ValueError("stain-statistics RGB values must be scaled to [0,1]")
-    rgb_mean = values.mean(axis=(0, 1), dtype=np.float64)
-    rgb_variance = values.var(axis=(0, 1), dtype=np.float64)
+    mask = (
+        np.ones(values.shape[:2], dtype=np.bool_)
+        if inclusion_mask is None
+        else np.asarray(inclusion_mask, dtype=np.bool_)
+    )
+    if mask.shape != values.shape[:2] or not mask.any():
+        raise ValueError("stain-statistics inclusion mask is empty or misaligned")
+    pixels = values[mask]
+    rgb_mean = pixels.mean(axis=0, dtype=np.float64)
+    rgb_variance = pixels.var(axis=0, dtype=np.float64)
     optical_density = -np.log(np.maximum(values, 1.0 / 255.0))
     stain_vectors = np.asarray(((0.65, 0.70, 0.29), (0.07, 0.99, 0.11)), dtype=np.float64)
     stain_vectors /= np.linalg.norm(stain_vectors, axis=1, keepdims=True)
-    stains = optical_density @ stain_vectors.T
+    stains = (optical_density @ stain_vectors.T)[mask]
     stain_summary = np.asarray(
-        [stains[..., 0].mean(), stains[..., 0].var(), stains[..., 1].mean(), stains[..., 1].var()]
+        [stains[:, 0].mean(), stains[:, 0].var(), stains[:, 1].mean(), stains[:, 1].var()]
     )
     grayscale = values @ np.asarray((0.299, 0.587, 0.114))
-    horizontal = np.diff(grayscale, axis=1, prepend=grayscale[:, :1])
-    vertical = np.diff(grayscale, axis=0, prepend=grayscale[:1, :])
-    edge_density = float(np.mean(np.hypot(horizontal, vertical) >= 0.1))
-    histogram = np.histogram(grayscale, bins=256, range=(0.0, 1.0))[0].astype(np.float64)
+    horizontal = np.abs(np.diff(grayscale, axis=1))[mask[:, 1:] & mask[:, :-1]]
+    vertical = np.abs(np.diff(grayscale, axis=0))[mask[1:, :] & mask[:-1, :]]
+    edges = np.concatenate((horizontal, vertical))
+    edge_density = float(np.mean(edges >= 0.1)) if len(edges) else 0.0
+    histogram = np.histogram(grayscale[mask], bins=256, range=(0.0, 1.0))[0].astype(np.float64)
     probabilities = histogram[histogram > 0] / histogram.sum()
     entropy = float(-np.sum(probabilities * np.log2(probabilities)) / 8.0)
     result = np.concatenate((rgb_mean, rgb_variance, stain_summary, (edge_density, entropy)))
@@ -836,7 +1078,7 @@ def _stain_statistics(rgb: np.ndarray) -> np.ndarray:
     return result
 
 
-def _preprocess_image(encoded: bytes, *, crop_pixels: int, resize_pixels: int):
+def _preprocess_image(encoded: bytes, *, crop_protocol: Mapping[str, object]):
     try:
         import torch
         from PIL import Image
@@ -845,14 +1087,59 @@ def _preprocess_image(encoded: bytes, *, crop_pixels: int, resize_pixels: int):
     with Image.open(io.BytesIO(encoded)) as image:
         image = image.convert("RGB")
         width, height = image.size
-        if width != 1024 or height != 1024 or crop_pixels != 512 or resize_pixels != 224:
-            raise ValueError("HESCAPE image/crop identity differs from pinned 1024->512->224")
+        crop_pixels = int(crop_protocol["source_pixels"])
+        resize_pixels = int(crop_protocol["resize_pixels"])
+        structure = str(crop_protocol["structure"])
+        inner_pixels = int(crop_protocol["inner_mask_source_pixels"])
+        masked_center_fill = str(crop_protocol["masked_center_fill"])
+        stain_inclusion_mask = str(crop_protocol["stain_inclusion_mask"])
+        if (
+            width != 1024
+            or height != 1024
+            or crop_pixels not in {256, 512}
+            or resize_pixels != 224
+            or structure not in {"center_square", "center_annulus"}
+            or (structure == "center_square" and inner_pixels != 0)
+            or (structure == "center_annulus" and inner_pixels != 256)
+            or (
+                structure == "center_square"
+                and (masked_center_fill, stain_inclusion_mask) != ("none", "all_resized_pixels")
+            )
+            or (
+                structure == "center_annulus"
+                and (masked_center_fill, stain_inclusion_mask)
+                != (
+                    "rounded_imagenet_mean_rgb",
+                    "strict_outer_annulus_after_bilinear_resize",
+                )
+            )
+        ):
+            raise ValueError("HESCAPE image/crop identity differs from the structured pin")
         left = (width - crop_pixels) // 2
         top = (height - crop_pixels) // 2
         image = image.crop((left, top, left + crop_pixels, top + crop_pixels))
+        mask = np.ones((crop_pixels, crop_pixels), dtype=np.uint8)
+        if structure == "center_annulus":
+            inner_left = (crop_pixels - inner_pixels) // 2
+            inner_top = (crop_pixels - inner_pixels) // 2
+            image_array = np.asarray(image, dtype=np.uint8).copy()
+            fill = np.rint(np.asarray(UNI2_MEAN) * 255.0).astype(np.uint8)
+            image_array[
+                inner_top : inner_top + inner_pixels,
+                inner_left : inner_left + inner_pixels,
+            ] = fill
+            mask[
+                inner_top : inner_top + inner_pixels,
+                inner_left : inner_left + inner_pixels,
+            ] = 0
+            image = Image.fromarray(image_array, mode="RGB")
         image = image.resize((resize_pixels, resize_pixels), resample=Image.Resampling.BILINEAR)
+        mask_image = Image.fromarray(mask * 255, mode="L").resize(
+            (resize_pixels, resize_pixels), resample=Image.Resampling.BILINEAR
+        )
+        resized_mask = np.asarray(mask_image, dtype=np.uint8) == 255
         values = np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 255.0
-    stain_statistics = _stain_statistics(values.transpose(1, 2, 0))
+    stain_statistics = _stain_statistics(values.transpose(1, 2, 0), resized_mask)
     tensor = torch.from_numpy(values)
     mean = torch.tensor(UNI2_MEAN, dtype=torch.float32)[:, None, None]
     std = torch.tensor(UNI2_STD, dtype=torch.float32)[:, None, None]
@@ -866,8 +1153,8 @@ def _extract_evaluation_features(
     accepted_roles: np.ndarray,
     model_dir: Path,
     *,
-    crop_pixels: int,
-    resize_pixels: int,
+    crop_role: str,
+    crop_protocol: Mapping[str, object],
     batch_size: int,
 ) -> Tuple[np.ndarray, np.ndarray, Mapping[str, object], str]:
     try:
@@ -939,8 +1226,7 @@ def _extract_evaluation_features(
                             raise ValueError("HESCAPE image payload is not embedded one-to-one")
                         tensor, stain_row = _preprocess_image(
                             image_value["bytes"],
-                            crop_pixels=crop_pixels,
-                            resize_pixels=resize_pixels,
+                            crop_protocol=crop_protocol,
                         )
                         tensors.append(tensor)
                         stain_rows.append(stain_row)
@@ -976,6 +1262,8 @@ def _extract_evaluation_features(
         "inference_dtype": "float16",
         "storage_dtype": "float32",
         "direct_feature_width": FEATURE_WIDTH,
+        "crop_role": crop_role,
+        "crop_protocol_sha256": _canonical_sha256(crop_protocol),
     }
     return features, stain_features, device_evidence, checkpoint_sha256
 
@@ -1005,21 +1293,84 @@ def _validate_source_payload(payload: Mapping[str, object]) -> None:
         "donor_ids",
         "section_ids",
         "disease_states",
+        "site_ids",
+        "batch_ids",
+        "hescape_patient_ids",
         "block_ids",
         "roi_ids",
         "pool_roles",
         "type_labels",
+        "gene_ids",
+        "type_names",
+        "type_marker_gene_ids",
         "frozen_features",
+        "frozen_feature_names",
         "stain_features",
         "stain_feature_names",
         "composition_features",
         "composition_feature_names",
         "molecular_targets",
         "coordinate_features",
+        "coordinate_feature_names",
         "technical_covariates",
+        "technical_covariate_names",
         "registration_is_one_to_one",
+        "crop_role",
+        "crop_structure",
+        "crop_source_pixels",
+        "crop_inner_mask_source_pixels",
+        "crop_masked_center_fill",
+        "crop_stain_inclusion_mask",
+        "crop_physical_width_um",
+        "crop_resize_pixels",
+        "crop_protocol_sha256",
+        "ordered_input_gene_schema_sha256",
+        "ordered_target_gene_schema_sha256",
+        "ordered_frozen_feature_schema_sha256",
+        "ordered_coordinate_schema_sha256",
+        "ordered_stain_schema_sha256",
+        "ordered_composition_schema_sha256",
+        "ordered_technical_schema_sha256",
+        "ordered_metadata_schema_sha256",
+        "source_schema_field_order_sha256",
     }
-    if set(payload) != required or np.asarray(payload["schema_version"]).item() != SOURCE_SCHEMA:
+    coverage_fields = {
+        "coverage_" + name
+        for name in (
+            "donor_id",
+            "section_id",
+            "disease_state",
+            "site_id",
+            "batch_id",
+            "type_index",
+            "labeled_before_guard",
+            "guard_excluded",
+            "unsupported_stratum_excluded",
+            "retained_reference",
+            "retained_evaluation",
+        )
+    }
+    exclusion_fields = {
+        "exclusion_" + name
+        for name in (
+            "donor_id",
+            "section_id",
+            "disease_state",
+            "site_id",
+            "batch_id",
+            "release",
+            "zero_library_excluded",
+            "ambiguous_niche_excluded",
+            "guard_excluded",
+            "unsupported_stratum_excluded",
+            "retained",
+        )
+    }
+    expected_fields = required | coverage_fields | exclusion_fields
+    if (
+        set(payload) != expected_fields
+        or np.asarray(payload["schema_version"]).item() != SOURCE_SCHEMA
+    ):
         raise ValueError("HESCAPE regional source schema is incompatible with preparation")
     observations = np.asarray(payload["observation_ids"]).astype(str)
     rows = len(observations)
@@ -1029,6 +1380,9 @@ def _validate_source_payload(payload: Mapping[str, object]) -> None:
         "donor_ids",
         "section_ids",
         "disease_states",
+        "site_ids",
+        "batch_ids",
+        "hescape_patient_ids",
         "block_ids",
         "roi_ids",
         "pool_roles",
@@ -1049,13 +1403,36 @@ def _validate_source_payload(payload: Mapping[str, object]) -> None:
         if matrix.shape != (rows, width) or not np.isfinite(matrix).all():
             raise ValueError("HESCAPE regional source %s is malformed" % name)
     targets = np.asarray(payload["molecular_targets"])
+    gene_ids = tuple(np.asarray(payload["gene_ids"]).astype(str))
+    type_names = tuple(np.asarray(payload["type_names"]).astype(str))
+    marker_gene_ids = tuple(np.asarray(payload["type_marker_gene_ids"]).astype(str))
     if (
         targets.ndim != 2
         or targets.shape[0] != rows
-        or not targets.shape[1]
+        or targets.shape[1] != len(gene_ids)
         or not np.isfinite(targets).all()
+        or not gene_ids
+        or any(not gene_id.strip() for gene_id in gene_ids)
+        or len(set(gene_ids)) != len(gene_ids)
+        or not marker_gene_ids
+        or any(not marker_gene_id.strip() for marker_gene_id in marker_gene_ids)
+        or len(set(marker_gene_ids)) != len(marker_gene_ids)
+        or set(gene_ids) & set(marker_gene_ids)
+        or type_names != TYPE_NAMES
     ):
-        raise ValueError("HESCAPE regional molecular targets are malformed")
+        raise ValueError("HESCAPE regional target or RNA-only label schema is malformed")
+    fixed_name_vectors = {
+        "frozen_feature_names": FROZEN_FEATURE_NAMES,
+        "coordinate_feature_names": COORDINATE_FEATURE_NAMES,
+        "stain_feature_names": STAIN_FEATURE_NAMES,
+        "composition_feature_names": COMPOSITION_FEATURE_NAMES,
+        "technical_covariate_names": TECHNICAL_COVARIATE_NAMES,
+    }
+    if any(
+        tuple(np.asarray(payload[name]).astype(str)) != expected
+        for name, expected in fixed_name_vectors.items()
+    ):
+        raise ValueError("HESCAPE regional source feature names differ from the frozen protocol")
     roles = np.asarray(payload["pool_roles"]).astype(str)
     if set(roles.tolist()) != {"reference", "evaluation"}:
         raise ValueError("HESCAPE regional source requires reference and evaluation pools")
@@ -1063,14 +1440,194 @@ def _validate_source_payload(payload: Mapping[str, object]) -> None:
         np.asarray(payload["stain_features"])[roles == "reference"]
     ):
         raise ValueError("reference-pool images must remain unused in source observations")
-    if (
-        tuple(np.asarray(payload["stain_feature_names"]).astype(str)) != STAIN_FEATURE_NAMES
-        or tuple(np.asarray(payload["composition_feature_names"]).astype(str))
-        != COMPOSITION_FEATURE_NAMES
-    ):
-        raise ValueError("HESCAPE regional source feature names differ from the frozen protocol")
+    type_labels = np.asarray(payload["type_labels"], dtype=np.int64)
+    if np.any(type_labels < 0) or np.any(type_labels >= len(type_names)):
+        raise ValueError("HESCAPE regional source labels exceed the frozen RNA-only ontology")
     if not np.asarray(payload["registration_is_one_to_one"], dtype=np.bool_).all():
         raise ValueError("HESCAPE released patch/expression pairing is not one-to-one")
+    crop_role = str(np.asarray(payload["crop_role"]).item())
+    if crop_role not in CROP_PROTOCOLS:
+        raise ValueError("HESCAPE regional source crop role is unsupported")
+    crop = CROP_PROTOCOLS[crop_role]
+    crop_bindings = {
+        "crop_structure": crop["structure"],
+        "crop_source_pixels": crop["source_pixels"],
+        "crop_inner_mask_source_pixels": crop["inner_mask_source_pixels"],
+        "crop_masked_center_fill": crop["masked_center_fill"],
+        "crop_stain_inclusion_mask": crop["stain_inclusion_mask"],
+        "crop_physical_width_um": crop["physical_width_um"],
+        "crop_resize_pixels": crop["resize_pixels"],
+        "crop_protocol_sha256": _canonical_sha256(crop),
+    }
+    if any(np.asarray(payload[name]).item() != value for name, value in crop_bindings.items()):
+        raise ValueError("HESCAPE regional source crop fields differ from the structured pin")
+    for prefix, expected_rows in (
+        ("coverage_", EXPECTED_SECTIONS * 4),
+        ("exclusion_", EXPECTED_SECTIONS),
+    ):
+        arrays = [np.asarray(payload[name]) for name in sorted(payload) if name.startswith(prefix)]
+        if any(array.shape != (expected_rows,) for array in arrays):
+            raise ValueError("HESCAPE regional source coverage audit is misaligned")
+    ordered_sections = tuple(sorted(SECTION_TO_TRUE_DONOR))
+    expected_coverage_keys = tuple(
+        (section, type_index) for section in ordered_sections for type_index in range(4)
+    )
+    actual_coverage_keys = tuple(
+        zip(
+            np.asarray(payload["coverage_section_id"]).astype(str),
+            np.asarray(payload["coverage_type_index"], dtype=np.int64).tolist(),
+        )
+    )
+    exclusion_sections = tuple(np.asarray(payload["exclusion_section_id"]).astype(str))
+    if actual_coverage_keys != expected_coverage_keys or exclusion_sections != ordered_sections:
+        raise ValueError("HESCAPE regional coverage does not enumerate each section/niche once")
+    expected_coverage_donors = tuple(
+        SECTION_TO_TRUE_DONOR[section] for section, _ in expected_coverage_keys
+    )
+    expected_exclusion_donors = tuple(
+        SECTION_TO_TRUE_DONOR[section] for section in ordered_sections
+    )
+    if (
+        tuple(np.asarray(payload["coverage_donor_id"]).astype(str)) != expected_coverage_donors
+        or tuple(np.asarray(payload["exclusion_donor_id"]).astype(str)) != expected_exclusion_donors
+        or tuple(np.asarray(payload["coverage_batch_id"]).astype(str))
+        != tuple(section for section, _ in expected_coverage_keys)
+        or tuple(np.asarray(payload["exclusion_batch_id"]).astype(str)) != ordered_sections
+        or set(np.asarray(payload["coverage_site_id"]).astype(str).tolist()) != {"lung"}
+        or set(np.asarray(payload["exclusion_site_id"]).astype(str).tolist()) != {"lung"}
+    ):
+        raise ValueError("HESCAPE regional coverage metadata differs from the cohort identity")
+    exclusion_diseases = tuple(np.asarray(payload["exclusion_disease_state"]).astype(str))
+    expected_coverage_diseases = tuple(disease for disease in exclusion_diseases for _ in range(4))
+    if (
+        not set(exclusion_diseases) <= {"healthy", "diseased"}
+        or tuple(np.asarray(payload["coverage_disease_state"]).astype(str))
+        != expected_coverage_diseases
+    ):
+        raise ValueError("HESCAPE regional coverage disease metadata is inconsistent")
+    coverage_labeled = np.asarray(payload["coverage_labeled_before_guard"], dtype=np.int64)
+    coverage_guard = np.asarray(payload["coverage_guard_excluded"], dtype=np.int64)
+    coverage_unsupported = np.asarray(
+        payload["coverage_unsupported_stratum_excluded"], dtype=np.int64
+    )
+    coverage_reference = np.asarray(payload["coverage_retained_reference"], dtype=np.int64)
+    coverage_evaluation = np.asarray(payload["coverage_retained_evaluation"], dtype=np.int64)
+    if not np.array_equal(
+        coverage_labeled,
+        coverage_guard + coverage_unsupported + coverage_reference + coverage_evaluation,
+    ):
+        raise ValueError("HESCAPE regional niche coverage counts do not partition labeled rows")
+    exclusion_release = np.asarray(payload["exclusion_release"], dtype=np.int64)
+    exclusion_zero = np.asarray(payload["exclusion_zero_library_excluded"], dtype=np.int64)
+    exclusion_ambiguous = np.asarray(payload["exclusion_ambiguous_niche_excluded"], dtype=np.int64)
+    exclusion_guard = np.asarray(payload["exclusion_guard_excluded"], dtype=np.int64)
+    exclusion_unsupported = np.asarray(
+        payload["exclusion_unsupported_stratum_excluded"], dtype=np.int64
+    )
+    exclusion_retained = np.asarray(payload["exclusion_retained"], dtype=np.int64)
+    if not np.array_equal(
+        exclusion_release,
+        exclusion_zero
+        + exclusion_ambiguous
+        + exclusion_guard
+        + exclusion_unsupported
+        + exclusion_retained,
+    ):
+        raise ValueError("HESCAPE regional section exclusions do not partition release rows")
+    for section_index in range(EXPECTED_SECTIONS):
+        niche_slice = slice(section_index * 4, (section_index + 1) * 4)
+        if (
+            coverage_guard[niche_slice].sum() != exclusion_guard[section_index]
+            or coverage_unsupported[niche_slice].sum() != exclusion_unsupported[section_index]
+            or coverage_reference[niche_slice].sum() + coverage_evaluation[niche_slice].sum()
+            != exclusion_retained[section_index]
+        ):
+            raise ValueError("HESCAPE regional niche and section coverage totals disagree")
+    row_sections = np.asarray(payload["section_ids"]).astype(str)
+    row_donors = np.asarray(payload["donor_ids"]).astype(str)
+    row_diseases = np.asarray(payload["disease_states"]).astype(str)
+    row_sites = np.asarray(payload["site_ids"]).astype(str)
+    row_batches = np.asarray(payload["batch_ids"]).astype(str)
+    disease_by_section = dict(zip(ordered_sections, exclusion_diseases))
+    if any(
+        section not in SECTION_TO_TRUE_DONOR
+        or donor != SECTION_TO_TRUE_DONOR[section]
+        or disease != disease_by_section[section]
+        or site != "lung"
+        or batch != section
+        for section, donor, disease, site, batch in zip(
+            row_sections, row_donors, row_diseases, row_sites, row_batches
+        )
+    ) or any(
+        not value.strip()
+        for value in np.asarray(payload["hescape_patient_ids"]).astype(str).tolist()
+    ):
+        raise ValueError("HESCAPE regional observation metadata differs from its section audit")
+    count_suffixes = (
+        "labeled_before_guard",
+        "guard_excluded",
+        "unsupported_stratum_excluded",
+        "retained_reference",
+        "retained_evaluation",
+        "release",
+        "zero_library_excluded",
+        "ambiguous_niche_excluded",
+        "retained",
+    )
+    if any(
+        np.any(np.asarray(value) < 0)
+        for name, value in payload.items()
+        if name.startswith(("coverage_", "exclusion_")) and name.endswith(count_suffixes)
+    ):
+        raise ValueError("HESCAPE regional source coverage counts cannot be negative")
+    bound_hashes = (
+        "crop_protocol_sha256",
+        "ordered_input_gene_schema_sha256",
+        "ordered_target_gene_schema_sha256",
+        "ordered_frozen_feature_schema_sha256",
+        "ordered_coordinate_schema_sha256",
+        "ordered_stain_schema_sha256",
+        "ordered_composition_schema_sha256",
+        "ordered_technical_schema_sha256",
+        "ordered_metadata_schema_sha256",
+    )
+    if any(
+        not re.fullmatch(r"[0-9a-f]{64}", str(np.asarray(payload[name]).item()))
+        for name in bound_hashes
+    ):
+        raise ValueError("HESCAPE regional ordered schema hash is malformed")
+    fixed_schema_hashes = {
+        "ordered_frozen_feature_schema_sha256": _ordered_schema_sha256(
+            "uni2h_direct_features", FROZEN_FEATURE_NAMES
+        ),
+        "ordered_coordinate_schema_sha256": _ordered_schema_sha256(
+            "hescape_coordinate_features", COORDINATE_FEATURE_NAMES
+        ),
+        "ordered_stain_schema_sha256": _ordered_schema_sha256(
+            "hescape_stain_features", STAIN_FEATURE_NAMES
+        ),
+        "ordered_composition_schema_sha256": _ordered_schema_sha256(
+            "hescape_composition_features", COMPOSITION_FEATURE_NAMES
+        ),
+        "ordered_technical_schema_sha256": _ordered_schema_sha256(
+            "hescape_technical_covariates", TECHNICAL_COVARIATE_NAMES
+        ),
+        "ordered_metadata_schema_sha256": _ordered_schema_sha256(
+            "hescape_row_metadata", ROW_METADATA_NAMES
+        ),
+    }
+    if any(
+        str(np.asarray(payload[name]).item()) != expected
+        for name, expected in fixed_schema_hashes.items()
+    ):
+        raise ValueError("HESCAPE regional ordered schema differs from the frozen field order")
+    if str(np.asarray(payload["ordered_target_gene_schema_sha256"]).item()) != (
+        _ordered_schema_sha256("hescape_target_genes", gene_ids)
+    ):
+        raise ValueError("HESCAPE regional target gene order differs from its bound schema")
+    source_field_hash = _ordered_schema_sha256("hescape_source_fields", tuple(payload))
+    if str(np.asarray(payload["source_schema_field_order_sha256"]).item()) != source_field_hash:
+        raise ValueError("HESCAPE regional source field order is not hash-bound")
 
 
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -1099,6 +1656,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--source-output", type=Path, required=True)
     parser.add_argument("--plan-output", type=Path, required=True)
+    parser.add_argument(
+        "--crop-role",
+        choices=tuple(CROP_PROTOCOLS),
+        default="target_matched_55um",
+        help="Prespecified regional crop; target-matched 55-um is primary",
+    )
     parser.add_argument("--batch-size", type=int, default=4)
     args = parser.parse_args(argv)
 
@@ -1115,7 +1678,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("HESCAPE source and plan outputs must be new distinct paths")
 
     protocol = _read_json(protocol_path)
-    _validate_protocol(protocol)
+    crop_role = str(args.crop_role)
+    crop_protocol = _resolve_crop_protocol(protocol, crop_role)
     if _git_revision(code_root) != OFFICIAL_CODE_REVISION:
         raise ValueError("official HESCAPE code revision differs from the pinned checkout")
     metadata_dir = code_root / "data" / DATASET_CONFIG
@@ -1199,14 +1763,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if len(donors) < 2:
             raise ValueError("every dominant niche needs at least two development donors")
 
+    coverage, exclusions = _coverage_tables(
+        rows.donor_ids,
+        rows.section_ids,
+        rows.disease_states,
+        rows.site_ids,
+        rows.batch_ids,
+        niche_fit.labels,
+        nonzero_library,
+        pools,
+        accepted,
+        num_niches=len(marker_groups),
+    )
+
     features, stain_features, cuda_evidence, checkpoint_sha256 = _extract_evaluation_features(
         shards,
         rows,
         accepted_indices,
         accepted_roles,
         model_dir,
-        crop_pixels=int(protocol["primary_crop_source_pixels"]),
-        resize_pixels=int(protocol["primary_resize_pixels"]),
+        crop_role=crop_role,
+        crop_protocol=crop_protocol,
         batch_size=args.batch_size,
     )
     marker_set = set(niche_fit.marker_gene_ids)
@@ -1217,17 +1794,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if set(evaluation_genes) & marker_set or len(evaluation_genes) + len(marker_set) != len(genes):
         raise RuntimeError("dominant-niche markers were not exactly removed from RNA targets")
 
+    ordered_schema_hashes = {
+        "input_gene": _ordered_schema_sha256("hescape_input_genes", genes),
+        "target_gene": _ordered_schema_sha256("hescape_target_genes", evaluation_genes),
+        "frozen_feature": _ordered_schema_sha256("uni2h_direct_features", FROZEN_FEATURE_NAMES),
+        "coordinate": _ordered_schema_sha256(
+            "hescape_coordinate_features", COORDINATE_FEATURE_NAMES
+        ),
+        "stain": _ordered_schema_sha256("hescape_stain_features", STAIN_FEATURE_NAMES),
+        "composition": _ordered_schema_sha256(
+            "hescape_composition_features", COMPOSITION_FEATURE_NAMES
+        ),
+        "technical": _ordered_schema_sha256(
+            "hescape_technical_covariates", TECHNICAL_COVARIATE_NAMES
+        ),
+        "metadata": _ordered_schema_sha256("hescape_row_metadata", ROW_METADATA_NAMES),
+    }
+
     source_payload = {
         "schema_version": np.asarray(SOURCE_SCHEMA),
         "observation_ids": _observation_ids(rows.section_ids, rows.coordinates)[accepted],
         "donor_ids": accepted_donors,
         "section_ids": rows.section_ids[accepted],
         "disease_states": rows.disease_states[accepted],
+        "site_ids": rows.site_ids[accepted],
+        "batch_ids": rows.batch_ids[accepted],
+        "hescape_patient_ids": rows.hescape_patient_ids[accepted],
         "block_ids": pools.block_ids[accepted],
         "roi_ids": pools.roi_ids[accepted],
         "pool_roles": accepted_roles,
         "type_labels": accepted_labels,
+        "gene_ids": np.asarray(evaluation_genes),
+        "type_names": np.asarray(tuple(marker_groups)),
+        "type_marker_gene_ids": np.asarray(niche_fit.marker_gene_ids),
         "frozen_features": features,
+        "frozen_feature_names": np.asarray(FROZEN_FEATURE_NAMES),
         "stain_features": stain_features,
         "stain_feature_names": np.asarray(STAIN_FEATURE_NAMES),
         "composition_features": niche_fit.scores[accepted].astype(np.float32),
@@ -1236,9 +1837,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             np.float32
         ),
         "coordinate_features": controls[accepted].astype(np.float32),
+        "coordinate_feature_names": np.asarray(COORDINATE_FEATURE_NAMES),
         "technical_covariates": log_library[accepted].astype(np.float32),
+        "technical_covariate_names": np.asarray(TECHNICAL_COVARIATE_NAMES),
         "registration_is_one_to_one": np.ones(len(accepted_indices), dtype=np.bool_),
+        "crop_role": np.asarray(crop_role),
+        "crop_structure": np.asarray(crop_protocol["structure"]),
+        "crop_source_pixels": np.asarray(crop_protocol["source_pixels"], dtype=np.int64),
+        "crop_inner_mask_source_pixels": np.asarray(
+            crop_protocol["inner_mask_source_pixels"], dtype=np.int64
+        ),
+        "crop_masked_center_fill": np.asarray(crop_protocol["masked_center_fill"]),
+        "crop_stain_inclusion_mask": np.asarray(crop_protocol["stain_inclusion_mask"]),
+        "crop_physical_width_um": np.asarray(crop_protocol["physical_width_um"], dtype=np.float64),
+        "crop_resize_pixels": np.asarray(crop_protocol["resize_pixels"], dtype=np.int64),
+        "crop_protocol_sha256": np.asarray(_canonical_sha256(crop_protocol)),
+        "ordered_input_gene_schema_sha256": np.asarray(ordered_schema_hashes["input_gene"]),
+        "ordered_target_gene_schema_sha256": np.asarray(ordered_schema_hashes["target_gene"]),
+        "ordered_frozen_feature_schema_sha256": np.asarray(ordered_schema_hashes["frozen_feature"]),
+        "ordered_coordinate_schema_sha256": np.asarray(ordered_schema_hashes["coordinate"]),
+        "ordered_stain_schema_sha256": np.asarray(ordered_schema_hashes["stain"]),
+        "ordered_composition_schema_sha256": np.asarray(ordered_schema_hashes["composition"]),
+        "ordered_technical_schema_sha256": np.asarray(ordered_schema_hashes["technical"]),
+        "ordered_metadata_schema_sha256": np.asarray(ordered_schema_hashes["metadata"]),
+        **_coverage_source_arrays(coverage, exclusions),
     }
+    source_payload["source_schema_field_order_sha256"] = np.asarray(
+        _ordered_schema_sha256(
+            "hescape_source_fields",
+            tuple(source_payload) + ("source_schema_field_order_sha256",),
+        )
+    )
     _validate_source_payload(source_payload)
     _atomic_npz(source_output, source_payload)
     source_sha256 = _sha256_file(source_output)
@@ -1274,12 +1903,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "guard_distance": "chebyshev_nonoverlapping_512px_footprints",
         "image_footprint_source_pixels": 512,
         "reference_images_consumed": False,
-        "minimum_reference_per_donor_niche": protocol[
-            "minimum_reference_per_donor_niche"
-        ],
-        "minimum_evaluation_per_donor_niche": protocol[
-            "minimum_evaluation_per_donor_niche"
-        ],
+        "minimum_reference_per_donor_niche": protocol["minimum_reference_per_donor_niche"],
+        "minimum_evaluation_per_donor_niche": protocol["minimum_evaluation_per_donor_niche"],
     }
     plan = {
         "schema": PLAN_SCHEMA,
@@ -1291,7 +1916,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "gene_ids": list(evaluation_genes),
         "type_marker_gene_ids": list(niche_fit.marker_gene_ids),
         "technical_covariate_names": ["log1p_library_size"],
-        "feature_space_id": "uni2h_direct_1536_hescape_center512_resize224_fp16_v1",
+        "frozen_feature_names": list(FROZEN_FEATURE_NAMES),
+        "feature_space_id": "uni2h_direct_1536_hescape_%s_resize224_fp16_v1" % crop_role,
         "feature_checkpoint_sha256": checkpoint_sha256,
         "molecular_space_id": "hescape_log1p_cpm10000_non_niche_marker_genes_v1",
         "label_source_sha256": _canonical_sha256(label_identity),
@@ -1299,7 +1925,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "exclusion_policy_sha256": _canonical_sha256(exclusion_identity),
         "registration_method": "released_one_to_one_histology_pseudospot_pair",
         "encoder_name": MODEL_REPO,
-        "crop_scale": "full_context",
+        "crop_scale": crop_protocol["crop_scale"],
         "cohort_id": "HESCAPE",
         "cohort_release": DATASET_CONFIG,
         "assay": "Xenium",
@@ -1307,6 +1933,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "target_construction": "sum_pooled_xenium_transcripts",
         "reference_mode": "simulated_spatially_disjoint_unpaired_rna",
         "scientific_scope": "regional_pseudospot_exploratory",
+        "authorization_ceiling": protocol["authorization_ceiling"],
         "authorizes_nucleus_claim": False,
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
@@ -1323,10 +1950,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "source_study": "GSE250346",
         "source_annotation_sha256": SOURCE_ANNOTATION_SHA256,
         "section_to_true_donor": true_donor_map,
+        "site_definition": protocol["site_definition"],
+        "batch_definition": protocol["batch_definition"],
+        "primary_crop_role": protocol["primary_crop_role"],
+        "crop_role": crop_role,
+        "crop_protocol": crop_protocol,
+        "crop_protocol_sha256": _canonical_sha256(crop_protocol),
+        "is_primary_regional_endpoint": crop_role == protocol["primary_crop_role"],
+        "analysis_role": (
+            "primary_regional_target_matched"
+            if crop_role == protocol["primary_crop_role"]
+            else "prespecified_context_sensitivity_only"
+        ),
         "image_protocol": {
             "source_size_pixels": 1024,
-            "center_crop_pixels": 512,
-            "resize_pixels": 224,
+            "center_crop_pixels": crop_protocol["source_pixels"],
+            "inner_mask_source_pixels": crop_protocol["inner_mask_source_pixels"],
+            "masked_center_fill": crop_protocol["masked_center_fill"],
+            "stain_inclusion_mask": crop_protocol["stain_inclusion_mask"],
+            "structure": crop_protocol["structure"],
+            "physical_width_um": crop_protocol["physical_width_um"],
+            "nominal_target_width_um": crop_protocol["nominal_target_width_um"],
+            "resize_pixels": crop_protocol["resize_pixels"],
+            "effective_model_mpp": crop_protocol["effective_model_mpp"],
             "interpolation": "PIL_bilinear",
             "mean": UNI2_MEAN,
             "std": UNI2_STD,
@@ -1338,7 +1984,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "composition_feature_names": list(COMPOSITION_FEATURE_NAMES),
         "stain_feature_names": list(STAIN_FEATURE_NAMES),
         "stain_protocol": {
-            "input": "same_deterministic_center512_resize224_RGB_as_UNI2-h",
+            "input": "same_structured_crop_and_resize_as_UNI2-h",
             "rgb_statistics": "channel_mean_and_variance",
             "hematoxylin_optical_density_vector": [0.65, 0.70, 0.29],
             "eosin_optical_density_vector": [0.07, 0.99, 0.11],
@@ -1354,20 +2000,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "overlap_criterion": "Chebyshev center distance >= 512 for opposite pools",
             "pool_assignment": "sha256_section_block_v1",
         },
-        "coordinate_feature_names": [
-            "section_normalized_x",
-            "section_normalized_y",
-            "section_normalized_x_squared",
-            "section_normalized_y_squared",
-            "section_normalized_xy",
-            "log1p_local_pseudospot_density_r512",
-            "normalized_distance_to_section_bounding_box",
+        "coordinate_feature_names": list(COORDINATE_FEATURE_NAMES),
+        "technical_covariate_names_ordered": list(TECHNICAL_COVARIATE_NAMES),
+        "ordered_schema_sha256": {
+            **ordered_schema_hashes,
+            "source_fields": str(
+                np.asarray(source_payload["source_schema_field_order_sha256"]).item()
+            ),
+        },
+        "expected_donor_section_niche_coverage": coverage,
+        "expected_section_exclusions": exclusions,
+        "coverage_schema_sha256": _canonical_sha256(
+            {
+                "coverage": coverage,
+                "exclusions": exclusions,
+            }
+        ),
+        "section_metadata": [
+            {
+                "section_id": section,
+                "true_donor_id": sections[section].donor_id,
+                "hescape_patient_id": sections[section].hescape_patient_id,
+                "disease_state": sections[section].disease_state,
+                "site_id": "lung",
+                "batch_id": section,
+                "official_hescape_split": sections[section].split,
+            }
+            for section in sorted(sections)
         ],
         "row_counts": {
             "release": EXPECTED_ROWS,
-            "zero_library_excluded": int((~nonzero_library).sum()),
-            "ambiguous_niche_excluded": int((niche_fit.labels < 0).sum()),
-            "opposite_pool_guard_excluded": int((~pools.guard_pass).sum()),
+            "zero_library_excluded": int(sum(row["zero_library_excluded"] for row in exclusions)),
+            "ambiguous_niche_excluded": int(
+                sum(row["ambiguous_niche_excluded"] for row in exclusions)
+            ),
+            "opposite_pool_guard_excluded": int(sum(row["guard_excluded"] for row in exclusions)),
             "unsupported_donor_niche_excluded": int(
                 np.count_nonzero(initially_eligible & ~supported)
             ),
@@ -1377,6 +2044,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         },
         "parquet_shards": shard_manifest,
     }
+    for name in (
+        "gene_ids",
+        "type_names",
+        "type_marker_gene_ids",
+        "frozen_feature_names",
+        "coordinate_feature_names",
+        "stain_feature_names",
+        "composition_feature_names",
+        "technical_covariate_names",
+    ):
+        if tuple(np.asarray(source_payload[name]).astype(str)) != tuple(
+            str(value) for value in plan[name]
+        ):
+            raise RuntimeError("HESCAPE source and plan ordered %s differ" % name)
     scientific_hashes = {
         plan["feature_checkpoint_sha256"],
         plan["label_source_sha256"],

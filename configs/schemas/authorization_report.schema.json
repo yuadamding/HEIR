@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HEIR authorization report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "gates", "evidence", "intrinsic_conclusion", "authorizations", "failed_or_missing_gates"],
+  "properties": {
+    "schema": {"const": "heir.authorization_report.v1"},
+    "gates": {"type": "object"},
+    "evidence": {"type": "object"},
+    "intrinsic_conclusion": {"enum": ["none", "nucleus", "cell", "context"]},
+    "authorizations": {"type": "object", "additionalProperties": {"type": "boolean"}},
+    "failed_or_missing_gates": {"type": "array", "items": {"pattern": "^G[0-9]$"}}
+  }
+}

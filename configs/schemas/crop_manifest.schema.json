@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HEIR physical crop and mask protocol",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "crop_set_id", "source_mpp", "padding", "primary_crop_id", "variants"
+  ],
+  "properties": {
+    "schema": {"const": "heir.crop_manifest.v1"},
+    "crop_set_id": {"type": "string", "minLength": 1},
+    "source_mpp": {"type": "number", "exclusiveMinimum": 0},
+    "padding": {"const": "white"},
+    "primary_crop_id": {"const": "crop_112um"},
+    "variants": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["crop_id", "role", "diameter_um", "inner_diameter_um", "mask_mode"],
+        "properties": {
+          "crop_id": {"type": "string", "minLength": 1},
+          "role": {"type": "string", "minLength": 1},
+          "diameter_um": {"type": "number", "exclusiveMinimum": 0},
+          "inner_diameter_um": {"type": "number", "minimum": 0},
+          "mask_mode": {
+            "enum": ["none", "nucleus", "cell", "context_ring", "target_removed", "blank"]
+          }
+        }
+      }
+    }
+  }
+}

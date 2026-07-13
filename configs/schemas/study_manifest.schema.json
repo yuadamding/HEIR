@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heir.invalid/schemas/study_manifest.schema.json",
+  "title": "HEIR locked study manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "study_id", "status", "hypothesis_ids", "git_commit",
+    "analysis_plan_sha256", "container_digest", "dataset", "partitions",
+    "observations", "encoder", "crop_protocols", "target_gene_panel_sha256",
+    "type_marker_panel_sha256", "technical_covariates", "controls",
+    "hyperparameter_grid", "randomization", "primary_endpoint", "secondary_endpoints",
+    "coverage_requirements", "decision_thresholds"
+  ],
+  "properties": {
+    "schema": {"const": "heir.study_manifest.v1"},
+    "study_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{2,127}$"},
+    "status": {"enum": ["draft", "locked", "opened"]},
+    "hypothesis_ids": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"enum": ["H-MEAS", "H-REGIONAL", "H-CELL", "H-INTRINSIC", "H-REF", "H-END2END", "H-COMP", "H-EXT"]}
+    },
+    "git_commit": {"type": "string"},
+    "analysis_plan_sha256": {"$ref": "#/$defs/sha256"},
+    "container_digest": {"type": "string"},
+    "dataset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "revision", "source_study", "source_manifest_sha256"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "source_study": {"type": "string", "minLength": 1},
+        "source_manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "partitions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["development_donors", "locked_test_donors", "external_test_donors", "split_manifest_sha256"],
+      "properties": {
+        "development_donors": {"$ref": "#/$defs/nonemptyStrings"},
+        "locked_test_donors": {"$ref": "#/$defs/nonemptyStrings"},
+        "external_test_donors": {"$ref": "#/$defs/strings"},
+        "split_manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "observations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["level", "registration_method", "target_variants", "broad_type_field", "fine_type_field"],
+      "properties": {
+        "level": {"type": "string", "minLength": 1},
+        "registration_method": {"type": "string", "minLength": 1},
+        "target_variants": {"$ref": "#/$defs/nonemptyStrings"},
+        "broad_type_field": {"type": "string", "minLength": 1},
+        "fine_type_field": {"type": "string", "minLength": 1}
+      }
+    },
+    "encoder": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_sha256", "feature_space_id", "checkpoint_sha256"],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "feature_space_id": {"type": "string", "minLength": 1},
+        "checkpoint_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "crop_protocols": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/sha256"}},
+    "target_gene_panel_sha256": {"$ref": "#/$defs/sha256"},
+    "type_marker_panel_sha256": {"$ref": "#/$defs/sha256"},
+    "technical_covariates": {"$ref": "#/$defs/strings"},
+    "controls": {"$ref": "#/$defs/nonemptyStrings"},
+    "hyperparameter_grid": {"type": "object", "minProperties": 1},
+    "randomization": {"type": "object", "minProperties": 1},
+    "primary_endpoint": {"type": "object", "minProperties": 1},
+    "secondary_endpoints": {"type": "array"},
+    "coverage_requirements": {"type": "object", "minProperties": 1},
+    "decision_thresholds": {"type": "object", "minProperties": 1},
+    "locked_at": {"type": "string", "format": "date-time"},
+    "opening": {"type": "object"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "nonemptyStrings": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  }
+}
+

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HEIR molecular reference bank",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "bank_id", "bank_role", "donor_ids", "observation_ids", "source_sample_ids", "assay", "institution", "disease_state", "broad_types", "fine_types", "ordered_gene_ids", "latent_model_sha256", "normalization_sha256", "bank_construction_sha256", "query_overlap_check"],
+  "properties": {
+    "schema": {"const": "heir.reference_bank.v1"},
+    "bank_id": {"type": "string", "minLength": 1},
+    "bank_role": {"enum": ["matched_donor", "wrong_donor", "hard_wrong_donor", "generic_atlas", "population_leave_query_donor_out"]},
+    "donor_ids": {"type": "array", "items": {"type": "string"}},
+    "observation_ids": {"type": "array", "items": {"type": "string"}},
+    "source_sample_ids": {"type": "array", "items": {"type": "string"}},
+    "assay": {"type": "string"},
+    "institution": {"type": "string"},
+    "disease_state": {"type": "array", "items": {"type": "string"}},
+    "broad_types": {"type": "array", "items": {"type": "string"}},
+    "fine_types": {"type": "array", "items": {"type": "string"}},
+    "ordered_gene_ids": {"type": "array", "items": {"type": "string"}},
+    "latent_model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "normalization_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "bank_construction_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "query_overlap_check": {"type": "object"}
+  }
+}
+

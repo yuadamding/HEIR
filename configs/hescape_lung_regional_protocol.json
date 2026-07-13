@@ -1,6 +1,7 @@
 {
-  "schema": "heir.hescape_regional_protocol.v2",
+  "schema": "heir.hescape_regional_protocol.v3",
   "scientific_scope": "regional_pseudospot_exploratory",
+  "authorization_ceiling": "regional_pseudospot_only_no_cell_or_nucleus_claims",
   "authorizes_nucleus_claim": false,
   "dataset_repo": "Peng-AI/hescape-pyarrow",
   "dataset_revision": "a9abd572aa2c740e6f9abee4e197d66b652c6532",
@@ -58,10 +59,48 @@
   "block_size_source_pixels": 2048,
   "roi_size_source_pixels": 1024,
   "opposite_pool_guard_source_pixels": 512,
-  "primary_crop_source_pixels": 512,
-  "primary_resize_pixels": 224,
   "source_pixel_size_um": 0.2125,
-  "effective_model_mpp": 0.4857142857142857,
+  "primary_crop_role": "target_matched_55um",
+  "crop_protocols": {
+    "target_matched_55um": {
+      "structure": "center_square",
+      "source_pixels": 256,
+      "inner_mask_source_pixels": 0,
+      "masked_center_fill": "none",
+      "stain_inclusion_mask": "all_resized_pixels",
+      "physical_width_um": 54.4,
+      "nominal_target_width_um": 55.0,
+      "resize_pixels": 224,
+      "effective_model_mpp": 0.24285714285714285,
+      "crop_scale": "target_matched_55um"
+    },
+    "context_108um": {
+      "structure": "center_square",
+      "source_pixels": 512,
+      "inner_mask_source_pixels": 0,
+      "masked_center_fill": "none",
+      "stain_inclusion_mask": "all_resized_pixels",
+      "physical_width_um": 108.8,
+      "nominal_target_width_um": 55.0,
+      "resize_pixels": 224,
+      "effective_model_mpp": 0.4857142857142857,
+      "crop_scale": "context_108um_sensitivity"
+    },
+    "context_annulus_55_to_109um": {
+      "structure": "center_annulus",
+      "source_pixels": 512,
+      "inner_mask_source_pixels": 256,
+      "masked_center_fill": "rounded_imagenet_mean_rgb",
+      "stain_inclusion_mask": "strict_outer_annulus_after_bilinear_resize",
+      "physical_width_um": 108.8,
+      "nominal_target_width_um": 55.0,
+      "resize_pixels": 224,
+      "effective_model_mpp": 0.4857142857142857,
+      "crop_scale": "context_only_annulus_55_to_109um"
+    }
+  },
+  "site_definition": "official_hescape_organ",
+  "batch_definition": "conservative_section_identity_no_finer_released_batch",
   "technical_covariates": ["log1p_library_size"],
   "permutation_seeds": [17, 29, 41],
   "permutations_per_seed": 100

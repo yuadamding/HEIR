@@ -1,0 +1,72 @@
+{
+  "schema": "heir.crop_manifest.v1",
+  "crop_set_id": "hest_native_cell_physical_ladder_v1",
+  "source_mpp": 0.2125,
+  "padding": "white",
+  "primary_crop_id": "crop_112um",
+  "variants": [
+    {
+      "crop_id": "nucleus_mask_only",
+      "role": "nucleus_intrinsic_sensitivity",
+      "diameter_um": 32.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "nucleus"
+    },
+    {
+      "crop_id": "cell_mask_only",
+      "role": "cell_intrinsic_sensitivity",
+      "diameter_um": 64.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "cell"
+    },
+    {
+      "crop_id": "crop_32um",
+      "role": "local_context",
+      "diameter_um": 32.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "none"
+    },
+    {
+      "crop_id": "crop_64um",
+      "role": "local_context",
+      "diameter_um": 64.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "none"
+    },
+    {
+      "crop_id": "crop_112um",
+      "role": "full_context_primary",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "none"
+    },
+    {
+      "crop_id": "context_ring_32_to_112um",
+      "role": "context_ring_sensitivity",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 32.0,
+      "mask_mode": "context_ring"
+    },
+    {
+      "crop_id": "context_ring_64_to_112um",
+      "role": "context_ring_sensitivity",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 64.0,
+      "mask_mode": "context_ring"
+    },
+    {
+      "crop_id": "target_cell_removed_112um",
+      "role": "context_only_sensitivity",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "target_removed"
+    },
+    {
+      "crop_id": "blank_patch",
+      "role": "blank_control",
+      "diameter_um": 112.0,
+      "inner_diameter_um": 0.0,
+      "mask_mode": "blank"
+    }
+  ]
+}

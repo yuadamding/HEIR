@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HEIR frozen encoder manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "encoder_id", "availability", "status_reason", "implementation",
+    "repository", "revision", "architecture", "config_filename", "config_sha256",
+    "checkpoint_filename", "checkpoint_sha256", "feature_width", "input_pixels",
+    "model_mpp", "normalization", "interpolation", "pooling_rule", "license",
+    "known_training_datasets", "evaluation_overlap", "fine_tuning"
+  ],
+  "properties": {
+    "schema": {"const": "heir.encoder_manifest.v1"},
+    "encoder_id": {"type": "string", "minLength": 1},
+    "availability": {"enum": ["available", "inaccessible"]},
+    "status_reason": {"type": "string", "minLength": 1},
+    "implementation": {"enum": ["uni2h_timm", "timm_local"]},
+    "repository": {"type": "string", "minLength": 1},
+    "revision": {"type": "string", "minLength": 1},
+    "architecture": {"type": "string", "minLength": 1},
+    "config_filename": {"type": "string", "minLength": 1},
+    "config_sha256": {"$ref": "#/$defs/sha256"},
+    "checkpoint_filename": {"type": "string", "minLength": 1},
+    "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+    "feature_width": {"type": "integer", "minimum": 1},
+    "input_pixels": {"type": "integer", "minimum": 1},
+    "model_mpp": {"type": "number", "exclusiveMinimum": 0},
+    "normalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mean", "std"],
+      "properties": {
+        "mean": {"$ref": "#/$defs/rgbTriplet"},
+        "std": {"$ref": "#/$defs/positiveRgbTriplet"}
+      }
+    },
+    "interpolation": {"enum": ["bilinear", "bicubic"]},
+    "pooling_rule": {"enum": ["direct_features", "cls_token", "cls_plus_patch_mean"]},
+    "license": {"type": "string", "minLength": 1},
+    "known_training_datasets": {
+      "type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}
+    },
+    "evaluation_overlap": {"enum": ["none_known", "possible", "known", "unknown"]},
+    "fine_tuning": {"enum": ["prohibited", "development_only", "allowed"]}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rgbTriplet": {
+      "type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}
+    },
+    "positiveRgbTriplet": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": {"type": "number", "exclusiveMinimum": 0}
+    }
+  }
+}

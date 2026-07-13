@@ -1,0 +1,27 @@
+{
+  "schema": "heir.encoder_manifest.v1",
+  "encoder_id": "uni2h_d517a8dd",
+  "availability": "available",
+  "status_reason": "Local config and checkpoint were materialized and SHA-256 verified.",
+  "implementation": "uni2h_timm",
+  "repository": "MahmoodLab/UNI2-h",
+  "revision": "d517a8dd47902dd7c308b3c36f63bce47e7b9a43",
+  "architecture": "vit_giant_patch14_224",
+  "config_filename": "config.json",
+  "config_sha256": "8b207fbff3e34884fd225b2d52e8ff51b728a1d0ac2fe8bb2b8db8011308ac98",
+  "checkpoint_filename": "pytorch_model.bin",
+  "checkpoint_sha256": "6e077eda234bebc595868d918d3458d9dd32a050199b0ff04443b2f46a0a3b1e",
+  "feature_width": 1536,
+  "input_pixels": 224,
+  "model_mpp": 0.5,
+  "normalization": {
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225]
+  },
+  "interpolation": "bilinear",
+  "pooling_rule": "direct_features",
+  "license": "CC-BY-NC-ND-4.0",
+  "known_training_datasets": [],
+  "evaluation_overlap": "unknown",
+  "fine_tuning": "prohibited"
+}
