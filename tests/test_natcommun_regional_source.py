@@ -25,6 +25,13 @@ def _load_builder():
 builder = _load_builder()
 
 
+@pytest.mark.parametrize("value", ("B1", "B1_2", "breast", "dlbcl"))
+def test_constant_text_preserves_multicharacter_cohort_labels(value: str) -> None:
+    observed = builder._constant_text(3, value)
+    assert observed.tolist() == [value, value, value]
+    assert observed.dtype.itemsize >= len(value) * np.dtype("U1").itemsize
+
+
 def test_frozen_protocol_keeps_regional_one_step_scope_and_b2_sensitivity(tmp_path: Path) -> None:
     protocol_path = (
         Path(__file__).parents[1] / "configs" / "natcommun_matched_regional_protocol.json"
@@ -306,6 +313,7 @@ def test_h5ad_reader_preserves_raw_counts_types_qc_and_b2_sensitivity(tmp_path: 
     assert data.donor_ids.tolist() == ["D1", "D1", "B2"]
     assert data.raw_h5ad_donor_ids.tolist() == ["raw1", "raw1", "raw2"]
     assert data.sample_ids.tolist() == ["sample1", "sample1", "sample2"]
+    assert data.indication_ids.tolist() == ["test", "test", "test"]
     assert data.primary_eligible.tolist() == [True, True, False]
     assert data.level1.tolist() == ["Tumor", "Immune", "Tumor"]
     assert data.level4.tolist() == ["T1_state", "I1_state", "T2_state"]

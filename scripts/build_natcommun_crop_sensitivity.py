@@ -31,7 +31,7 @@ from heir.features import EncoderManifest, FrozenPatchEncoder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V1_BUILDER_PATH = REPO_ROOT / "scripts/build_natcommun_regional_source.py"
-FROZEN_V1_BUILDER_SHA256 = "131b1bfb96a2a23cd77810dc06be73e2bd87fb7a22954b8a29b2a7f63115cd96"
+FROZEN_V1_BUILDER_SHA256 = "3b6006f61c72cb46029366e30f1510195109bd17d6471d6b2b4c4d0f55c5fdbb"
 
 DEFAULT_SOURCE = Path("/mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz")
 DEFAULT_OUTPUT = Path("/mnt/seagate/HEIR_runs/natcommun_regional_source/crop_sensitivity_55um.npz")

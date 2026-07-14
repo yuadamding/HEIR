@@ -14,7 +14,7 @@
   "immutable_computation_dependencies": {
     "v2_computation_engine": {
       "path": "scripts/benchmark_natcommun_reference_fusion_v2.py",
-      "sha256": "9f531592180ad86e47fe387233315b7d414243977104d233358dcfe72fd07429"
+      "sha256": "ccc26bbbc0475ac734d4abddc508c0bffa8fcb43fe93e5a0481ba4b0b765ad6f"
     },
     "v2_reference_fusion_primitives": {
       "path": "src/heir/evaluation/reference_fusion_v2.py",
@@ -22,7 +22,7 @@
     },
     "source_builder": {
       "path": "scripts/build_natcommun_regional_source.py",
-      "sha256": "131b1bfb96a2a23cd77810dc06be73e2bd87fb7a22954b8a29b2a7f63115cd96"
+      "sha256": "3b6006f61c72cb46029366e30f1510195109bd17d6471d6b2b4c4d0f55c5fdbb"
     },
     "v1_computation_engine": {
       "path": "scripts/benchmark_natcommun_reference_fusion.py",
@@ -42,11 +42,11 @@
     },
     "hoptimus_crop_sensitivity_builder": {
       "path": "scripts/build_natcommun_crop_sensitivity.py",
-      "sha256": "a42091e2d8a7bdffe2ad84fa2922eefe462c737c83338211689fe2b91c7b9e6f"
+      "sha256": "b76c2f982fa3110a913326e7a45a01c65729da9087804c9d02ac5083b48b06f9"
     },
     "uni2_sensitivity_builder": {
       "path": "scripts/build_natcommun_uni2_sensitivity.py",
-      "sha256": "ff5f1b60f484250ac2c4b80ddd71135d86cfa512b56ff2d3a22bb65c2fe0a5cd"
+      "sha256": "569d7a812b54d1adcfac8f1b555a45cf9d07deb124ceb1e1de10dc2e06d474b7"
     },
     "uni2_adapter": {
       "path": "src/heir/features/uni2h.py",

@@ -404,6 +404,17 @@ def _decode(values: object) -> np.ndarray:
     return array.astype(str)
 
 
+def _constant_text(rows: int, value: object) -> np.ndarray:
+    """Return a constant Unicode vector without NumPy's ``dtype=str`` U1 truncation."""
+
+    if rows < 0:
+        raise ValueError("constant text row count cannot be negative")
+    text = str(value)
+    if not text:
+        raise ValueError("constant text value cannot be empty")
+    return np.full(rows, text, dtype=f"<U{len(text)}")
+
+
 def _read_h5ad_vector(group: h5py.Group, name: str) -> np.ndarray:
     node = group[name]
     if isinstance(node, h5py.Dataset):
@@ -1579,7 +1590,7 @@ def _read_chromium_h5ads(
             parts["donor_ids"].append(donors)
             parts["raw_h5ad_donor_ids"].append(raw_donors)
             parts["sample_ids"].append(_read_h5ad_vector(obs, "sample_id").astype(str))
-            parts["indication_ids"].append(np.full(rows, kind, dtype=str))
+            parts["indication_ids"].append(_constant_text(rows, kind))
             parts["primary_eligible"].append(
                 np.asarray([value in primary for value in donors], dtype=np.bool_)
             )
@@ -2209,17 +2220,63 @@ def _validate_source(payload: Mapping[str, object], protocol: Mapping[str, objec
         raise ValueError("source spot fields are not row aligned")
     if np.asarray(payload["image_features"]).shape != (rows, IMAGE_FEATURE_WIDTH):
         raise ValueError("source H-optimus-1 features have the wrong width")
-    primary = {str(value) for value in protocol["primary_donors"]}
+    section_contract = {
+        str(row["section"]): (
+            str(row["donor"]),
+            str(row["indication"]),
+            bool(row["primary_eligible"]),
+        )
+        for row in protocol["sections"]
+    }
+    section = np.asarray(payload["section_ids"]).astype(str)
     donor = np.asarray(payload["donor_ids"]).astype(str)
+    indication = np.asarray(payload["indication_ids"]).astype(str)
+    spot_primary = np.asarray(payload["spot_primary_eligible"], dtype=np.bool_)
+    if set(section.tolist()) != set(section_contract):
+        raise ValueError("source section IDs differ from the frozen section contract")
+    for section_id, (expected_donor, expected_indication, expected_eligible) in (
+        section_contract.items()
+    ):
+        mask = section == section_id
+        if (
+            not mask.any()
+            or not np.all(donor[mask] == expected_donor)
+            or not np.all(indication[mask] == expected_indication)
+            or not np.all(spot_primary[mask] == expected_eligible)
+        ):
+            raise ValueError("source spot cohort labels differ from the frozen section contract")
+    primary = {str(value) for value in protocol["primary_donors"]}
     expected_primary = np.asarray([value in primary for value in donor])
-    if not np.array_equal(expected_primary, np.asarray(payload["spot_primary_eligible"])):
+    if not np.array_equal(expected_primary, spot_primary):
         raise ValueError("source primary flags are not donor scoped")
-    if "B2" not in set(donor) or np.asarray(payload["spot_primary_eligible"])[donor == "B2"].any():
+    if "B2" not in set(donor) or spot_primary[donor == "B2"].any():
         raise ValueError("source must retain B2 only as a non-primary sensitivity")
     sc_counts = np.asarray(payload["sc_counts"])
     sc_rows = len(np.asarray(payload["sc_cell_ids"]))
     if sc_counts.shape != (sc_rows, len(genes)) or sc_counts.dtype != np.int32:
         raise ValueError("source Chromium raw counts are malformed")
+    sc_donor = np.asarray(payload["sc_donor_ids"]).astype(str)
+    sc_indication = np.asarray(payload["sc_indication_ids"]).astype(str)
+    sc_primary = np.asarray(payload["sc_primary_eligible"], dtype=np.bool_)
+    donor_contract = {
+        expected_donor: expected_indication
+        for expected_donor, expected_indication, _ in section_contract.values()
+    }
+    if (
+        len(sc_donor) != sc_rows
+        or len(sc_indication) != sc_rows
+        or len(sc_primary) != sc_rows
+        or set(sc_donor.tolist()) != set(donor_contract)
+    ):
+        raise ValueError("source Chromium cohort labels are malformed")
+    for expected_donor, expected_indication in donor_contract.items():
+        mask = sc_donor == expected_donor
+        if (
+            not mask.any()
+            or not np.all(sc_indication[mask] == expected_indication)
+            or not np.all(sc_primary[mask] == (expected_donor in primary))
+        ):
+            raise ValueError("source Chromium cohort labels differ from the frozen donor contract")
     sc_broad = _csr_from_payload(payload, "sc_broad_counts")
     if sc_broad.shape != (sc_rows, len(broad_genes)):
         raise ValueError("source Chromium broad CSR is not cell/gene aligned")
@@ -2401,9 +2458,9 @@ def run(args: argparse.Namespace) -> int:
             np.asarray([f"{section}:{value}" for value in positions.barcodes])
         )
         spot_parts["barcode_ids"].append(positions.barcodes)
-        spot_parts["donor_ids"].append(np.full(count, str(row["donor"]), dtype=str))
-        spot_parts["section_ids"].append(np.full(count, section, dtype=str))
-        spot_parts["indication_ids"].append(np.full(count, str(row["indication"]), dtype=str))
+        spot_parts["donor_ids"].append(_constant_text(count, row["donor"]))
+        spot_parts["section_ids"].append(_constant_text(count, section))
+        spot_parts["indication_ids"].append(_constant_text(count, row["indication"]))
         spot_parts["spot_primary_eligible"].append(
             np.full(count, bool(row["primary_eligible"]), dtype=np.bool_)
         )
