@@ -1606,6 +1606,97 @@ def test_builder_cannot_materialize_confirmatory_rows_from_an_unopened_manifest(
         )
 
 
+def test_retrospective_builder_requires_resource_cap_above_pool_support(tmp_path: Path) -> None:
+    draft = REPOSITORY_ROOT / "manifests" / "studies" / "hest_lung_cell_association.draft.json"
+    protocol = REPOSITORY_ROOT / "configs" / "hest_lung_cell_protocol.json"
+    with pytest.raises(ValueError, match="cell cap is below"):
+        builder.build_source(
+            protocol,
+            draft,
+            ENCODER_MANIFEST_PATH,
+            CROP_MANIFEST_PATH,
+            tmp_path / "unread-data",
+            tmp_path / "unread-model",
+            tmp_path / "source.npz",
+            tmp_path / "plan.json",
+            tmp_path / "qc.json",
+            device="cpu",
+            retrospective=True,
+            retrospective_max_cells_per_section_type_pool=1,
+        )
+
+
+def test_retrospective_builder_materializes_all_donors_and_four_crops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+    pytest.importorskip("zarr")
+    development = list(builder.DEVELOPMENT_DONORS)
+    locked = list(builder.LOCKED_TEST_DONORS)
+    samples = []
+    for index, (sample_id, (donor, _)) in enumerate(sorted(builder.SECTION_IDENTITIES.items())):
+        sample = _write_sample(tmp_path, sample_id, "synthetic-frozen-v1", 90 + index)
+        sample["donor_id"] = donor
+        samples.append(sample)
+    annotation_path = tmp_path / "GSE250346" / "annotations.tsv.gz"
+    annotation_path.parent.mkdir(parents=True)
+    _write_annotations(annotation_path)
+    monkeypatch.setattr(builder, "ANNOTATION_SHA256", _sha256(annotation_path))
+    monkeypatch.setattr(builder, "ANNOTATION_ROWS", 80)
+    protocol = _protocol(samples, development, locked)
+    protocol["annotation_export"] = {
+        "path": str(annotation_path.relative_to(tmp_path)),
+        "sha256": builder.ANNOTATION_SHA256,
+    }
+    protocol_path = tmp_path / "protocol.json"
+    protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
+    draft = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "manifests"
+            / "studies"
+            / "hest_lung_cell_association.draft.json"
+        ).read_text(encoding="utf-8")
+    )
+    draft["analysis_plan_sha256"] = _sha256(protocol_path)
+    draft["candidate_target_gene_panel_sha256"] = builder._canonical_sha256(["G1", "G2"])
+    draft["type_marker_panel_sha256"] = builder._canonical_sha256(["TYPE_FINE"])
+    draft["label_target_independence"] = {
+        **draft["label_target_independence"],
+        **protocol["label_target_independence"],
+    }
+    study_manifest = tmp_path / "retrospective-study.draft.json"
+    study_manifest.write_text(json.dumps(draft), encoding="utf-8")
+    output = tmp_path / "retrospective-source.npz"
+    encoder_manifest = builder._load_encoder_manifest(ENCODER_MANIFEST_PATH)
+    builder.build_source(
+        protocol_path,
+        study_manifest,
+        ENCODER_MANIFEST_PATH,
+        CROP_MANIFEST_PATH,
+        tmp_path,
+        tmp_path / "unused-model",
+        output,
+        tmp_path / "plan.json",
+        tmp_path / "qc.json",
+        device="cpu",
+        batch_size=3,
+        encoder=_FixtureEncoder(encoder_manifest.sha256),
+        retrospective=True,
+        retrospective_max_cells_per_section_type_pool=1,
+        retrospective_max_observations=100,
+    )
+    with np.load(output, allow_pickle=False) as archive:
+        assert str(archive["schema_version"]) == builder.RETROSPECTIVE_SOURCE_SCHEMA
+        assert str(archive["study_stage"]) == builder.RETROSPECTIVE_SOURCE_STAGE
+        assert set(archive["donor_ids"].astype(str)) == set(development + locked)
+        assert set(archive["section_ids"].astype(str)) == set(builder.SECTION_IDENTITIES)
+        assert tuple(archive["crop_ids"].astype(str)) == builder.RETROSPECTIVE_CROP_IDS
+        assert archive["image_features"].shape[1:] == (4, encoder_manifest.feature_width)
+        assert not bool(archive["authorizes_h_cell"])
+        assert not bool(archive["authorizes_h_intrinsic"])
+
+
 def test_expression_aggregation_rejects_duplicate_transcript_ids(tmp_path: Path) -> None:
     pytest.importorskip("duckdb")
     pa = pytest.importorskip("pyarrow")

@@ -14,12 +14,13 @@ the repository until both premises are supported.
 
 ## Current decision
 
-No biological gate capable of testing the current H-MEAS/H-CELL hypothesis has run. Full HEIR
-development is not authorized, and the primary hypothesis is
+No prospective biological gate capable of testing the current H-MEAS/H-CELL hypothesis has run.
+Full HEIR development is not authorized, and the strict prospective primary hypothesis remains
 **untested, not failed**.
 
-The next scientific action is to prepare the protected development export and independent labels,
-then run development-only H-MEAS. H-MEAS cannot select its target/type receipt from `final_CT` labels
+Two distinct evidence tracks are now explicit. The strict prospective track next requires a
+protected development export and independent labels, then development-only H-MEAS. H-MEAS cannot
+select its target/type receipt from `final_CT` labels
 whose target dependence is unresolved: both annotation inputs and the training-label ontology must
 first have target-independent provenance. H-CELL additionally requires an outcome-free
 donor/section/type support topology and an exact six-condition calibration bound to the completed
@@ -34,6 +35,26 @@ internal/exploratory use. The words `locked_test` and `reserved` in the non-exec
 draft are legacy partition identifiers, not a claim that a prospective lock remains valid. A
 genuinely unexposed registered cell-resolved cohort is required for a prospective H-CELL test. See
 [the lock-exposure audit](reports/hest_lock_exposure_audit.json).
+
+The pragmatic track uses all 15 HEST donors in leave-one-biological-donor-out evaluation through
+`scripts/benchmark_hest_retrospective.py`. It compares full 112-um context, cell-only, nucleus-only,
+and target-cell-removed UNI2-h features against separate spatial, technical/stain, morphometry,
+density, and combined controls. It refits both within-section/type and different-spatial-block nulls,
+reports donor/type- and donor/section/type-balanced effects, and gives paired intrinsic crop
+contrasts under strict-registration sensitivity. This can answer whether the available registered
+images contain retrospective within-type molecular information; every report is irreversibly
+labeled exposed and cannot authorize H-CELL, H-INTRINSIC, external validity, matched-reference
+value, or full HEIR development.
+
+The completed 100-permutation retrospective run did not support H-CELL or either intrinsic-crop
+hypothesis in this fixed analysis. Full-context fine-type R² was -0.0605 by donor/type and -0.0699
+by donor/section/type; its increment was -0.0159 versus the best non-image control and -0.00737
+versus the combined control, with 0/15 donors positive. Cell-only and nucleus-only crops improved
+only slightly over the target-removed crop (+0.00162 and +0.00169 R²), while their absolute R² and
+increments over controls remained negative. These exposed retrospective results constrain the
+current representation and ridge probe; they neither fail nor authorize the prospective hypothesis.
+See the [explicit experiment report](reports/hest_retrospective.md) for the frozen design, complete
+decision metrics, source QC, per-donor effects, null results, and artifact hashes.
 
 The only completed historical cohort was snPATHO (4066, 4399, 4411), using frozen
 `omiclip-loki-coca-vit-l-14` features with checkpoint SHA-256
@@ -96,10 +117,10 @@ dissociated snRNA bank.
 
 Consequently, HEST can support development and retrospective evaluation of the direct oracle-lineage
 ridge premise. Its five historical test donors cannot issue a prospective go/no-go decision. Any
-retrospective signal would be hypothesis-generating only; absence of a benchmark report means the
-hypothesis has not yet been tested. HESCAPE can provide only development-stage regional sensitivity.
-Neither can, alone or together, validate prospective H-CELL, personalized matched-snRNA value, or
-external-cohort generalization.
+retrospective signal is hypothesis-generating only; the completed exposed benchmark did not support
+the three registered retrospective hypotheses in this fixed analysis. HESCAPE can provide only
+development-stage regional sensitivity. Neither can, alone or together, validate prospective
+H-CELL, personalized matched-snRNA value, or external-cohort generalization.
 
 ## Minimal method
 
@@ -242,6 +263,39 @@ non-authorizing. If checkpoints become available, apply the frozen estimator wit
 H0-mini as sensitivities; same-cohort post-exposure runs are not independent replication. Use
 `scripts/benchmark_reference_specificity.py` only after prospective morphology and independent
 external confirmation pass.
+
+Build the explicitly exposed registered source with four crop arms, deterministic per-stratum
+sampling, CUDA extraction, and hard memory bounds (artifacts and checkpoints remain outside Git):
+
+```bash
+mkdir -p /mnt/seagate/HEIR_runs/hest_retrospective
+OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 \
+  .venv/bin/python \
+  scripts/build_hest_xenium_cell_source.py \
+  --protocol configs/hest_lung_cell_protocol.json \
+  --study-manifest manifests/studies/hest_lung_cell_association.draft.json \
+  --encoder-manifest manifests/encoders/uni2h.json \
+  --crop-manifest configs/crops/hest_crop_ladder.json \
+  --data-root /mnt/seagate/HnE/HEST \
+  --model-dir /mnt/seagate/HnE/pretrained/UNI2-h \
+  --source-output /mnt/seagate/HEIR_runs/hest_retrospective/source.npz \
+  --plan-output /mnt/seagate/HEIR_runs/hest_retrospective/plan.json \
+  --qc-output /mnt/seagate/HEIR_runs/hest_retrospective/qc.json \
+  --device cuda --batch-size 8 --retrospective
+```
+
+Then run the retrospective test with bounded BLAS threads:
+
+```bash
+OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 \
+  .venv/bin/python scripts/benchmark_hest_retrospective.py \
+  --source /mnt/seagate/HEIR_runs/hest_retrospective/source.npz \
+  --output /mnt/seagate/HEIR_runs/hest_retrospective/report.json \
+  --permutations 100
+```
+
+Runs below 100 permutations are labeled smoke-only because they cannot resolve an empirical
+one-sided p-value below `1 / (B + 1)` for each null family.
 
 ## Repository contents
 

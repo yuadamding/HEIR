@@ -40,6 +40,16 @@ from heir.features import load_encoder_manifest as _load_encoder_manifest
 
 PROTOCOL_SCHEMA = "heir.hest_xenium_cell_protocol.v4"
 SOURCE_SCHEMA = "heir.registered_observations.v5"
+RETROSPECTIVE_SOURCE_SCHEMA = "heir.registered_observations_retrospective.v1"
+RETROSPECTIVE_SOURCE_STAGE = "retrospective_exposed"
+RETROSPECTIVE_CROP_IDS = (
+    "crop_112um",
+    "cell_mask_only",
+    "nucleus_mask_only",
+    "target_cell_removed_112um",
+)
+RETROSPECTIVE_SAMPLING_SALT = "hest-retrospective-cell-sample-v1"
+DUCKDB_RESOURCE_CONFIG = {"threads": "2", "memory_limit": "4GB"}
 ANNOTATION_RECEIPT_SCHEMA = "heir.independent_annotation_receipt.v2"
 ANNOTATION_CROSS_FIT_SCHEMA = "heir.annotation_cross_fitting_receipt.v2"
 TRAINING_LABEL_PROVENANCE_RECEIPT_SCHEMA = "heir.training_label_provenance_receipt.v1"
@@ -2361,27 +2371,54 @@ def _fit_coordinate_registration(path: Path, source_mpp: float) -> CoordinateReg
     schema = parquet.read_schema(path)
     if not set(required) <= set(schema.names):
         raise ValueError("HEST transcripts lack Xenium-to-H&E registration coordinates")
-    batches = parquet.ParquetFile(path).iter_batches(batch_size=100_000, columns=list(required))
-    try:
-        batch = next(batches)
-    except StopIteration as error:
-        raise ValueError("HEST transcripts cannot fit a coordinate registration") from error
-    values = np.column_stack(
-        [
-            np.asarray(
-                batch.column(batch.schema.get_field_index(name)).to_numpy(), dtype=np.float64
+    parquet_file = parquet.ParquetFile(path)
+    row_group_count = parquet_file.metadata.num_row_groups
+    row_groups = sorted({0, row_group_count // 2, row_group_count - 1})
+    anchors = []
+    for row_group in row_groups:
+        batches = parquet_file.iter_batches(
+            batch_size=10_000,
+            row_groups=[row_group],
+            columns=list(required),
+        )
+        try:
+            batch = next(batches)
+        except StopIteration as error:
+            raise ValueError("HEST transcripts cannot fit a coordinate registration") from error
+        anchors.append(
+            np.column_stack(
+                [
+                    np.asarray(
+                        batch.column(batch.schema.get_field_index(name)).to_numpy(),
+                        dtype=np.float64,
+                    )
+                    for name in required
+                ]
             )
-            for name in required
-        ]
-    )
+        )
+    values = np.concatenate(anchors)
     values = values[np.isfinite(values).all(axis=1)]
     if len(values) < 100:
         raise ValueError("HEST coordinate registration has insufficient finite anchors")
     design = np.column_stack((values[:, :2], np.ones(len(values))))
-    coefficients = np.asarray(
-        [[1.0 / source_mpp, 0.0], [0.0, 1.0 / source_mpp], [0.0, 0.0]],
-        dtype=np.float64,
-    )
+    retained = np.ones(len(values), dtype=np.bool_)
+    coefficients = np.empty((3, 2), dtype=np.float64)
+    for _ in range(3):
+        coefficients, _, rank, _ = np.linalg.lstsq(
+            design[retained], values[retained, 2:], rcond=None
+        )
+        if rank != 3:
+            raise ValueError("HEST coordinate registration anchors are rank deficient")
+        provisional = np.linalg.norm(design @ coefficients - values[:, 2:], axis=1)
+        retained = provisional <= np.quantile(provisional, 0.99)
+    singular_values = np.linalg.svd(coefficients[:2], compute_uv=False)
+    expected_scale = 1.0 / source_mpp
+    if (
+        np.linalg.det(coefficients[:2]) <= 0
+        or singular_values.min() < 0.8 * expected_scale
+        or singular_values.max() > 1.2 * expected_scale
+    ):
+        raise ValueError("HEST fitted coordinate registration has implausible scale or reflection")
     residual_um = np.linalg.norm(design @ coefficients - values[:, 2:], axis=1) * source_mpp
     return CoordinateRegistration(
         coefficients=coefficients,
@@ -2444,7 +2481,7 @@ def _aggregate_expression(
         or not set(genes) <= set(known)
     ):
         raise ValueError("HEST registered cell or gene identities are duplicated")
-    connection = duckdb.connect(database=":memory:")
+    connection = duckdb.connect(database=":memory:", config=DUCKDB_RESOURCE_CONFIG)
     try:
         connection.register("registered_cells", pa.table({"cell_id": ordered_ids}))
         connection.register("segmented_cells", pa.table({"cell_id": segmented_ids}))
@@ -2711,7 +2748,7 @@ def _update_transcript_identity_manifest(
         import pyarrow as pa
     except ImportError as error:  # pragma: no cover
         raise RuntimeError("install HEIR with the hest optional dependencies") from error
-    connection = duckdb.connect(database=":memory:")
+    connection = duckdb.connect(database=":memory:", config=DUCKDB_RESOURCE_CONFIG)
     count = 0
     try:
         connection.register("retained_cells", pa.table({"cell_id": raw_cell_ids}))
@@ -3066,12 +3103,40 @@ def _render_crop_variant(
     variant: CropVariant,
     crop_manifest: CropManifest,
 ) -> Tuple[np.ndarray, float, float]:
+    size = int(round(variant.diameter_um / crop_manifest.source_mpp))
+    patch, padding_fraction, x0, y0 = slide.read_with_padding(centre, size)
+    return _apply_crop_variant(
+        patch,
+        padding_fraction,
+        x0,
+        y0,
+        centre,
+        nucleus_vertices,
+        cell_vertices,
+        variant,
+        crop_manifest,
+    )
+
+
+def _apply_crop_variant(
+    patch: np.ndarray,
+    padding_fraction: float,
+    x0: int,
+    y0: int,
+    centre: Tuple[float, float],
+    nucleus_vertices: np.ndarray,
+    cell_vertices: np.ndarray,
+    variant: CropVariant,
+    crop_manifest: CropManifest,
+) -> Tuple[np.ndarray, float, float]:
     try:
         from PIL import Image, ImageDraw
     except ImportError as error:  # pragma: no cover
         raise RuntimeError("install HEIR with the hest optional dependencies") from error
     size = int(round(variant.diameter_um / crop_manifest.source_mpp))
-    patch, padding_fraction, x0, y0 = slide.read_with_padding(centre, size)
+    if patch.shape != (size, size, 3):
+        raise ValueError("shared HEST crop canvas differs from the requested variant")
+    patch = patch.copy()
     if variant.mask_mode == "none":
         return patch, padding_fraction, 0.0
     if variant.mask_mode == "blank":
@@ -3726,6 +3791,9 @@ def build_source(
     device: str = "cuda",
     batch_size: int = 64,
     encoder: Optional[FrozenPatchEncoder] = None,
+    retrospective: bool = False,
+    retrospective_max_cells_per_section_type_pool: int = 32,
+    retrospective_max_observations: int = 75_000,
 ) -> None:
     protocol_path = protocol_path.expanduser().resolve()
     study_manifest_path = study_manifest_path.expanduser().resolve()
@@ -3738,7 +3806,32 @@ def build_source(
     qc_output_path = qc_output_path.expanduser().resolve()
     repository_root = Path(__file__).resolve().parents[1]
     manifest_identity = StudyManifest.load(study_manifest_path)
-    if manifest_identity.study_stage == "measurement_development":
+    if retrospective:
+        protection = manifest_identity.content["lock_protection"]
+        if (
+            manifest_identity.study_stage != "confirmatory_morphology"
+            or manifest_identity.status != "draft"
+            or protection.get("prior_outcome_access_status")
+            != "molecular_outcomes_materialized_pre_registration"
+            or protection.get("prospective_lock_eligible") is not False
+        ):
+            raise ValueError(
+                "retrospective HEST construction requires the exposed, non-prospective draft"
+            )
+        if retrospective_max_cells_per_section_type_pool < max(
+            int(_read_json(protocol_path)["minimum_reference_cells_per_donor_section_type"]),
+            int(_read_json(protocol_path)["minimum_evaluation_cells_per_donor_section_type"]),
+        ):
+            raise ValueError("retrospective cell cap is below the frozen per-pool support minimum")
+        if retrospective_max_cells_per_section_type_pool > 32:
+            raise ValueError(
+                "retrospective per-pool cell cap cannot exceed the memory-safe maximum"
+            )
+        if retrospective_max_observations < 1:
+            raise ValueError("retrospective maximum observations must be positive")
+        study_manifest = manifest_identity
+        opening_receipt_sha256 = None
+    elif manifest_identity.study_stage == "measurement_development":
         study_manifest = StudyManifest.load(
             study_manifest_path,
             require_status="locked",
@@ -3761,12 +3854,49 @@ def build_source(
         opening_receipt_sha256 = str(opening["opening_receipt_sha256"])
     else:  # StudyManifest.load already rejects this; retain a local fail-closed guard.
         raise ValueError("unsupported HEST study stage")
+    prospective_measurement = (
+        not retrospective and study_manifest.study_stage == "measurement_development"
+    )
+    prospective_confirmatory = (
+        not retrospective and study_manifest.study_stage == "confirmatory_morphology"
+    )
+    source_stage = RETROSPECTIVE_SOURCE_STAGE if retrospective else study_manifest.study_stage
+    exposure_receipt_sha256 = (
+        str(study_manifest.content["lock_protection"]["prior_outcome_exposure_receipt_sha256"])
+        if retrospective
+        else None
+    )
     encoder_manifest = _load_encoder_manifest(encoder_manifest_path)
     crop_manifest = _load_crop_manifest(crop_manifest_path)
     protocol = _read_json(protocol_path)
     samples = _validate_protocol(protocol, encoder_manifest, crop_manifest)
+    if retrospective:
+        indexed_variants = {variant.crop_id: variant for variant in crop_manifest.variants}
+        crop_manifest = CropManifest(
+            path=crop_manifest.path,
+            sha256=crop_manifest.sha256,
+            source_mpp=crop_manifest.source_mpp,
+            padding=crop_manifest.padding,
+            primary_crop_id=crop_manifest.primary_crop_id,
+            random_mask_salt=crop_manifest.random_mask_salt,
+            blur_sigma_um=crop_manifest.blur_sigma_um,
+            variants=tuple(indexed_variants[crop_id] for crop_id in RETROSPECTIVE_CROP_IDS),
+        )
     if study_manifest.content["analysis_plan_sha256"] != _sha256_file(protocol_path):
         raise ValueError("locked study manifest does not bind the HEST protocol")
+    source_schema = RETROSPECTIVE_SOURCE_SCHEMA if retrospective else SOURCE_SCHEMA
+    parent_crop_manifest_sha256 = crop_manifest.sha256
+    active_crop_manifest_sha256 = (
+        _canonical_sha256(
+            {
+                "parent_crop_manifest_sha256": parent_crop_manifest_sha256,
+                "materialized_crop_ids": [variant.crop_id for variant in crop_manifest.variants],
+                "retrospective": True,
+            }
+        )
+        if retrospective
+        else parent_crop_manifest_sha256
+    )
     if study_manifest.development_donors != tuple(
         protocol["development_donors"]
     ) or study_manifest.locked_test_donors != tuple(protocol["locked_test_donors"]):
@@ -3779,7 +3909,7 @@ def build_source(
         list(protocol["fine_type_marker_gene_ids"])
     ):
         raise ValueError("locked study manifest fine-type marker panel differs from the protocol")
-    if study_manifest.study_stage == "measurement_development" and float(
+    if prospective_measurement and float(
         study_manifest.content["decision_thresholds"]["required_opposite_pool_guard_um"]
     ) != float(protocol["opposite_pool_guard_um"]):
         raise ValueError(
@@ -3787,7 +3917,7 @@ def build_source(
         )
     manifest_measurement_contract = (
         study_manifest.content["decision_thresholds"]
-        if study_manifest.study_stage == "measurement_development"
+        if prospective_measurement
         else study_manifest.content["locked_measurement_audit"]
     )
     if {
@@ -3796,7 +3926,7 @@ def build_source(
     } != dict(protocol["frozen_h_meas_shared_measurement_thresholds"]):
         raise ValueError("study manifest measurement thresholds differ from the HEST protocol")
     if (
-        study_manifest.study_stage == "confirmatory_morphology"
+        prospective_confirmatory
         and study_manifest.content["primary_endpoint"] != protocol["confirmatory_primary_endpoint"]
     ):
         raise ValueError("study manifest primary endpoint differs from the HEST protocol")
@@ -3812,12 +3942,12 @@ def build_source(
             "locked study manifest label-target evidence differs from the HEST protocol"
         )
     independence_contract = dict(manifest_independence)
-    if study_manifest.study_stage == "measurement_development":
+    if prospective_measurement:
         _require_h_meas_independent_annotation_contract(
             independence_contract,
             tuple(str(value) for value in protocol["gene_ids"]),
         )
-    if study_manifest.study_stage == "confirmatory_morphology":
+    if prospective_confirmatory:
         annotation_features = set(
             str(value) for value in independence_contract["ordered_annotation_feature_ids"]
         )
@@ -3833,12 +3963,17 @@ def build_source(
             raise ValueError(
                 "locked label-target evidence is not disjoint from the frozen target panel"
             )
-    if study_manifest.study_stage == "measurement_development":
+    if retrospective:
+        samples = tuple(samples)
+        source_scope = "all_15_donors_retrospective_exposed_non_authorizing"
+        frozen_supported_types = ()
+        planned_strata = set()
+    elif prospective_measurement:
         samples = tuple(sample for sample in samples if sample.split_id == "development")
         source_scope = "development_donors_only"
         frozen_supported_types: tuple[str, ...] = ()
         planned_strata: set[str] = set()
-    elif study_manifest.study_stage == "confirmatory_morphology":
+    elif prospective_confirmatory:
         samples = tuple(samples)
         source_scope = "development_and_locked_after_confirmatory_opening"
         observations_contract = study_manifest.content["observations"]
@@ -3850,6 +3985,11 @@ def build_source(
         raise ValueError("unsupported HEST study stage")
     active_donors = tuple(sorted({sample.donor_id for sample in samples}))
     active_sample_ids = tuple(sample.sample_id for sample in samples)
+    print(
+        "HEST source construction: stage=%s samples=%d donors=%d crops=%d"
+        % (source_stage, len(samples), len(active_donors), len(crop_manifest.variants)),
+        flush=True,
+    )
     independent_artifacts: Optional[IndependentAnnotationArtifacts] = None
     if independence_contract["evidence_kind"] == "pending":
         if any(
@@ -3959,7 +4099,7 @@ def build_source(
     full_annotation_declaration = _parse_file(
         protocol["annotation_export"], "GSE250346 annotation export"
     )
-    if study_manifest.study_stage == "measurement_development":
+    if prospective_measurement:
         development_annotation = _parse_development_annotation_export(
             protocol.get("measurement_development_annotation_export"),
             active_sample_ids,
@@ -4049,6 +4189,7 @@ def build_source(
         "low_transcripts": 0,
         "spatial_guard": 0,
         "unsupported_donor_fine_type": 0,
+        "retrospective_deterministic_sampling": 0,
     }
 
     for sample in samples:
@@ -4066,7 +4207,7 @@ def build_source(
             fine_type = annotated[cell_id].fine_type
             if "|" in fine_type:
                 raise ValueError("HEST fine type cannot contain the stratum delimiter")
-            if study_manifest.study_stage == "measurement_development":
+            if prospective_measurement:
                 planned_strata.add("%s|%s|%s" % (sample.donor_id, sample.sample_id, fine_type))
         exclusion_counts["native_cells_outside_high_qc_annotation"] += len(
             (set(cell_centres) | set(nucleus_centres)) - set(annotated)
@@ -4076,8 +4217,11 @@ def build_source(
         )
         if coordinate_registration.residual_p95_um > float(
             protocol["maximum_affine_registration_residual_p95_um"]
-        ):
-            raise ValueError("HEST Xenium-to-H&E affine registration residual exceeds the protocol")
+        ) and not retrospective:
+            raise ValueError(
+                "HEST %s Xenium-to-H&E affine registration p95 %.6f um exceeds the protocol"
+                % (sample.sample_id, coordinate_registration.residual_p95_um)
+            )
         annotation_he = coordinate_registration.transform(
             [annotated[cell_id].source_centroid for cell_id in registered]
         )
@@ -4104,12 +4248,20 @@ def build_source(
         registration_outlier_fraction = float(
             np.mean(annotation_nucleus_distances > annotation_distance_limit)
         )
-        if annotation_distance_p95 > annotation_distance_limit:
+        if annotation_distance_p95 > annotation_distance_limit and not retrospective:
             raise ValueError(
-                "HEST annotation-to-nucleus registration distance exceeds the protocol"
+                "HEST %s annotation-to-nucleus registration p95 %.6f um exceeds the protocol"
+                % (sample.sample_id, annotation_distance_p95)
             )
-        if registration_outlier_fraction > float(protocol["maximum_registration_outlier_fraction"]):
-            raise ValueError("HEST annotation-to-nucleus registration outlier fraction is too high")
+        if (
+            registration_outlier_fraction
+            > float(protocol["maximum_registration_outlier_fraction"])
+            and not retrospective
+        ):
+            raise ValueError(
+                "HEST %s annotation-to-nucleus outlier fraction %.6f is too high"
+                % (sample.sample_id, registration_outlier_fraction)
+            )
         expression_targets = _aggregate_expression(
             transcript_path,
             registered,
@@ -4128,13 +4280,8 @@ def build_source(
             expression_targets.whole_cell_counts,
             expression_targets.whole_cell_library_sizes,
         )
-        labels = np.asarray(
-            [annotated[cell_id].broad_label for cell_id in registered], dtype=np.int64
-        )
-        sample_start = len(rows.observation_ids)
-        retained_centres = []
-        for index, cell_id in enumerate(registered):
-            spatial = _spatial_identity(
+        spatial_identities = tuple(
+            _spatial_identity(
                 sample.sample_id,
                 nucleus_centres[cell_id].centroid,
                 sample.pixel_size_um,
@@ -4143,6 +4290,39 @@ def build_source(
                 guard_um=float(protocol["opposite_pool_guard_um"]),
                 salt=salt,
             )
+            for cell_id in registered
+        )
+        retrospective_selected: Optional[set[int]] = None
+        if retrospective:
+            candidates: Dict[Tuple[str, str], list[Tuple[str, int]]] = {}
+            for index, cell_id in enumerate(registered):
+                spatial = spatial_identities[index]
+                if (
+                    expression_targets.nucleus_library_sizes[index]
+                    < int(protocol["minimum_transcripts_per_cell"])
+                    or not spatial.guard_pass
+                ):
+                    continue
+                key = (annotated[cell_id].fine_type, spatial.pool_role)
+                score = hashlib.sha256(
+                    (
+                        "%s|%s|%s"
+                        % (RETROSPECTIVE_SAMPLING_SALT, sample.sample_id, cell_id)
+                    ).encode("utf-8")
+                ).hexdigest()
+                candidates.setdefault(key, []).append((score, index))
+            retrospective_selected = {
+                index
+                for values in candidates.values()
+                for _, index in sorted(values)[:retrospective_max_cells_per_section_type_pool]
+            }
+        labels = np.asarray(
+            [annotated[cell_id].broad_label for cell_id in registered], dtype=np.int64
+        )
+        sample_start = len(rows.observation_ids)
+        retained_centres = []
+        for index, cell_id in enumerate(registered):
+            spatial = spatial_identities[index]
             if expression_targets.nucleus_library_sizes[index] < int(
                 protocol["minimum_transcripts_per_cell"]
             ):
@@ -4150,6 +4330,9 @@ def build_source(
                 continue
             if not spatial.guard_pass:
                 exclusion_counts["spatial_guard"] += 1
+                continue
+            if retrospective_selected is not None and index not in retrospective_selected:
+                exclusion_counts["retrospective_deterministic_sampling"] += 1
                 continue
             scoped_cell_id = _section_scoped_cell_id(sample.sample_id, cell_id)
             rows.observation_ids.append(scoped_cell_id)
@@ -4247,7 +4430,7 @@ def build_source(
             retained_centres.append(nucleus_geometry.centroid)
         sample_end = len(rows.observation_ids)
         rows.sample_rows.append((sample_start, sample_end, sample, wsi_path))
-        if sample.cellvit_seg is not None:
+        if sample.cellvit_seg is not None and not retrospective:
             cellvit_path = _resolve_input(data_root, sample.cellvit_seg)
             sensitivity, names, nearest_centres, nearest_distances_um = _cellvit_sensitivity(
                 np.asarray(retained_centres, dtype=np.float64).reshape(-1, 2),
@@ -4274,6 +4457,9 @@ def build_source(
                 "high_qc_annotation_count": len(annotated),
                 "native_registered_intersection_count": len(registered),
                 "retained_observation_count_before_fine_type_support": (sample_end - sample_start),
+                "retrospective_max_cells_per_section_type_pool": (
+                    retrospective_max_cells_per_section_type_pool if retrospective else None
+                ),
                 "wsi_sha256": sample.wsi.sha256,
                 "transcripts_sha256": sample.transcripts.sha256,
                 "cell_seg_sha256": sample.cell_seg.sha256,
@@ -4286,6 +4472,12 @@ def build_source(
                 ),
                 "coordinate_registration_residual_max_um": (
                     coordinate_registration.residual_max_um
+                ),
+                "coordinate_registration_coefficients": (
+                    coordinate_registration.coefficients.tolist()
+                ),
+                "coordinate_registration_fit": (
+                    "robust_affine_three_spatial_row_groups_99pct_trim_v1"
                 ),
                 "annotation_nucleus_distance_p50_um": float(
                     np.quantile(annotation_nucleus_distances, 0.5)
@@ -4313,6 +4505,11 @@ def build_source(
                 ),
             }
         )
+        print(
+            "HEST sample %s: registered=%d retained_before_support=%d"
+            % (sample.sample_id, len(registered), sample_end - sample_start),
+            flush=True,
+        )
 
     fine_type_names = tuple(
         sorted(
@@ -4331,7 +4528,7 @@ def build_source(
     preliminary_splits = np.asarray(rows.split_ids)
     preliminary_labels = np.asarray(rows.type_labels, dtype=np.int64)
     retained = np.ones(len(rows.observation_ids), dtype=np.bool_)
-    if study_manifest.study_stage == "confirmatory_morphology":
+    if prospective_confirmatory:
         if not frozen_supported_types or not set(frozen_supported_types) <= set(fine_type_names):
             raise ValueError("confirmatory HEST source differs from the frozen H-MEAS type set")
         retained &= np.isin(np.asarray(rows.fine_type_ids), np.asarray(frozen_supported_types))
@@ -4349,7 +4546,7 @@ def build_source(
                     < minimum_evaluation
                 )
                 locked_stratum = bool(
-                    study_manifest.study_stage == "confirmatory_morphology"
+                    prospective_confirmatory
                     and np.all(preliminary_splits[local] == "locked_test")
                 )
                 if insufficient and not locked_stratum:
@@ -4365,7 +4562,7 @@ def build_source(
         insufficient_development = development_support < int(
             protocol["minimum_development_donors_per_fine_type"]
         )
-        if study_manifest.study_stage == "confirmatory_morphology":
+        if prospective_confirmatory:
             fine_type = fine_type_names[type_index]
             if fine_type in frozen_supported_types and insufficient_development:
                 raise ValueError(
@@ -4450,6 +4647,34 @@ def build_source(
     observations = len(rows.observation_ids)
     if not observations or len(set(rows.observation_ids)) != observations:
         raise ValueError("HEST retained observation identities are empty or duplicated")
+    if retrospective and observations > retrospective_max_observations:
+        feature_bytes = (
+            observations
+            * len(crop_manifest.variants)
+            * encoder_manifest.feature_width
+            * np.dtype(np.float32).itemsize
+        )
+        raise ValueError(
+            "retrospective HEST observations exceed the resource cap: "
+            f"{observations} rows would allocate {feature_bytes} feature bytes"
+        )
+    if retrospective and (
+        set(rows.donor_ids) != set(active_donors)
+        or set(active_donors) != set(DEVELOPMENT_DONORS + LOCKED_TEST_DONORS)
+        or set(rows.sample_ids) != set(active_sample_ids)
+    ):
+        raise ValueError("retrospective HEST source lost a frozen donor or section")
+    print(
+        "HEST retained source: observations=%d estimated_image_feature_bytes=%d"
+        % (
+            observations,
+            observations
+            * len(crop_manifest.variants)
+            * encoder_manifest.feature_width
+            * np.dtype(np.float32).itemsize,
+        ),
+        flush=True,
+    )
     planned_stratum_ids = tuple(sorted(planned_strata))
     planned_stratum_manifest_sha256 = _canonical_sha256(list(planned_stratum_ids))
     transcript_identity_hasher = hashlib.sha256()
@@ -4478,7 +4703,7 @@ def build_source(
     for donor in active_donors:
         donor_mask = donors == str(donor)
         locked_donor = bool(
-            study_manifest.study_stage == "confirmatory_morphology"
+            prospective_confirmatory
             and str(donor) in set(study_manifest.locked_test_donors)
         )
         for section_id in sorted(set(sections[donor_mask].tolist())):
@@ -4516,7 +4741,7 @@ def build_source(
         roles,
         protocol["reference_splits"],
         minimum_reference=minimum_reference,
-        full_support_donors=study_manifest.development_donors,
+        full_support_donors=(active_donors if retrospective else study_manifest.development_donors),
     )
 
     if encoder is None:
@@ -4572,56 +4797,99 @@ def build_source(
             local_centres = rows.centres[start:end]
             local_nucleus_vertices = rows.nucleus_vertices[start:end]
             local_cell_vertices = rows.cell_vertices[start:end]
-            for crop_index, variant in enumerate(crop_manifest.variants):
+
+            def store_rendered(
+                rendered: Sequence[Tuple[np.ndarray, float, float]],
+                crop_index: int,
+                batch_start: int,
+                batch_end: int,
+            ) -> None:
+                patches = np.stack([value[0] for value in rendered])
+                encoded = np.asarray(encoder.encode(patches), dtype=np.float32)
+                expected = (batch_end - batch_start, encoder_manifest.feature_width)
+                if encoded.shape != expected or not np.isfinite(encoded).all():
+                    raise ValueError("HEST frozen encoder features are malformed")
+                output_slice = slice(start + batch_start, start + batch_end)
+                image_features[output_slice, crop_index] = encoded
+                crop_padding_fractions[output_slice, crop_index] = [
+                    value[1] for value in rendered
+                ]
+                crop_mask_fractions[output_slice, crop_index] = [
+                    value[2] for value in rendered
+                ]
+                if crop_index == primary_crop_index:
+                    primary_size = int(
+                        round(primary_variant.diameter_um / crop_manifest.source_mpp)
+                    )
+                    for local_index, value in enumerate(rendered, start=batch_start):
+                        patch = value[0]
+                        centre = local_centres[local_index]
+                        x0 = int(round(centre[0] - primary_size / 2.0))
+                        y0 = int(round(centre[1] - primary_size / 2.0))
+                        output_index = start + local_index
+                        stain_quality_local[output_index] = _stain_quality_features(
+                            patch, primary_variant.diameter_um
+                        )
+                        nucleus_texture_features[output_index] = _polygon_region_texture(
+                            patch,
+                            local_nucleus_vertices[local_index],
+                            x0=x0,
+                            y0=y0,
+                        )
+                        cell_texture_features[output_index] = _polygon_region_texture(
+                            patch,
+                            local_cell_vertices[local_index],
+                            x0=x0,
+                            y0=y0,
+                        )
+
+            if retrospective:
+                shared_size = int(round(primary_variant.diameter_um / crop_manifest.source_mpp))
+                if any(
+                    int(round(variant.diameter_um / crop_manifest.source_mpp)) != shared_size
+                    for variant in crop_manifest.variants
+                ):
+                    raise ValueError("retrospective crop arms must use one shared H&E canvas")
                 for batch_start in range(0, end - start, batch_size):
                     batch_end = min(batch_start + batch_size, end - start)
-                    rendered = [
-                        _render_crop_variant(
-                            slide,
-                            local_centres[index],
-                            local_nucleus_vertices[index],
-                            local_cell_vertices[index],
-                            variant,
-                            crop_manifest,
-                        )
+                    shared = [
+                        slide.read_with_padding(local_centres[index], shared_size)
                         for index in range(batch_start, batch_end)
                     ]
-                    patches = np.stack([value[0] for value in rendered])
-                    encoded = np.asarray(encoder.encode(patches), dtype=np.float32)
-                    expected = (batch_end - batch_start, encoder_manifest.feature_width)
-                    if encoded.shape != expected or not np.isfinite(encoded).all():
-                        raise ValueError("HEST frozen encoder features are malformed")
-                    output_slice = slice(start + batch_start, start + batch_end)
-                    image_features[output_slice, crop_index] = encoded
-                    crop_padding_fractions[output_slice, crop_index] = [
-                        value[1] for value in rendered
-                    ]
-                    crop_mask_fractions[output_slice, crop_index] = [value[2] for value in rendered]
-                    if crop_index == primary_crop_index:
-                        primary_size = int(
-                            round(primary_variant.diameter_um / crop_manifest.source_mpp)
-                        )
-                        for local_index, value in enumerate(rendered, start=batch_start):
-                            patch = value[0]
-                            centre = local_centres[local_index]
-                            x0 = int(round(centre[0] - primary_size / 2.0))
-                            y0 = int(round(centre[1] - primary_size / 2.0))
-                            output_index = start + local_index
-                            stain_quality_local[output_index] = _stain_quality_features(
-                                patch, primary_variant.diameter_um
-                            )
-                            nucleus_texture_features[output_index] = _polygon_region_texture(
+                    for crop_index, variant in enumerate(crop_manifest.variants):
+                        rendered = [
+                            _apply_crop_variant(
                                 patch,
-                                local_nucleus_vertices[local_index],
-                                x0=x0,
-                                y0=y0,
+                                padding_fraction,
+                                x0,
+                                y0,
+                                local_centres[index],
+                                local_nucleus_vertices[index],
+                                local_cell_vertices[index],
+                                variant,
+                                crop_manifest,
                             )
-                            cell_texture_features[output_index] = _polygon_region_texture(
-                                patch,
-                                local_cell_vertices[local_index],
-                                x0=x0,
-                                y0=y0,
+                            for index, (patch, padding_fraction, x0, y0) in zip(
+                                range(batch_start, batch_end), shared
                             )
+                        ]
+                        store_rendered(rendered, crop_index, batch_start, batch_end)
+            else:
+                for crop_index, variant in enumerate(crop_manifest.variants):
+                    for batch_start in range(0, end - start, batch_size):
+                        batch_end = min(batch_start + batch_size, end - start)
+                        rendered = [
+                            _render_crop_variant(
+                                slide,
+                                local_centres[index],
+                                local_nucleus_vertices[index],
+                                local_cell_vertices[index],
+                                variant,
+                                crop_manifest,
+                            )
+                            for index in range(batch_start, batch_end)
+                        ]
+                        store_rendered(rendered, crop_index, batch_start, batch_end)
             if cellvit_nearest_features is not None:
                 local_cellvit_centres = rows.cellvit_centres[start:end]
                 for batch_start in range(0, end - start, batch_size):
@@ -4680,6 +4948,10 @@ def build_source(
                     edge_distance_um,
                 )
             )
+        print(
+            "HEST image features: sample=%s rows=%d complete" % (sample.sample_id, end - start),
+            flush=True,
+        )
 
     section_stain_summary = np.empty_like(stain_quality_local)
     for start, end, _, _ in rows.sample_rows:
@@ -4874,7 +5146,7 @@ def build_source(
     ).astype(np.float32)
     measurement_qc_contract = (
         study_manifest.content["locked_measurement_audit"]
-        if study_manifest.study_stage == "confirmatory_morphology"
+        if (prospective_confirmatory or retrospective)
         else study_manifest.content["decision_thresholds"]
     )
     annotation_nucleus_values = np.asarray(rows.annotation_nucleus_distances_um)
@@ -4961,20 +5233,36 @@ def build_source(
     )
     exclusion_policy_sha256 = _canonical_sha256(
         {
-            key: protocol[key]
-            for key in (
-                "minimum_transcripts_per_cell",
-                "minimum_transcript_qv",
-                "excluded_feature_prefixes",
-                "type_markers",
-                "fine_type_marker_gene_ids",
-                "label_target_independence",
-                "spatial_block_um",
-                "spatial_roi_um",
-                "opposite_pool_guard_um",
-                "pool_assignment_salt",
-                "reference_splits",
-            )
+            "protocol": {
+                key: protocol[key]
+                for key in (
+                    "minimum_transcripts_per_cell",
+                    "minimum_transcript_qv",
+                    "excluded_feature_prefixes",
+                    "type_markers",
+                    "fine_type_marker_gene_ids",
+                    "label_target_independence",
+                    "spatial_block_um",
+                    "spatial_roi_um",
+                    "opposite_pool_guard_um",
+                    "pool_assignment_salt",
+                    "reference_splits",
+                )
+            },
+            "retrospective_sampling": (
+                {
+                    "method": "sha256_lowest_per_section_fine_type_pool_v1",
+                    "sampling_salt_sha256": hashlib.sha256(
+                        RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
+                    ).hexdigest(),
+                    "max_cells_per_section_type_pool": (
+                        retrospective_max_cells_per_section_type_pool
+                    ),
+                    "max_observations": retrospective_max_observations,
+                }
+                if retrospective
+                else None
+            ),
         }
     )
     target_source_sha256 = _canonical_sha256(
@@ -5044,19 +5332,41 @@ def build_source(
         for gene in protocol["target_programs"][name]:
             program_gene_membership[program_index, gene_index[str(gene)]] = True
     provenance = {
-        "schema": SOURCE_SCHEMA,
-        "study_stage": study_manifest.study_stage,
+        "schema": source_schema,
+        "study_stage": source_stage,
         "study_manifest_sha256": study_manifest.sha256,
         "opening_receipt_sha256": opening_receipt_sha256,
+        "prior_outcome_exposure_receipt_sha256": exposure_receipt_sha256,
         "source_scope": source_scope,
+        "analysis_status": (
+            "retrospective_exposed_non_authorizing" if retrospective else "prospective_contract"
+        ),
+        "authorizes_h_cell": False if retrospective else None,
+        "authorizes_h_intrinsic": False if retrospective else None,
+        "authorizes_full_heir": False,
+        "retrospective_sampling": (
+            {
+                "method": "sha256_lowest_per_section_fine_type_pool_v1",
+                "sampling_salt_sha256": hashlib.sha256(
+                    RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
+                ).hexdigest(),
+                "max_cells_per_section_type_pool": (
+                    retrospective_max_cells_per_section_type_pool
+                ),
+                "max_observations": retrospective_max_observations,
+            }
+            if retrospective
+            else None
+        ),
         "locked_donor_outcomes_materialized": (
-            study_manifest.study_stage == "confirmatory_morphology"
+            prospective_confirmatory or retrospective
         ),
         "protocol_sha256": _sha256_file(protocol_path),
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
         "encoder_manifest_sha256": encoder_manifest.sha256,
-        "crop_manifest_sha256": crop_manifest.sha256,
+        "crop_manifest_sha256": parent_crop_manifest_sha256,
+        "crop_materialization_sha256": active_crop_manifest_sha256,
         "model_repo": encoder_manifest.repository,
         "model_revision": encoder_manifest.revision,
         "model_config_sha256": encoder_manifest.config_sha256,
@@ -5152,19 +5462,49 @@ def build_source(
         "cell_intrinsic_hypothesis_tested": False,
         "authorizes_nucleus_intrinsic_claim": False,
         "native_xenium_registration_only": True,
+        "registration_primary_key": "section_scoped_native_xenium_cell_id",
+        "annotation_centroid_distance_role": (
+            "retrospective_stress_qc_not_pairing_key" if retrospective else "prospective_gate"
+        ),
         "cellvit_target_registration": False,
         "samples": resolved_provenance,
         "exclusion_counts": exclusion_counts,
     }
     payload: Dict[str, object] = {
-        "schema_version": np.asarray(SOURCE_SCHEMA),
-        "study_stage": np.asarray(study_manifest.study_stage),
+        "schema_version": np.asarray(source_schema),
+        "study_stage": np.asarray(source_stage),
         "study_manifest_sha256": np.asarray(study_manifest.sha256),
         "opening_receipt_sha256": np.asarray(opening_receipt_sha256 or ""),
+        "prior_outcome_exposure_receipt_sha256": np.asarray(exposure_receipt_sha256 or ""),
         "source_scope": np.asarray(source_scope),
+        "analysis_status": np.asarray(
+            "retrospective_exposed_non_authorizing"
+            if retrospective
+            else "prospective_contract"
+        ),
+        "authorizes_h_cell": np.asarray(False),
+        "authorizes_h_intrinsic": np.asarray(False),
+        "authorizes_full_heir": np.asarray(False),
+        "retrospective_sampling_json": np.asarray(
+            json.dumps(
+                {
+                    "method": "sha256_lowest_per_section_fine_type_pool_v1",
+                    "sampling_salt_sha256": hashlib.sha256(
+                        RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
+                    ).hexdigest(),
+                    "max_cells_per_section_type_pool": (
+                        retrospective_max_cells_per_section_type_pool
+                    ),
+                    "max_observations": retrospective_max_observations,
+                }
+                if retrospective
+                else None,
+                sort_keys=True,
+            )
+        ),
         "opposite_pool_guard_um": np.asarray(float(protocol["opposite_pool_guard_um"])),
         "locked_donor_outcomes_materialized": np.asarray(
-            study_manifest.study_stage == "confirmatory_morphology"
+            prospective_confirmatory or retrospective
         ),
         "observation_ids": np.asarray(rows.observation_ids),
         "observation_id": np.asarray(rows.observation_ids),
@@ -5369,8 +5709,13 @@ def build_source(
         "feature_config_sha256": np.asarray(encoder_manifest.config_sha256),
         "encoder_revision": np.asarray(encoder_manifest.revision),
         "encoder_manifest_sha256": np.asarray(encoder_manifest.sha256),
-        "crop_manifest_sha256": np.asarray(crop_manifest.sha256),
+        "crop_manifest_sha256": np.asarray(parent_crop_manifest_sha256),
+        "crop_materialization_sha256": np.asarray(active_crop_manifest_sha256),
         "registration_method": np.asarray(protocol["registration_method"]),
+        "registration_primary_key": np.asarray("section_scoped_native_xenium_cell_id"),
+        "annotation_centroid_distance_role": np.asarray(
+            "retrospective_stress_qc_not_pairing_key" if retrospective else "prospective_gate"
+        ),
         "encoder_name": np.asarray(encoder_manifest.repository),
         "crop_scale": np.asarray("registered_cell_local_context_112um"),
         "crop_role": np.asarray(primary_variant.role),
@@ -5488,6 +5833,7 @@ def build_source(
     else:
         payload["cellvit_context_features"] = np.empty((observations, 0), dtype=np.float32)
         payload["cellvit_context_feature_names"] = np.asarray([], dtype=str)
+    print("HEST writing registered source: %s" % output_path, flush=True)
     _write_npz(output_path, payload)
     source_sha256 = _sha256_file(output_path)
     donor_sections = {
@@ -5510,15 +5856,36 @@ def build_source(
     )
     plan = {
         "schema": "heir.morphology_ridge_preparation_plan.v1",
-        "study_stage": study_manifest.study_stage,
+        "study_stage": source_stage,
         "study_manifest_sha256": study_manifest.sha256,
         "opening_receipt_sha256": opening_receipt_sha256,
+        "prior_outcome_exposure_receipt_sha256": exposure_receipt_sha256,
         "source_scope": source_scope,
-        "locked_donor_outcomes_materialized": (
-            study_manifest.study_stage == "confirmatory_morphology"
+        "analysis_status": (
+            "retrospective_exposed_non_authorizing" if retrospective else "prospective_contract"
         ),
-        "source_schema": SOURCE_SCHEMA,
-        "source_schema_sha256": _canonical_sha256(SOURCE_SCHEMA),
+        "authorizes_h_cell": False if retrospective else None,
+        "authorizes_h_intrinsic": False if retrospective else None,
+        "authorizes_full_heir": False,
+        "retrospective_sampling": (
+            {
+                "method": "sha256_lowest_per_section_fine_type_pool_v1",
+                "sampling_salt_sha256": hashlib.sha256(
+                    RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
+                ).hexdigest(),
+                "max_cells_per_section_type_pool": (
+                    retrospective_max_cells_per_section_type_pool
+                ),
+                "max_observations": retrospective_max_observations,
+            }
+            if retrospective
+            else None
+        ),
+        "locked_donor_outcomes_materialized": (
+            prospective_confirmatory or retrospective
+        ),
+        "source_schema": source_schema,
+        "source_schema_sha256": _canonical_sha256(source_schema),
         "source_observations_sha256": source_sha256,
         "protocol": {
             "path": str(protocol_path),
@@ -5530,7 +5897,8 @@ def build_source(
         },
         "crop_manifest": {
             "path": str(crop_manifest_path),
-            "sha256": crop_manifest.sha256,
+            "sha256": parent_crop_manifest_sha256,
+            "materialization_sha256": active_crop_manifest_sha256,
         },
         "experiment_role": "primary_hest_uni2h",
         "scientific_scope": "registered_cell_local_context_112um_association",
@@ -5567,7 +5935,8 @@ def build_source(
         "feature_space_id": feature_space_id,
         "feature_checkpoint_sha256": encoder_manifest.checkpoint_sha256,
         "encoder_manifest_sha256": encoder_manifest.sha256,
-        "crop_manifest_sha256": crop_manifest.sha256,
+        "crop_manifest_sha256": parent_crop_manifest_sha256,
+        "crop_materialization_sha256": active_crop_manifest_sha256,
         "molecular_space_id": molecular_space_id,
         "label_source_sha256": label_source_sha256,
         "label_source_kind": label_source_kind,
@@ -5616,6 +5985,10 @@ def build_source(
         "registration_source_sha256": registration_source_sha256,
         "exclusion_policy_sha256": exclusion_policy_sha256,
         "registration_method": str(protocol["registration_method"]),
+        "registration_primary_key": "section_scoped_native_xenium_cell_id",
+        "annotation_centroid_distance_role": (
+            "retrospective_stress_qc_not_pairing_key" if retrospective else "prospective_gate"
+        ),
         "encoder_name": encoder_manifest.repository,
         "crop_scale": "registered_cell_local_context_112um",
         "crop_metadata": {
@@ -5668,8 +6041,8 @@ def build_source(
             "broad_type_names": list(broad_type_names),
         },
         "source": {
-            "schema": SOURCE_SCHEMA,
-            "schema_sha256": _canonical_sha256(SOURCE_SCHEMA),
+            "schema": source_schema,
+            "schema_sha256": _canonical_sha256(source_schema),
             "observations_sha256": source_sha256,
             "cohort_id": "HEST",
             "cohort_release": DATASET_REVISION,
@@ -5691,7 +6064,7 @@ def build_source(
         },
         "preprocessing": {
             "implementation": "native_xenium_registered_cell_factorial_crop_ladder",
-            "implementation_sha256": crop_manifest.sha256,
+            "implementation_sha256": active_crop_manifest_sha256,
             "crop_role": primary_variant.role,
             "crop_diameter_um": primary_variant.diameter_um,
             "source_mpp": crop_manifest.source_mpp,
@@ -5825,7 +6198,7 @@ def build_source(
             "minimum_support": minimum_evaluation,
             "minimum_development_donors": 5,
             "minimum_locked_donors": (
-                5 if study_manifest.study_stage == "confirmatory_morphology" else 0
+                5 if prospective_confirmatory else 0
             ),
             "minimum_coverage_fraction": 0.7,
             "minimum_shuffled_fraction": 0.7,
@@ -5879,12 +6252,33 @@ def build_source(
     )
     qc = {
         "schema": "heir.hest_xenium_cell_qc.v1",
-        "study_stage": study_manifest.study_stage,
+        "study_stage": source_stage,
         "study_manifest_sha256": study_manifest.sha256,
         "opening_receipt_sha256": opening_receipt_sha256,
+        "prior_outcome_exposure_receipt_sha256": exposure_receipt_sha256,
         "source_scope": source_scope,
+        "analysis_status": (
+            "retrospective_exposed_non_authorizing" if retrospective else "prospective_contract"
+        ),
+        "authorizes_h_cell": False if retrospective else None,
+        "authorizes_h_intrinsic": False if retrospective else None,
+        "authorizes_full_heir": False,
+        "retrospective_sampling": (
+            {
+                "method": "sha256_lowest_per_section_fine_type_pool_v1",
+                "sampling_salt_sha256": hashlib.sha256(
+                    RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
+                ).hexdigest(),
+                "max_cells_per_section_type_pool": (
+                    retrospective_max_cells_per_section_type_pool
+                ),
+                "max_observations": retrospective_max_observations,
+            }
+            if retrospective
+            else None
+        ),
         "locked_donor_outcomes_materialized": (
-            study_manifest.study_stage == "confirmatory_morphology"
+            prospective_confirmatory or retrospective
         ),
         "source_observations": {
             "path": str(output_path),
@@ -5897,10 +6291,17 @@ def build_source(
         },
         "protocol_sha256": _sha256_file(protocol_path),
         "encoder_manifest_sha256": encoder_manifest.sha256,
-        "crop_manifest_sha256": crop_manifest.sha256,
+        "crop_manifest_sha256": parent_crop_manifest_sha256,
+        "crop_materialization_sha256": active_crop_manifest_sha256,
         "annotation_sha256": annotation_declaration.sha256,
         "registration": {
             "method": str(protocol["registration_method"]),
+            "primary_key": "section_scoped_native_xenium_cell_id",
+            "annotation_centroid_distance_role": (
+                "retrospective_stress_qc_not_pairing_key"
+                if retrospective
+                else "prospective_gate"
+            ),
             "one_to_one": True,
             "duplicate_observation_ids": 0,
             "annotation_nucleus_distance_p50_um": float(np.quantile(registration_distances, 0.5)),
@@ -5945,11 +6346,16 @@ def build_source(
                 "effective_mpp": 0.5,
                 "model_input_pixels": 224,
             },
-            "resolution_sensitivity_crop_ids": ["crop_32um", "crop_64um"],
-            "mask_control_fill_modes": ["white", "mean_color", "blurred"],
-            "random_location_shape_matched_controls": True,
+            "materialized_crop_ids": list(crop_ids),
+            "resolution_sensitivity_crop_ids": (
+                [] if retrospective else ["crop_32um", "crop_64um"]
+            ),
+            "mask_control_fill_modes": (
+                ["white"] if retrospective else ["white", "mean_color", "blurred"]
+            ),
+            "random_location_shape_matched_controls": not retrospective,
             "inpainting_control_available": False,
-            "inpainting_substitute": "blurred_replacement",
+            "inpainting_substitute": None if retrospective else "blurred_replacement",
             "maximum_allowed_padding_fraction": float(protocol["maximum_crop_padding_fraction"]),
             "all_row_qc_pass": bool(crop_qc_pass.all()),
             "by_crop_id": padding_summary,
@@ -5997,6 +6403,7 @@ def build_source(
         "pass": bool(registration_gate_pass and target_qc_pass.all() and crop_qc_pass.all()),
     }
     _write_json(qc_output_path, qc)
+    print("HEST source construction complete: %s" % output_path, flush=True)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -6017,6 +6424,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--annotation-validation-export", type=Path, default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--retrospective",
+        action="store_true",
+        help="build an exposed, all-15-donor, non-authorizing four-arm source",
+    )
+    parser.add_argument(
+        "--retrospective-max-cells-per-section-type-pool",
+        type=int,
+        default=32,
+        help="deterministic resource cap applied separately to reference/evaluation pools",
+    )
+    parser.add_argument(
+        "--retrospective-max-observations",
+        type=int,
+        default=75_000,
+        help="hard pre-encoder observation cap for memory safety",
+    )
     args = parser.parse_args(argv)
     build_source(
         args.protocol,
@@ -6035,6 +6459,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         annotation_validation_export_path=args.annotation_validation_export,
         device=args.device,
         batch_size=args.batch_size,
+        retrospective=args.retrospective,
+        retrospective_max_cells_per_section_type_pool=(
+            args.retrospective_max_cells_per_section_type_pool
+        ),
+        retrospective_max_observations=args.retrospective_max_observations,
     )
     return 0
 
