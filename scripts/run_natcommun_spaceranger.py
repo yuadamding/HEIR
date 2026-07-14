@@ -18,9 +18,7 @@ from typing import Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROTOCOL = REPO_ROOT / "configs/natcommun_matched_regional_protocol.json"
 DEFAULT_DATA_ROOT = Path("/mnt/seagate/HnE/NatCommun_2025_s41467_025_59005_9")
-DEFAULT_SPACERANGER = Path(
-    "/storage/hackathon_2026/tools/spaceranger-4.1.0/bin/spaceranger"
-)
+DEFAULT_SPACERANGER = Path("/storage/hackathon_2026/tools/spaceranger-4.1.0/bin/spaceranger")
 DEFAULT_REFERENCE = DEFAULT_DATA_ROOT / "refs/refdata-gex-GRCh38-2020-A"
 DEFAULT_PROBE_SET = Path(
     "/storage/hackathon_2026/tools/spaceranger-4.1.0/external/"
@@ -31,6 +29,9 @@ DEFAULT_PROBE_SET = Path(
 # create.  Keep the transient pipestance on ext4; downstream compact sources
 # and benchmark reports remain on /mnt/seagate.
 DEFAULT_OUTPUT_ROOT = Path("/storage/HEIR_work/natcommun_spaceranger")
+RUN_RECEIPT_SCHEMA = "heir.natcommun_spaceranger_run.v1"
+COMPLETE_SECTION_STATUSES = frozenset({"complete", "complete_existing"})
+KNOWN_SECTION_STATUSES = COMPLETE_SECTION_STATUSES | frozenset({"dry_complete", "failed"})
 
 
 def _sha256(path: Path) -> str:
@@ -43,9 +44,7 @@ def _sha256(path: Path) -> str:
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=path.name, suffix=".tmp", dir=path.parent
-    )
+    descriptor, temporary = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
@@ -54,6 +53,105 @@ def _write_json(path: Path, value: object) -> None:
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
+
+
+def _receipt_identity(
+    *,
+    protocol_path: Path,
+    spaceranger: Path,
+    spaceranger_version: str,
+    reference: Path,
+    probe_set: Path,
+    output_root: Path,
+) -> Mapping[str, object]:
+    """Return the immutable identities that make section receipts mergeable."""
+
+    return {
+        "schema": RUN_RECEIPT_SCHEMA,
+        "protocol": str(protocol_path),
+        "protocol_sha256": _sha256(protocol_path),
+        "spaceranger": str(spaceranger),
+        "spaceranger_version": spaceranger_version,
+        "reference": str(reference),
+        "reference_metadata_sha256": _sha256(reference / "reference.json"),
+        "probe_set": str(probe_set),
+        "probe_set_sha256": _sha256(probe_set),
+        "pipestance_root": str(output_root),
+    }
+
+
+def _all_sections_complete(sections: Mapping[str, object], expected_sections: set[str]) -> bool:
+    if set(sections) != expected_sections:
+        return False
+    return all(
+        isinstance(sections[section], Mapping)
+        and sections[section].get("status") in COMPLETE_SECTION_STATUSES
+        for section in expected_sections
+    )
+
+
+def _overall_receipt_status(
+    sections: Mapping[str, object], expected_sections: set[str]
+) -> tuple[str, int]:
+    failed_sections = sum(
+        int(isinstance(record, Mapping) and record.get("status") == "failed")
+        for record in sections.values()
+    )
+    if _all_sections_complete(sections, expected_sections):
+        return "complete", failed_sections
+    return ("failed" if failed_sections else "incomplete"), failed_sections
+
+
+def _load_partial_receipt(
+    path: Path,
+    *,
+    expected_identity: Mapping[str, object],
+    protocol_sections: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Load a prior receipt for a partial retry, rejecting unsafe merges."""
+
+    try:
+        value = json.loads(path.read_bytes())
+    except FileNotFoundError as error:
+        raise ValueError(
+            "--sections requires an existing run_status.json from the same full run"
+        ) from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("existing run_status.json is unreadable or invalid") from error
+    if not isinstance(value, Mapping):
+        raise ValueError("existing run_status.json is not a JSON object")
+    mismatched = [
+        field for field, expected in expected_identity.items() if value.get(field) != expected
+    ]
+    if mismatched:
+        raise ValueError("existing run_status.json identity mismatch: " + ", ".join(mismatched))
+    sections = value.get("sections")
+    if not isinstance(sections, Mapping):
+        raise ValueError("existing run_status.json has no section-record object")
+    expected_rows = {str(row["section"]): row for row in protocol_sections}
+    unknown = set(sections) - set(expected_rows)
+    if unknown:
+        raise ValueError(
+            "existing run_status.json contains unknown sections: " + ", ".join(sorted(unknown))
+        )
+    copied_sections: dict[str, object] = {}
+    for section, record in sections.items():
+        expected_row = expected_rows[section]
+        if (
+            not isinstance(record, Mapping)
+            or record.get("section") != section
+            or record.get("donor") != str(expected_row["donor"])
+            or record.get("status") not in KNOWN_SECTION_STATUSES
+        ):
+            raise ValueError(f"existing run_status.json has a malformed record for {section}")
+        copied_sections[section] = dict(record)
+    if value.get("status") == "complete" and not _all_sections_complete(
+        copied_sections, set(expected_rows)
+    ):
+        raise ValueError("existing run_status.json claims completion without all 16 sections")
+    receipt = dict(value)
+    receipt["sections"] = copied_sections
+    return receipt
 
 
 def _load_protocol(path: Path) -> Mapping[str, object]:
@@ -80,10 +178,7 @@ def _fastq_directories(raw_root: Path, sample: str) -> tuple[Path, ...]:
     for directory in directories:
         files = list(directory.glob(f"{sample}*fastq.gz"))
         read_kinds = {
-            part
-            for path in files
-            for part in ("R1", "R2", "I1", "I2")
-            if f"_{part}_" in path.name
+            part for path in files for part in ("R1", "R2", "I1", "I2") if f"_{part}_" in path.name
         }
         if read_kinds != {"R1", "R2", "I1", "I2"}:
             raise ValueError(f"incomplete paired dual-index FASTQs for {sample}: {directory}")
@@ -217,8 +312,10 @@ def _run_section(
             env=environment,
         )
     complete = dry or _output_complete(output)
-    status = "dry_complete" if dry and process.returncode == 0 else (
-        "complete" if process.returncode == 0 and complete else "failed"
+    status = (
+        "dry_complete"
+        if dry and process.returncode == 0
+        else ("complete" if process.returncode == 0 and complete else "failed")
     )
     return {
         "section": section,
@@ -267,9 +364,7 @@ def run(args: argparse.Namespace) -> int:
 
     requested = set(args.sections.split(",")) if args.sections else None
     rows = [
-        row
-        for row in protocol["sections"]
-        if requested is None or str(row["section"]) in requested
+        row for row in protocol["sections"] if requested is None or str(row["section"]) in requested
     ]
     if requested is not None and {str(row["section"]) for row in rows} != requested:
         raise ValueError("--sections includes unknown section IDs")
@@ -284,18 +379,17 @@ def run(args: argparse.Namespace) -> int:
             str(row["fastq_sample"]),
         )
 
-    receipt = {
-        "schema": "heir.natcommun_spaceranger_run.v1",
+    identity = _receipt_identity(
+        protocol_path=protocol_path,
+        spaceranger=spaceranger,
+        spaceranger_version=version,
+        reference=reference,
+        probe_set=probe_set,
+        output_root=output_root,
+    )
+    fresh_receipt = {
+        **identity,
         "analysis_scope": protocol["analysis_scope"],
-        "protocol": str(protocol_path),
-        "protocol_sha256": _sha256(protocol_path),
-        "spaceranger": str(spaceranger),
-        "spaceranger_version": version,
-        "reference": str(reference),
-        "reference_metadata_sha256": _sha256(reference / "reference.json"),
-        "probe_set": str(probe_set),
-        "probe_set_sha256": _sha256(probe_set),
-        "pipestance_root": str(output_root),
         "pipestance_filesystem_requirement": "POSIX_symlink_capable_ext4",
         "compact_downstream_outputs_root": "/mnt/seagate/HEIR_runs",
         "resource_limits": {
@@ -322,6 +416,18 @@ def run(args: argparse.Namespace) -> int:
     }
     receipt_path = output_root / "run_status.json"
     receipt_lock = threading.Lock()
+    if requested is None:
+        receipt = fresh_receipt
+    else:
+        receipt = _load_partial_receipt(
+            receipt_path,
+            expected_identity=identity,
+            protocol_sections=protocol["sections"],
+        )
+        receipt["status"] = "running_partial"
+        receipt["active_partial_sections"] = sorted(requested)
+        receipt["updated_unix"] = time.time()
+        receipt.pop("completed_unix", None)
     _write_json(receipt_path, receipt)
     failures = 0
     with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
@@ -351,9 +457,12 @@ def run(args: argparse.Namespace) -> int:
                 f"Space Ranger {result['section']}: {result['status']}",
                 flush=True,
             )
+    expected_sections = {str(row["section"]) for row in protocol["sections"]}
+    overall_status, total_failures = _overall_receipt_status(receipt["sections"], expected_sections)
     receipt["completed_unix"] = time.time()
-    receipt["status"] = "complete" if failures == 0 else "failed"
-    receipt["failed_sections"] = failures
+    receipt["status"] = overall_status
+    receipt["failed_sections"] = total_failures
+    receipt.pop("active_partial_sections", None)
     _write_json(receipt_path, receipt)
     return 0 if failures == 0 else 1
 

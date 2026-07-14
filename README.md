@@ -61,13 +61,28 @@ The bounded H-optimus-1 qualification is implemented in
 source on all 217 non-encoder fields and uses full 1,536D features as the primary representation.
 Its frozen visible-control gate failed: broad lineage, fine type, gray intensity, hematoxylin optical
 density, and GLCM contrast passed, while natural-context nucleus area, perimeter, circularity, and
-solidity all failed. Execution therefore stopped before H-optimus molecular fitting. The existing
+solidity all failed. Execution therefore stopped before H-optimus molecular fitting. The exact
+bounded conclusion is that a global natural 112-µm embedding did not resolve the geometry of the
+single centered nucleus beyond fine type; it is not a general failure of H-optimus or a test of
+regional matched-reference fusion. The existing
 UNI2 result was rerun only as an explicitly exposed, descriptive, non-authorizing baseline; UNI2
 failed the same four geometry controls. A strong secondary nucleus-mask morphology score cannot
 rescue the natural unmasked-image gate. The inherited registered-source QC also remains failed for
 prospective registration/per-row crop criteria (the transcript-target audit passes); this limitation
 is shared byte-for-byte across encoders and independently keeps the run non-authorizing. See the
 [H-optimus qualification report](reports/hest_scientific_reanalysis.md).
+
+The regional NatCommun M0-M8 experiment is now decoupled under a new, preregistered protocol rather
+than by editing that completed result. It uses a NatCommun-specific preflight, molecular-state
+k-means prototypes, indication-aware diagonal calibration, a full `[0, 1]` fusion grid, 55/112-µm
+crop sensitivity, indication-balanced reporting, preregistered variance/coverage/rare-state
+guardrails, atomic experiment checkpoints, a cell-nonauthorizing regional claim boundary, and a
+nonblocking secondary M8 floor. H-optimus-1 is
+the primary encoder; UNI2-h is a separately preflighted, separately reported secondary sensitivity
+and cannot rescue or override the primary decision. Each encoder/crop arm must independently pass
+feature nondegeneracy and a donor-held-out visible-control preflight. It is not yet executable
+because only 12 of 16 Space Ranger sections are complete. See
+[the v2 regional protocol and readiness report](reports/natcommun_regional_protocol_v2.md).
 
 The only completed historical cohort was snPATHO (4066, 4399, 4411), using frozen
 `omiclip-loki-coca-vit-l-14` features with checkpoint SHA-256

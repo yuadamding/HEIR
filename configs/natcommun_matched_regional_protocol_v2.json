@@ -1,0 +1,270 @@
+{
+  "schema": "heir.natcommun_matched_regional_protocol.v2",
+  "cohort_id": "NatCommun_2025_s41467_025_59005_9_E-MTAB-14560",
+  "doi": "10.1038/s41467-025-59005-9",
+  "analysis_scope": "retrospective_regional_spot_level_cell_non_authorizing",
+  "observation_level": "Visium_v2_spot_regional_not_cellular",
+  "reference_modality": "matched_Chromium_FLEX_snRNA_from_same_FFPE_block",
+  "registered_before_outcome_exposure": true,
+  "supersedes_protocol": {
+    "path": "configs/natcommun_matched_regional_protocol.json",
+    "sha256": "1a002e63dfe5480cd3272e68c0d5ae0358471a9dc5dba546fba4b7e14201dd5b",
+    "reason": "The frozen HEST centered-nucleus geometry gate is not a scientifically aligned prerequisite for a regional Visium-spot experiment."
+  },
+  "immutable_computation_dependencies": {
+    "v2_computation_engine": {
+      "path": "scripts/benchmark_natcommun_reference_fusion_v2.py",
+      "sha256": "9f531592180ad86e47fe387233315b7d414243977104d233358dcfe72fd07429"
+    },
+    "v2_reference_fusion_primitives": {
+      "path": "src/heir/evaluation/reference_fusion_v2.py",
+      "sha256": "38d1aca82489f24a1240c62d147cdd6e611579dd9a31e4902f4c78e14453a2e5"
+    },
+    "source_builder": {
+      "path": "scripts/build_natcommun_regional_source.py",
+      "sha256": "131b1bfb96a2a23cd77810dc06be73e2bd87fb7a22954b8a29b2a7f63115cd96"
+    },
+    "v1_computation_engine": {
+      "path": "scripts/benchmark_natcommun_reference_fusion.py",
+      "sha256": "2bdd2b539bb73d20e11ae7b395ad7ebdf308d9146d7e911ff56ac79dc8c958a3"
+    },
+    "v1_reference_fusion_primitives": {
+      "path": "src/heir/evaluation/reference_fusion.py",
+      "sha256": "005cbe840fa6fd6ff2a8259e030f15ee09803e6c3b07b7005947f3901a822e75"
+    },
+    "nested_ridge_primitives": {
+      "path": "src/heir/evaluation/hest_nested_ridge.py",
+      "sha256": "6a3830ffc857185d38f9b4bade3cc831d5060ea4ec08eb2b42738679fd57d429"
+    },
+    "scoring_primitives": {
+      "path": "src/heir/evaluation/hest_scoring.py",
+      "sha256": "3ea3965fa31ccb3cfd611933f2dcfb32492326c68c5d1b259e010670a7c51f02"
+    },
+    "hoptimus_crop_sensitivity_builder": {
+      "path": "scripts/build_natcommun_crop_sensitivity.py",
+      "sha256": "a42091e2d8a7bdffe2ad84fa2922eefe462c737c83338211689fe2b91c7b9e6f"
+    },
+    "uni2_sensitivity_builder": {
+      "path": "scripts/build_natcommun_uni2_sensitivity.py",
+      "sha256": "ff5f1b60f484250ac2c4b80ddd71135d86cfa512b56ff2d3a22bb65c2fe0a5cd"
+    },
+    "uni2_adapter": {
+      "path": "src/heir/features/uni2h.py",
+      "sha256": "7b8ebdfd496ef37652e1273067590e8f547a0c76bd40a8753680f1b5dd854f67"
+    },
+    "encoder_base": {
+      "path": "src/heir/features/base.py",
+      "sha256": "5b6d26bb4cb69fcd6454a8868f65699a3a287db1985fddd002ae854108014a86"
+    },
+    "encoder_factory": {
+      "path": "src/heir/features/__init__.py",
+      "sha256": "d363e99327d1b77abd996dd02e943a4089d2584c93f93cded7f25e86f9b66d24"
+    },
+    "v1_source_protocol": {
+      "path": "configs/natcommun_matched_regional_protocol.json",
+      "sha256": "1a002e63dfe5480cd3272e68c0d5ae0358471a9dc5dba546fba4b7e14201dd5b"
+    },
+    "source_sha256": "required_at_execution"
+  },
+  "hest_architecture_diagnostic": {
+    "role": "immutable_non_gating_diagnostic_only",
+    "report_path": "/mnt/seagate/HEIR_runs/hest_hoptimus1_qualification/report.json",
+    "report_sha256": "2685efc9574a1b6c9b2ff8f5a08cf372b038a1eaadd271f91ff24228b6060f1f",
+    "source_sha256": "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636",
+    "frozen_result": "failed_natural_unmasked_112um_centered_nucleus_geometry_gate",
+    "regional_benchmark_blocking": false,
+    "interpretation": "Natural unmasked 112-um H-optimus-1 embeddings did not linearly resolve exact centered-nucleus geometry beyond a donor-balanced fine-type reference; this does not test regional matched-reference fusion."
+  },
+  "encoders": {
+    "primary": {
+      "repository": "bioptimus/H-optimus-1",
+      "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+      "manifest": "manifests/encoders/hoptimus1.json",
+      "manifest_sha256": "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa09bdf77747043ac8fd9",
+      "official_local_parity": "required_exact_manifest_pass",
+      "mode": "frozen_CUDA_inference_only",
+      "fine_tuning": "prohibited"
+    },
+    "secondary": {
+      "repository": "MahmoodLab/UNI2-h",
+      "revision": "d517a8dd47902dd7c308b3c36f63bce47e7b9a43",
+      "manifest": "manifests/encoders/uni2h.json",
+      "manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369",
+      "qualification": "exact_manifest_checkpoint_config_and_implementation_hashes_without_official_local_parity_claim",
+      "execution": "separate_source_separate_report_same_frozen_design",
+      "may_rescue_primary_failure": false,
+      "strengthens_encoder_robustness_if_concordant": true
+    }
+  },
+  "primary_donors_by_indication": {
+    "breast": ["B1", "B3", "B4"],
+    "lung": ["L1", "L2", "L3", "L4"],
+    "dlbcl": ["D1", "D2", "D3", "D4", "D5", "D6"]
+  },
+  "failed_reference_sensitivity_donors": ["B2"],
+  "regional_preflight": {
+    "independent_of_hest_geometry_gate": true,
+    "required_components": [
+      "exact_source_model_protocol_and_implementation_hashes",
+      "encoder_family_specific_identity_and_qualification",
+      "finite_nondegenerate_image_features_global_and_per_section_for_each_encoder_and_crop_arm",
+      "registered_spot_centers_and_exact_alignment_artifact_hashes",
+      "blinded_visual_registration_review_for_all_16_sections",
+      "donor_held_out_indication_prediction_above_training_only_baseline",
+      "blank_and_within_section_deranged_image_controls_constructible",
+      "matched_wrong_and_same_indication_generic_reference_banks_constructible",
+      "outer_training_only_ST_reliability_screen_available"
+    ],
+    "encoder_family_requirements": {
+      "hoptimus_primary": {
+        "crop_arms": ["target_55um", "context_112um"],
+        "official_local_parity": "required_exact_manifest_pass",
+        "visible_control": "required_separately_for_each_crop_arm"
+      },
+      "uni2_secondary": {
+        "crop_arms": ["target_55um", "context_112um"],
+        "official_local_parity": "not_claimed",
+        "hash_qualification": "exact_manifest_checkpoint_config_adapter_base_factory_and_builder_hashes_required",
+        "visible_control": "required_separately_for_each_crop_arm",
+        "decision_is_separate_from_primary": true
+      }
+    },
+    "visible_control": {
+      "endpoint": "indication",
+      "metric": "indication_balanced_donor_macro_accuracy",
+      "baseline": "outer_training_indication_prior_argmax",
+      "pass_rule": "strictly_greater_than_baseline",
+      "maximum_spots_per_section": 128,
+      "ridge_alphas": [0.01, 0.1, 1.0, 10.0, 100.0]
+    },
+    "failure_action": "stop_before_any_ST_endpoint_or_reference_fusion_fit"
+  },
+  "crop_arms": [
+    {
+      "id": "target_55um",
+      "tissue_signal_width_um": 55.0,
+      "model_canvas_width_um": 112.0,
+      "construction": "centered_55um_signal_with_surrounding_pixels_whitened_on_native_112um_Hoptimus_canvas",
+      "role": "primary_target_matched_sensitivity"
+    },
+    {
+      "id": "context_112um",
+      "tissue_signal_width_um": 112.0,
+      "model_canvas_width_um": 112.0,
+      "construction": "natural_unmasked_registered_context",
+      "role": "primary_regional_context_sensitivity"
+    }
+  ],
+  "model_arms": [
+    "M0_H_only",
+    "M1_matched_reference_only",
+    "M2_H_type_routing_plus_matched_reference",
+    "M3_full_H_query_plus_matched_reference",
+    "M4_within_section_deranged_H_plus_matched_reference",
+    "M5_blank_and_coordinates_plus_matched_reference",
+    "M6_H_plus_hard_wrong_donor_reference",
+    "M7_H_plus_same_indication_generic_reference",
+    "M8_ST_cross_fitted_split_half_secondary_floor"
+  ],
+  "endpoints": [
+    "outer_training_reliability_qualified_fixed_programs",
+    "outer_training_only_PCA_total_expression"
+  ],
+  "bank_conditions": ["natural", "composition_equalized"],
+  "reference_representation": {
+    "primary": {
+      "method": "deterministic_molecular_kmeans_within_donor_and_type",
+      "prototypes_per_donor_type": 8,
+      "uses_ST_outcomes": false
+    },
+    "type_mean_baseline": {
+      "method": "one_centroid_per_donor_and_type",
+      "prototypes_per_donor_type": 1,
+      "role": "secondary_diagnostic"
+    },
+    "random_hash_averages": "prohibited"
+  },
+  "cross_assay_calibration": {
+    "primary": "indication_aware_diagonal_identity_regularized",
+    "fit_rows": "paired_training_donor_means_within_indication",
+    "held_out_donor_ST_used": false,
+    "full_affine_from_donor_means": "prohibited_as_underdetermined",
+    "minimum_training_donors_for_indication_specific_map": 2,
+    "sparse_indication_behavior": "global_diagonal_fallback",
+    "ridge_selection": "leave_one_training_donor_out_on_the_same_hierarchical_mapping",
+    "ridge_selection_weighting": "indication_equal_then_donor_equal_within_indication",
+    "global_fallback_fit_weighting": "indication_equal_then_donor_equal_within_indication"
+  },
+  "one_step_fusion": {
+    "fusion_alpha_grid": [0.0, 0.1, 0.25, 0.5, 0.75, 1.0],
+    "temperature_grid": [0.25, 0.5, 1.0, 2.0, 4.0],
+    "selection": "grouped_training_donor_only_indication_equal_objective",
+    "support_adaptation": "support_times_coverage_times_one_minus_uncertainty",
+    "iterative_refinement": "prohibited"
+  },
+  "execution_parameters": {
+    "seed": 17,
+    "ridge_alpha_grid": [0.01, 0.1, 1.0, 10.0, 100.0],
+    "pca_components": 20,
+    "pca_genes_selected_within_outer_training_fold": 256,
+    "bootstrap_iterations": 2000,
+    "ridge_and_fusion_selection_weighting": "indication_equal_then_donor_equal_within_indication",
+    "atomic_per_experiment_checkpoints": true,
+    "primary_full_experiments": "both_crops_x_both_endpoints_x_both_banks",
+    "centroid_diagnostic_experiments": "both_crops_x_program_total_x_natural_bank_only",
+    "hoptimus_primary_report": "separate_8_primary_plus_2_centroid_diagnostic_experiments",
+    "uni2_secondary_report": "separate_8_primary_plus_2_centroid_diagnostic_experiments",
+    "encoder_results_may_not_be_pooled": true
+  },
+  "decisive_comparisons": [
+    "M3_vs_M0_incremental_reference",
+    "M3_vs_M1_image_beyond_reference",
+    "M3_vs_M2_continuous_state_beyond_type_routing",
+    "M3_vs_M4_exact_pairing",
+    "M3_vs_M6_matched_specificity",
+    "M3_vs_M7_generic_specificity"
+  ],
+  "image_content_controls": [
+    "M3_vs_M5_blank_image_content",
+    "M3_vs_M5_coordinates_image_content"
+  ],
+  "multiplicity": "Holm_across_all_primary_crop_endpoint_bank_and_registered_M3_control_comparisons",
+  "familywise_alpha": 0.05,
+  "effect_thresholds": {
+    "minimum_relative_MSE_gain_M3_vs_M0": 0.05,
+    "minimum_positive_donor_fraction_M3_vs_M0": 0.70,
+    "minimum_positive_indications": 2,
+    "severe_indication_reversal_relative_MSE": -0.05,
+    "require_no_severe_indication_reversal": true,
+    "minimum_M3_median_within_section_variance_ratio": 0.5,
+    "maximum_M3_abstention_fraction": 0.5,
+    "minimum_M3_median_type_coverage": 0.5,
+    "rare_state_maximum_median_recall_drop_from_M0": 0.2,
+    "rare_state_maximum_single_target_recall_drop_when_M0_at_least_0_2": 0.3
+  },
+  "reporting": [
+    "donor_equal_loss",
+    "indication_equal_loss",
+    "breast_lung_and_DLBCL_effects",
+    "fixed_effect_inverse_variance_meta_effect_when_estimable",
+    "reference_coverage_support_distance_uncertainty_and_abstention",
+    "molecular_variance_and_rare_state_recall",
+    "M8_gap_closed_as_secondary_nonblocking"
+  ],
+  "decision": {
+    "crop_arm_pass": "all_decisive_controls_effect_size_donor_consistency_indication_heterogeneity_variance_coverage_abstention_and_rare_state_guardrails_pass",
+    "overall_regional_support": "at_least_one_crop_arm_passes_with_global_multiplicity_control",
+    "M8_may_block": false,
+    "regional_research_software_authorized_if_supported": true,
+    "cell_level_HEIR_authorized": false,
+    "independent_replication_still_required": true
+  },
+  "resource_limits": {
+    "cuda_required_for_ridge_and_encoder": true,
+    "default_cpu_threads": 4,
+    "maximum_cpu_threads": 8,
+    "default_embedding_batch_size": 4,
+    "maximum_dense_spots_per_preflight_section": 128,
+    "parallel_outer_experiments": 1
+  }
+}
