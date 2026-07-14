@@ -2,12 +2,49 @@
 
 ## Current status
 
-**IMPLEMENTED, NOT YET EXECUTED.** The scientific protocol and analysis path are ready, but the
-registered source cannot be built yet. Space Ranger has completed 12 of 16 sections; `B3_2`,
-`L4_2`, `D1`, and `D4` remain incomplete. No regional molecular result or biological conclusion has
-been produced.
+**PRE-RESULT TECHNICAL AMENDMENT, NOT YET RE-EXECUTED.** Space Ranger, the 16-section registration
+review, the registered source, both H-optimus crop arms, and the original H-optimus preflight are
+complete. The first primary benchmark attempt stopped during construction of an inner molecular
+reference bank because its fixed 100-iteration k-means cap was shorter than the 105 iterations
+needed for exact label stability. It wrote zero experiment checkpoints and no report, endpoint
+summary, effect, p-value, or decision. The amended implementation must be committed and receive a
+fresh H-optimus preflight before the benchmark restarts in a new output tree.
+
+UNI2-h is excluded by user instruction. It will not be built, preflighted, benchmarked, pooled with,
+or used to rescue the H-optimus primary result.
 
 This document is a protocol/readiness report, not an experiment report.
+
+## Pre-result deterministic-completion amendment
+
+The failed attempt is preserved at
+`/mnt/seagate/HEIR_runs/natcommun_regional_v2/failed_pre_result_attempts/a3bfa7f_hoptimus_kmeans_cap100/benchmark.log`
+with SHA-256
+`e9e53c9de2a7faaee2fa36b4641b5ca4ce56da4ef2f7e6d1bdb2c83a6f09a18e`. It failed in
+`target_55um::state_kmeans_8::program_total::natural`, before fusion-parameter selection and
+held-out endpoint scoring or output. Training-only calibration and ridge-selection computations had
+already occurred. The empty output tree confirms that no experiment checkpoint or report was
+exposed.
+
+Scientific-result-blind technical diagnosis found monotonically decreasing k-means objective
+values, no empty-cluster repair, and no label-assignment cycle. The triggering L3/Myeloid bank
+stabilized exactly at iteration 105. The exhaustive program-and-PCA audit covered 920 exact
+registered bank constructions and 3,882 donor/type fits across natural and composition-equalized
+inner, matched, wrong, and pooled bank seeds. Twenty-three fits exceeded the original cap, the
+maximum was 180 iterations, and all converged below 1,000 with no cycles or empty-cluster repairs.
+No image score, effect, p-value, or decision was inspected. The amendment therefore changes one
+universal completion safeguard:
+
+- maximum Lloyd iterations: `100` to `1000`;
+- convergence: unchanged exact label stability (`tol=0`);
+- repeated nonconsecutive label assignment: SHA-256 detected and failed closed;
+- initialization, squared-distance objective, ties, donor/type strata, `k=8`, centroid diagnostic,
+  cluster-count weights, seeds, model arms, endpoints, multiplicity, and decision rules: unchanged.
+
+The reference prototypes are clustered after the sc/snRNA latent has been calibrated using only
+the applicable fold-training-donor ST. Outer held-out and inner-validation-donor ST outcomes are
+excluded. This corrects the earlier over-broad wording that ST outcomes could not influence
+clustering without changing the registered computation order.
 
 ## Why this is a new protocol
 
@@ -35,12 +72,14 @@ Hyperparameter objectives first average donors within indication and then weight
 DLBCL equally, so the six DLBCL donors cannot dominate selection.
 
 The primary reference representation is deterministic molecular k-means within each donor/type,
-with eight prototypes. One donor/type centroid is a secondary diagnostic. Identity-hash averages
-are prohibited. Cross-assay calibration is diagonal, identity-regularized, indication-aware, and
-fit using training donors only; a global diagonal transform is used when an inner fold has fewer
-than two training donors for an indication. Its ridge penalty is selected by leave-one-training-
-donor-out evaluation of that same indication/fallback mapping, rather than a different global map.
-The global fallback itself weights indications equally and donors equally within indication.
+with eight prototypes, exact label-stability convergence, a fixed 1,000-iteration safeguard, and
+fail-closed repeated-assignment detection. One donor/type centroid is a secondary diagnostic.
+Identity-hash averages are prohibited. Cross-assay calibration is diagonal, identity-regularized,
+indication-aware, and fit using training donors only; a global diagonal transform is used when an
+inner fold has fewer than two training donors for an indication. Its ridge penalty is selected by
+leave-one-training-donor-out evaluation of that same indication/fallback mapping, rather than a
+different global map. The global fallback itself weights indications equally and donors equally
+within indication.
 
 The one-step fusion grid is `0, 0.1, 0.25, 0.5, 0.75, 1.0`. H&E centrality is tested empirically; it
 is not forced by capping the reference contribution at 0.5. Iterative refinement remains
@@ -89,20 +128,17 @@ Two H-optimus arms are evaluated:
 
 Both are generated with the exact frozen H-optimus checkpoint, official/local parity receipt,
 qualified preprocessing, and CUDA inference. The crop supplement is keyed to the exact source spot
-identities and source SHA-256. The UNI2-h secondary supplement independently generates the same two
-registered physical fields plus its own blank-image vector. UNI2-h is bound to its exact manifest,
-revision, checkpoint, config, adapter, base, factory, and builder hashes; no official/local UNI2-h
-parity claim is made.
+identities and source SHA-256. The separately registered UNI2-h secondary is not executed under the
+current user-directed scope.
 
 ## NatCommun-specific preflight
 
 The benchmark cannot start until a separately frozen preflight proves all of the following:
 
 1. Exact source, model, protocol, and implementation hashes.
-2. Passed official-versus-local H-optimus parity for the exact manifest; the UNI2-h secondary is
-   instead explicitly hash-qualified without a parity claim.
+2. Passed official-versus-local H-optimus parity for the exact manifest.
 3. Finite, nondegenerate features globally and in every primary section, independently for the
-   55-µm and 112-µm arms of each encoder.
+   55-µm and 112-µm H-optimus arms.
 4. Current Space Ranger invocation, H&E, alignment JSON, and alignment-QC image hashes match the
    source receipt.
 5. An independent visual review, blinded to ST/reference outcomes, passes the alignment for all 16
@@ -127,8 +163,9 @@ independently checked against—the source receipt. Placeholder or incomplete re
 ## Execution sequence
 
 After all 16 Space Ranger sections complete, build the frozen v1 molecular/source artifact, produce
-both encoder supplements, complete the blinded registration review, and commit the frozen protocol
-and implementation. Scientific execution deliberately refuses a dirty worktree. Then run:
+the H-optimus supplement, complete the blinded registration review, and commit the frozen protocol
+and implementation. Scientific execution deliberately refuses a dirty worktree. UNI2-h commands
+are intentionally omitted. Then run:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8
@@ -140,10 +177,6 @@ REF_V2_SHA=$(sha256sum src/heir/evaluation/reference_fusion_v2.py | cut -d' ' -f
 SOURCE_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz | cut -d' ' -f1)
 REVIEW_SHA=$(sha256sum /external/natcommun_registration_review.json | cut -d' ' -f1)
 CROP_BUILDER_SHA=$(sha256sum scripts/build_natcommun_crop_sensitivity.py | cut -d' ' -f1)
-UNI2_BUILDER_SHA=$(sha256sum scripts/build_natcommun_uni2_sensitivity.py | cut -d' ' -f1)
-UNI2_ADAPTER_SHA=$(sha256sum src/heir/features/uni2h.py | cut -d' ' -f1)
-ENCODER_BASE_SHA=$(sha256sum src/heir/features/base.py | cut -d' ' -f1)
-ENCODER_FACTORY_SHA=$(sha256sum src/heir/features/__init__.py | cut -d' ' -f1)
 
 .venv/bin/python scripts/build_natcommun_crop_sensitivity.py \
   --source /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz \
@@ -151,14 +184,7 @@ ENCODER_FACTORY_SHA=$(sha256sum src/heir/features/__init__.py | cut -d' ' -f1)
   --output /mnt/seagate/HEIR_runs/natcommun_regional_source/crop_sensitivity_55um.npz \
   --device cuda --batch-size 4
 
-.venv/bin/python scripts/build_natcommun_uni2_sensitivity.py \
-  --source /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz \
-  --source-sha256 "$SOURCE_SHA" \
-  --output /mnt/seagate/HEIR_runs/natcommun_regional_source/uni2h_sensitivity.npz \
-  --device cuda --batch-size 4
-
 CROP_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_source/crop_sensitivity_55um.npz | cut -d' ' -f1)
-UNI2_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_source/uni2h_sensitivity.npz | cut -d' ' -f1)
 
 .venv/bin/python scripts/benchmark_natcommun_reference_fusion_v2.py preflight-hoptimus \
   --source /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz \
@@ -171,41 +197,22 @@ UNI2_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_source/uni2h_sens
   --crop-55-supplement /mnt/seagate/HEIR_runs/natcommun_regional_source/crop_sensitivity_55um.npz \
   --expected-crop-55-supplement-sha256 "$CROP_SHA" \
   --expected-crop-builder-sha256 "$CROP_BUILDER_SHA" \
-  --output /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight.json \
+  --output /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight_amended.json \
   --device cuda --cpu-threads 4
 
-.venv/bin/python scripts/benchmark_natcommun_reference_fusion_v2.py preflight-uni2 \
-  --source /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz \
-  --expected-source-sha256 "$SOURCE_SHA" \
-  --registration-review /external/natcommun_registration_review.json \
-  --expected-registration-review-sha256 "$REVIEW_SHA" \
-  --expected-protocol-sha256 "$PROTOCOL_SHA" \
-  --expected-runner-sha256 "$RUNNER_SHA" \
-  --expected-reference-v2-sha256 "$REF_V2_SHA" \
-  --uni2-supplement /mnt/seagate/HEIR_runs/natcommun_regional_source/uni2h_sensitivity.npz \
-  --expected-uni2-supplement-sha256 "$UNI2_SHA" \
-  --expected-uni2-builder-sha256 "$UNI2_BUILDER_SHA" \
-  --expected-uni2-adapter-sha256 "$UNI2_ADAPTER_SHA" \
-  --expected-encoder-base-sha256 "$ENCODER_BASE_SHA" \
-  --expected-encoder-factory-sha256 "$ENCODER_FACTORY_SHA" \
-  --output /mnt/seagate/HEIR_runs/natcommun_regional_v2/uni2_preflight.json \
-  --device cuda --cpu-threads 4
 ```
 
-For each encoder whose own report passes, freeze that report hash and run the corresponding
-benchmark in a separate output tree. A UNI2-h preflight failure cannot block or alter the
-H-optimus primary run:
+Freeze the amended H-optimus report hash and run its benchmark in a fresh output tree:
 
 ```bash
-HOPT_PREFLIGHT_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight.json | cut -d' ' -f1)
-UNI2_PREFLIGHT_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_v2/uni2_preflight.json | cut -d' ' -f1)
+HOPT_PREFLIGHT_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight_amended.json | cut -d' ' -f1)
 
 .venv/bin/python scripts/benchmark_natcommun_reference_fusion_v2.py benchmark-hoptimus \
   --source /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz \
   --expected-source-sha256 "$SOURCE_SHA" \
   --registration-review /external/natcommun_registration_review.json \
   --expected-registration-review-sha256 "$REVIEW_SHA" \
-  --preflight-report /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight.json \
+  --preflight-report /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight_amended.json \
   --expected-preflight-report-sha256 "$HOPT_PREFLIGHT_SHA" \
   --crop-55-supplement /mnt/seagate/HEIR_runs/natcommun_regional_source/crop_sensitivity_55um.npz \
   --expected-crop-55-supplement-sha256 "$CROP_SHA" \
@@ -213,26 +220,7 @@ UNI2_PREFLIGHT_SHA=$(sha256sum /mnt/seagate/HEIR_runs/natcommun_regional_v2/uni2
   --expected-protocol-sha256 "$PROTOCOL_SHA" \
   --expected-runner-sha256 "$RUNNER_SHA" \
   --expected-reference-v2-sha256 "$REF_V2_SHA" \
-  --output-dir /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_primary \
-  --device cuda --cpu-threads 4
-
-.venv/bin/python scripts/benchmark_natcommun_reference_fusion_v2.py benchmark-uni2 \
-  --source /mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz \
-  --expected-source-sha256 "$SOURCE_SHA" \
-  --registration-review /external/natcommun_registration_review.json \
-  --expected-registration-review-sha256 "$REVIEW_SHA" \
-  --preflight-report /mnt/seagate/HEIR_runs/natcommun_regional_v2/uni2_preflight.json \
-  --expected-preflight-report-sha256 "$UNI2_PREFLIGHT_SHA" \
-  --uni2-supplement /mnt/seagate/HEIR_runs/natcommun_regional_source/uni2h_sensitivity.npz \
-  --expected-uni2-supplement-sha256 "$UNI2_SHA" \
-  --expected-uni2-builder-sha256 "$UNI2_BUILDER_SHA" \
-  --expected-uni2-adapter-sha256 "$UNI2_ADAPTER_SHA" \
-  --expected-encoder-base-sha256 "$ENCODER_BASE_SHA" \
-  --expected-encoder-factory-sha256 "$ENCODER_FACTORY_SHA" \
-  --expected-protocol-sha256 "$PROTOCOL_SHA" \
-  --expected-runner-sha256 "$RUNNER_SHA" \
-  --expected-reference-v2-sha256 "$REF_V2_SHA" \
-  --output-dir /mnt/seagate/HEIR_runs/natcommun_regional_v2/uni2_secondary \
+  --output-dir /mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_primary_amended \
   --device cuda --cpu-threads 4
 ```
 

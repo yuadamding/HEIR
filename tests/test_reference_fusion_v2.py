@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import inspect
+from itertools import combinations, islice
+
 import numpy as np
 import pytest
 
+from heir.evaluation import reference_fusion_v2
 from heir.evaluation.reference_fusion_v2 import (
     adaptive_residual_fusion,
     build_reference_prototypes,
@@ -11,6 +15,95 @@ from heir.evaluation.reference_fusion_v2 import (
     select_fusion_alpha,
     select_reference_calibration_alpha,
 )
+
+
+def test_molecular_kmeans_uses_the_preregistered_completion_cap():
+    assert reference_fusion_v2.MOLECULAR_KMEANS_MAXIMUM_ITERATIONS == 1_000
+    parameter = inspect.signature(reference_fusion_v2._deterministic_molecular_kmeans).parameters[
+        "maximum_iterations"
+    ]
+    assert parameter.default == reference_fusion_v2.MOLECULAR_KMEANS_MAXIMUM_ITERATIONS
+
+
+def test_molecular_kmeans_default_converges_after_more_than_100_assignments(monkeypatch):
+    assignments = []
+    for right_cluster in islice(combinations(range(14), 7), 101):
+        labels = np.zeros(14, dtype=np.int64)
+        labels[list(right_cluster)] = 1
+        assignments.append(labels)
+    assignments.append(assignments[-1].copy())
+
+    def run(maximum_iterations):
+        iterator = iter(assignments)
+
+        def scripted_argmin(_values, axis):
+            assert axis == 1
+            return next(iterator)
+
+        monkeypatch.setattr(reference_fusion_v2.np, "argmin", scripted_argmin)
+        return reference_fusion_v2._deterministic_molecular_kmeans(
+            np.arange(14, dtype=np.float64)[:, None],
+            np.asarray([f"cell-{index}" for index in range(14)]),
+            2,
+            seed=11,
+            maximum_iterations=maximum_iterations,
+        )
+
+    with pytest.raises(RuntimeError, match="within 100 iterations"):
+        run(100)
+    _centers, labels = run(reference_fusion_v2.MOLECULAR_KMEANS_MAXIMUM_ITERATIONS)
+    np.testing.assert_array_equal(labels, assignments[-1])
+
+
+def test_molecular_kmeans_fails_closed_on_an_assignment_cycle(monkeypatch):
+    assignments = iter(
+        (
+            np.array([0, 0, 1, 1]),
+            np.array([0, 1, 0, 1]),
+            np.array([0, 0, 1, 1]),
+        )
+    )
+
+    def alternating_argmin(_values, axis):
+        assert axis == 1
+        return next(assignments)
+
+    monkeypatch.setattr(reference_fusion_v2.np, "argmin", alternating_argmin)
+    with pytest.raises(RuntimeError, match="assignment cycle"):
+        reference_fusion_v2._deterministic_molecular_kmeans(
+            np.arange(4, dtype=np.float64)[:, None],
+            np.array(["a", "b", "c", "d"]),
+            2,
+            seed=7,
+            maximum_iterations=10,
+        )
+
+
+def test_reference_builder_passes_the_preregistered_completion_cap(monkeypatch):
+    observed = []
+
+    def fake_kmeans(values, _observation_ids, clusters, *, seed, maximum_iterations):
+        observed.append((clusters, seed, maximum_iterations))
+        labels = np.arange(len(values), dtype=np.int64) % clusters
+        centers = np.vstack([values[labels == cluster].mean(axis=0) for cluster in range(clusters)])
+        return centers, labels
+
+    monkeypatch.setattr(
+        reference_fusion_v2,
+        "_deterministic_molecular_kmeans",
+        fake_kmeans,
+    )
+    reference_fusion_v2.build_reference_prototypes(
+        [[0.0], [1.0], [2.0], [3.0]],
+        ["D"] * 4,
+        ["T"] * 4,
+        ["a", "b", "c", "d"],
+        max_prototypes_per_type=2,
+        seed=5,
+    )
+    assert len(observed) == 1
+    assert observed[0][0] == 2
+    assert observed[0][2] == reference_fusion_v2.MOLECULAR_KMEANS_MAXIMUM_ITERATIONS
 
 
 def test_molecular_prototypes_resolve_states_and_ignore_input_order():

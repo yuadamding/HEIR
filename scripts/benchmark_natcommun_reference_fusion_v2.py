@@ -72,6 +72,16 @@ FROZEN_HOPTIMUS_MANIFEST_SHA256 = "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa
 FROZEN_UNI2_MANIFEST_SHA256 = "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369"
 FROZEN_HEST_REPORT_SHA256 = "2685efc9574a1b6c9b2ff8f5a08cf372b038a1eaadd271f91ff24228b6060f1f"
 FROZEN_HEST_SOURCE_SHA256 = "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636"
+PRE_AMENDMENT_GIT_HEAD = "a3bfa7f58dbfbbfdd6a13510f3146d5dd68a00b4"
+PRE_AMENDMENT_PROTOCOL_SHA256 = "e1e14456e4a8a3cff5a33360592bb7784ee4c4809070b634f06ccc0c5d51bec8"
+PRE_AMENDMENT_RUNNER_SHA256 = "ccc26bbbc0475ac734d4abddc508c0bffa8fcb43fe93e5a0481ba4b0b765ad6f"
+PRE_AMENDMENT_REFERENCE_V2_SHA256 = (
+    "38d1aca82489f24a1240c62d147cdd6e611579dd9a31e4902f4c78e14453a2e5"
+)
+PRE_AMENDMENT_PREFLIGHT_SHA256 = "eb3781cfcfaef39d7c2610e8a5c629c8bdecbc6f3c0925643f0c0f468528807d"
+PRE_AMENDMENT_FAILURE_LOG_SHA256 = (
+    "e9e53c9de2a7faaee2fa36b4641b5ca4ce56da4ef2f7e6d1bdb2c83a6f09a18e"
+)
 
 EXPECTED_SECTIONS = (
     "B1_2",
@@ -311,6 +321,7 @@ def _load_protocol(expected_sha256: str) -> Mapping[str, object]:
     hest = protocol.get("hest_architecture_diagnostic")
     decision = protocol.get("decision")
     superseded = protocol.get("supersedes_protocol")
+    amendment = protocol.get("pre_result_technical_amendment")
     if (
         protocol.get("schema") != PROTOCOL_SCHEMA
         or protocol.get("cohort_id") != "NatCommun_2025_s41467_025_59005_9_E-MTAB-14560"
@@ -336,6 +347,94 @@ def _load_protocol(expected_sha256: str) -> Mapping[str, object]:
         or decision.get("independent_replication_still_required") is not True
     ):
         raise ValueError("v2 protocol has an unexpected scientific scope")
+    expected_amendment = {
+        "id": "2026-07-14_pre_result_molecular_kmeans_completion",
+        "status": "registered_before_any_endpoint_summary_or_scientific_decision",
+        "previous_identity": {
+            "git_head": PRE_AMENDMENT_GIT_HEAD,
+            "protocol_sha256": PRE_AMENDMENT_PROTOCOL_SHA256,
+            "runner_sha256": PRE_AMENDMENT_RUNNER_SHA256,
+            "reference_v2_sha256": PRE_AMENDMENT_REFERENCE_V2_SHA256,
+            "hoptimus_preflight_path": (
+                "/mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight.json"
+            ),
+            "hoptimus_preflight_sha256": PRE_AMENDMENT_PREFLIGHT_SHA256,
+        },
+        "failed_attempt": {
+            "encoder": HOPTIMUS_ENCODER_ID,
+            "output_dir": ("/mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_primary"),
+            "experiment": "target_55um::state_kmeans_8::program_total::natural",
+            "failure_stage": (
+                "inner_matched_primary_reference_bank_before_fusion_parameter_selection_"
+                "and_heldout_endpoint_scoring_or_output"
+            ),
+            "log_path": (
+                "/mnt/seagate/HEIR_runs/natcommun_regional_v2/failed_pre_result_attempts/"
+                "a3bfa7f_hoptimus_kmeans_cap100/benchmark.log"
+            ),
+            "log_sha256": PRE_AMENDMENT_FAILURE_LOG_SHA256,
+            "exit_code": 1,
+            "experiment_checkpoint_files_written": 0,
+            "report_files_written": 0,
+            "scientific_outputs_exposed": [],
+            "analyst_visible_endpoint_result_exposure": False,
+        },
+        "runtime_diagnosis": {
+            "donor": "L3",
+            "cell_type": "Myeloid",
+            "rows": 5569,
+            "latent_width": 8,
+            "seed": "11297572760357870275",
+            "previous_maximum_iterations": 100,
+            "exact_label_stability_iteration": 105,
+            "objective_monotonically_nonincreasing": True,
+            "empty_cluster_repair_used": False,
+            "assignment_cycle_detected": False,
+            "upstream_training_only_ST_computation_occurred": True,
+            "scientific_loss_effect_p_value_or_decision_inspected": False,
+        },
+        "completion_scan": {
+            "scope": (
+                "program_and_PCA_all_registered_natural_and_equalized_inner_outer_"
+                "matched_wrong_and_pooled_bank_seeds_without_image_scoring"
+            ),
+            "exact_bank_constructions": 920,
+            "donor_type_fits": 3882,
+            "fits_requiring_more_than_100_iterations": 23,
+            "maximum_exact_label_stability_iteration": 180,
+            "failures_by_1000_iterations": 0,
+            "assignment_cycles": 0,
+            "empty_cluster_repairs": 0,
+            "image_scores_effects_p_values_or_decisions_inspected": False,
+        },
+        "amended_completion_rule": {
+            "maximum_iterations": 1000,
+            "convergence": "exact_consecutive_repaired_assignment_equality",
+            "assignment_cycle_detection": (
+                "SHA256_canonical_little_endian_int64_label_assignment_repeat_fails_closed"
+            ),
+            "applies_uniformly_to": ("every_donor_type_fold_crop_endpoint_and_bank_condition"),
+            "unchanged": [
+                "k_8_primary_and_k_1_centroid_diagnostic",
+                "deterministic_farthest_point_initialization",
+                "squared_euclidean_objective",
+                "deterministic_tie_order",
+                "donor_type_partitioning",
+                "cluster_count_weights",
+                "seeds",
+                "model_arms",
+                "endpoints",
+                "multiplicity",
+                "decision_rules",
+            ],
+        },
+        "encoder_execution_scope": {
+            "hoptimus1": "primary_only",
+            "uni2_h": "excluded_not_run_by_user_instruction",
+        },
+    }
+    if amendment != expected_amendment:
+        raise ValueError("v2 pre-result technical amendment changed")
     frozen = protocol.get("immutable_computation_dependencies")
     if not isinstance(frozen, Mapping):
         raise ValueError("v2 protocol lacks immutable dependencies")
@@ -533,11 +632,16 @@ def _load_protocol(expected_sha256: str) -> Mapping[str, object]:
     calibration = protocol.get("cross_assay_calibration")
     if (
         not isinstance(representation, Mapping)
+        or representation.get("latent_input") != "fold_training_donor_ST_calibrated_snRNA_latent"
+        or representation.get("uses_fold_training_donor_ST_via_cross_assay_calibration") is not True
+        or representation.get("uses_heldout_or_inner_validation_donor_ST_outcomes") is not False
         or representation.get("primary")
         != {
             "method": "deterministic_molecular_kmeans_within_donor_and_type",
             "prototypes_per_donor_type": 8,
-            "uses_ST_outcomes": False,
+            "maximum_iterations": 1000,
+            "convergence_rule": "exact_consecutive_repaired_assignment_equality",
+            "nonconsecutive_assignment_cycle_action": "fail_closed",
         }
         or representation.get("type_mean_baseline")
         != {
@@ -546,6 +650,7 @@ def _load_protocol(expected_sha256: str) -> Mapping[str, object]:
             "role": "secondary_diagnostic",
         }
         or representation.get("random_hash_averages") != "prohibited"
+        or reference_fusion_v2.MOLECULAR_KMEANS_MAXIMUM_ITERATIONS != 1000
         or not isinstance(calibration, Mapping)
         or calibration.get("primary") != "indication_aware_diagonal_identity_regularized"
         or calibration.get("fit_rows") != "paired_training_donor_means_within_indication"
@@ -3751,6 +3856,14 @@ def _run_encoder_benchmark(
             "supplement_receipt": inputs.supplement_receipt,
             "reference_primary": "deterministic_molecular_kmeans_8_per_donor_type",
             "reference_secondary": "one_centroid_per_donor_type",
+            "reference_latent_input": "fold_training_donor_ST_calibrated_snRNA_latent",
+            "reference_uses_fold_training_donor_ST_via_calibration": True,
+            "reference_uses_heldout_or_inner_validation_donor_ST_outcomes": False,
+            "reference_clustering_maximum_iterations": (
+                reference_fusion_v2.MOLECULAR_KMEANS_MAXIMUM_ITERATIONS
+            ),
+            "reference_clustering_convergence": ("exact_consecutive_repaired_assignment_equality"),
+            "reference_assignment_cycle_behavior": "nonconsecutive_repeat_fails_closed",
             "registered_primary_experiments": 8,
             "registered_centroid_diagnostics": 2,
             "calibration": "indication_aware_diagonal_training_only",

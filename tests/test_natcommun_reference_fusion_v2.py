@@ -137,6 +137,38 @@ def test_protocol_is_isolated_from_non_gating_hest_artifacts(
             "scripts/not_the_registered_builder.py",
         ),
         (("encoders", "secondary", "may_rescue_primary_failure"), True),
+        (
+            (
+                "pre_result_technical_amendment",
+                "amended_completion_rule",
+                "maximum_iterations",
+            ),
+            100,
+        ),
+        (
+            (
+                "pre_result_technical_amendment",
+                "completion_scan",
+                "maximum_exact_label_stability_iteration",
+            ),
+            181,
+        ),
+        (
+            ("pre_result_technical_amendment", "encoder_execution_scope", "uni2_h"),
+            "secondary_run",
+        ),
+        (
+            ("reference_representation", "latent_input"),
+            "raw_snRNA_latent",
+        ),
+        (
+            ("reference_representation", "primary", "maximum_iterations"),
+            100,
+        ),
+        (
+            ("reference_representation", "primary", "convergence_rule"),
+            "center_shift_tolerance",
+        ),
         (("resource_limits", "maximum_cpu_threads"), 9),
         (("decision", "cell_level_HEIR_authorized"), True),
         (("decision", "regional_research_software_authorized_if_supported"), False),

@@ -11,14 +11,87 @@
     "sha256": "1a002e63dfe5480cd3272e68c0d5ae0358471a9dc5dba546fba4b7e14201dd5b",
     "reason": "The frozen HEST centered-nucleus geometry gate is not a scientifically aligned prerequisite for a regional Visium-spot experiment."
   },
+  "pre_result_technical_amendment": {
+    "id": "2026-07-14_pre_result_molecular_kmeans_completion",
+    "status": "registered_before_any_endpoint_summary_or_scientific_decision",
+    "previous_identity": {
+      "git_head": "a3bfa7f58dbfbbfdd6a13510f3146d5dd68a00b4",
+      "protocol_sha256": "e1e14456e4a8a3cff5a33360592bb7784ee4c4809070b634f06ccc0c5d51bec8",
+      "runner_sha256": "ccc26bbbc0475ac734d4abddc508c0bffa8fcb43fe93e5a0481ba4b0b765ad6f",
+      "reference_v2_sha256": "38d1aca82489f24a1240c62d147cdd6e611579dd9a31e4902f4c78e14453a2e5",
+      "hoptimus_preflight_path": "/mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_preflight.json",
+      "hoptimus_preflight_sha256": "eb3781cfcfaef39d7c2610e8a5c629c8bdecbc6f3c0925643f0c0f468528807d"
+    },
+    "failed_attempt": {
+      "encoder": "hoptimus1_primary",
+      "output_dir": "/mnt/seagate/HEIR_runs/natcommun_regional_v2/hoptimus_primary",
+      "experiment": "target_55um::state_kmeans_8::program_total::natural",
+      "failure_stage": "inner_matched_primary_reference_bank_before_fusion_parameter_selection_and_heldout_endpoint_scoring_or_output",
+      "log_path": "/mnt/seagate/HEIR_runs/natcommun_regional_v2/failed_pre_result_attempts/a3bfa7f_hoptimus_kmeans_cap100/benchmark.log",
+      "log_sha256": "e9e53c9de2a7faaee2fa36b4641b5ca4ce56da4ef2f7e6d1bdb2c83a6f09a18e",
+      "exit_code": 1,
+      "experiment_checkpoint_files_written": 0,
+      "report_files_written": 0,
+      "scientific_outputs_exposed": [],
+      "analyst_visible_endpoint_result_exposure": false
+    },
+    "runtime_diagnosis": {
+      "donor": "L3",
+      "cell_type": "Myeloid",
+      "rows": 5569,
+      "latent_width": 8,
+      "seed": "11297572760357870275",
+      "previous_maximum_iterations": 100,
+      "exact_label_stability_iteration": 105,
+      "objective_monotonically_nonincreasing": true,
+      "empty_cluster_repair_used": false,
+      "assignment_cycle_detected": false,
+      "upstream_training_only_ST_computation_occurred": true,
+      "scientific_loss_effect_p_value_or_decision_inspected": false
+    },
+    "completion_scan": {
+      "scope": "program_and_PCA_all_registered_natural_and_equalized_inner_outer_matched_wrong_and_pooled_bank_seeds_without_image_scoring",
+      "exact_bank_constructions": 920,
+      "donor_type_fits": 3882,
+      "fits_requiring_more_than_100_iterations": 23,
+      "maximum_exact_label_stability_iteration": 180,
+      "failures_by_1000_iterations": 0,
+      "assignment_cycles": 0,
+      "empty_cluster_repairs": 0,
+      "image_scores_effects_p_values_or_decisions_inspected": false
+    },
+    "amended_completion_rule": {
+      "maximum_iterations": 1000,
+      "convergence": "exact_consecutive_repaired_assignment_equality",
+      "assignment_cycle_detection": "SHA256_canonical_little_endian_int64_label_assignment_repeat_fails_closed",
+      "applies_uniformly_to": "every_donor_type_fold_crop_endpoint_and_bank_condition",
+      "unchanged": [
+        "k_8_primary_and_k_1_centroid_diagnostic",
+        "deterministic_farthest_point_initialization",
+        "squared_euclidean_objective",
+        "deterministic_tie_order",
+        "donor_type_partitioning",
+        "cluster_count_weights",
+        "seeds",
+        "model_arms",
+        "endpoints",
+        "multiplicity",
+        "decision_rules"
+      ]
+    },
+    "encoder_execution_scope": {
+      "hoptimus1": "primary_only",
+      "uni2_h": "excluded_not_run_by_user_instruction"
+    }
+  },
   "immutable_computation_dependencies": {
     "v2_computation_engine": {
       "path": "scripts/benchmark_natcommun_reference_fusion_v2.py",
-      "sha256": "ccc26bbbc0475ac734d4abddc508c0bffa8fcb43fe93e5a0481ba4b0b765ad6f"
+      "sha256": "64d23f9f86054d628e225450e5b01055713671c3f1a717bbd4648152715988e2"
     },
     "v2_reference_fusion_primitives": {
       "path": "src/heir/evaluation/reference_fusion_v2.py",
-      "sha256": "38d1aca82489f24a1240c62d147cdd6e611579dd9a31e4902f4c78e14453a2e5"
+      "sha256": "894ad3de42cc3d253aee400cb17cd7ff2257c2aca016601d7eb0f2bc2136bf3a"
     },
     "source_builder": {
       "path": "scripts/build_natcommun_regional_source.py",
@@ -172,10 +245,15 @@
   ],
   "bank_conditions": ["natural", "composition_equalized"],
   "reference_representation": {
+    "latent_input": "fold_training_donor_ST_calibrated_snRNA_latent",
+    "uses_fold_training_donor_ST_via_cross_assay_calibration": true,
+    "uses_heldout_or_inner_validation_donor_ST_outcomes": false,
     "primary": {
       "method": "deterministic_molecular_kmeans_within_donor_and_type",
       "prototypes_per_donor_type": 8,
-      "uses_ST_outcomes": false
+      "maximum_iterations": 1000,
+      "convergence_rule": "exact_consecutive_repaired_assignment_equality",
+      "nonconsecutive_assignment_cycle_action": "fail_closed"
     },
     "type_mean_baseline": {
       "method": "one_centroid_per_donor_and_type",

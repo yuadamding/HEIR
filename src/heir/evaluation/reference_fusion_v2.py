@@ -10,6 +10,7 @@ using training donors only.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -21,6 +22,8 @@ from heir.evaluation.reference_fusion import (
     _strings,
     _weights,
 )
+
+MOLECULAR_KMEANS_MAXIMUM_ITERATIONS = 1_000
 
 
 def _stable_observation_order(observation_ids: np.ndarray, seed: int) -> np.ndarray:
@@ -44,7 +47,7 @@ def _deterministic_molecular_kmeans(
     clusters: int,
     *,
     seed: int,
-    maximum_iterations: int = 100,
+    maximum_iterations: int = MOLECULAR_KMEANS_MAXIMUM_ITERATIONS,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Cluster molecular states with deterministic farthest-point initialization."""
 
@@ -90,6 +93,7 @@ def _deterministic_molecular_kmeans(
 
     center_matrix = np.vstack(centers)
     previous: np.ndarray | None = None
+    seen_assignment_digests: dict[bytes, int] = {}
     labels = np.zeros(rows, dtype=np.int64)
     for _iteration in range(iterations):
         distance = np.sum(np.square(values[:, None, :] - center_matrix[None, :, :]), axis=2)
@@ -117,10 +121,21 @@ def _deterministic_molecular_kmeans(
         if previous is not None and np.array_equal(labels, previous):
             center_matrix = updated
             break
+        canonical_labels = np.ascontiguousarray(labels, dtype="<i8")
+        assignment_digest = sha256(canonical_labels.tobytes(order="C")).digest()
+        if assignment_digest in seen_assignment_digests:
+            first_iteration = seen_assignment_digests[assignment_digest]
+            raise RuntimeError(
+                "molecular k-means entered a deterministic assignment cycle: "
+                f"iteration {first_iteration} repeated at {_iteration + 1}"
+            )
+        seen_assignment_digests[assignment_digest] = _iteration + 1
         previous = labels.copy()
         center_matrix = updated
     else:
-        raise RuntimeError("molecular k-means did not converge deterministically")
+        raise RuntimeError(
+            f"molecular k-means did not converge deterministically within {iterations} iterations"
+        )
     return center_matrix, labels
 
 
@@ -135,9 +150,11 @@ def build_reference_prototypes(
 ) -> PrototypeBank:
     """Create deterministic donor/type prototypes from molecular-state clusters.
 
-    Only the intended sc/snRNA inference bank is accepted.  Spatial outcomes
-    cannot influence clustering.  One prototype gives the donor/type-centroid
-    sensitivity; 8--16 prototypes can represent within-type state structure.
+    Only the intended sc/snRNA inference bank is accepted.  Clustering sees
+    only the supplied reference latent; the NatCommun caller calibrates that
+    latent using training donors and excludes held-out spatial outcomes.  One
+    prototype gives the donor/type-centroid sensitivity; 8--16 prototypes can
+    represent within-type state structure.
     """
 
     values = _matrix(latent, "reference latent")
@@ -159,12 +176,20 @@ def build_reference_prototypes(
     for donor in sorted(set(donors.tolist())):
         for type_label in sorted(set(types[donors == donor].tolist())):
             indices = np.flatnonzero((donors == donor) & (types == type_label))
-            local_states, labels = _deterministic_molecular_kmeans(
-                values[indices],
-                observations[indices],
-                min(len(indices), maximum),
-                seed=_stable_hash((donor, type_label), seed),
-            )
+            try:
+                local_states, labels = _deterministic_molecular_kmeans(
+                    values[indices],
+                    observations[indices],
+                    min(len(indices), maximum),
+                    seed=_stable_hash((donor, type_label), seed),
+                    maximum_iterations=MOLECULAR_KMEANS_MAXIMUM_ITERATIONS,
+                )
+            except RuntimeError as error:
+                raise RuntimeError(
+                    "molecular k-means failed for "
+                    f"donor={donor!r}, type={type_label!r}, rows={len(indices)}, "
+                    f"prototypes={min(len(indices), maximum)}"
+                ) from error
             for cluster, state in enumerate(local_states):
                 states.append(state)
                 counts.append(float(np.sum(labels == cluster)))
