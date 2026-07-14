@@ -107,6 +107,26 @@ def test_experiment_manifest_binds_protocol_source_and_ordered_schema(tmp_path: 
     assert manifest.sha256 == sha256_file(manifest_path)
 
 
+def test_experiment_manifest_accepts_hoptimus_primary_and_binds_role_to_encoder(
+    tmp_path: Path,
+) -> None:
+    protocol = tmp_path / "protocol.json"
+    source = tmp_path / "source.npz"
+    manifest_path = tmp_path / "manifest.json"
+    protocol.write_text("{}\n", encoding="utf-8")
+    source.write_bytes(b"source")
+    content = _content(protocol, source)
+    content["experiment_role"] = "primary_hest_hoptimus1"
+    content["encoder"]["repository"] = "bioptimus/H-optimus-1"
+    manifest_path.write_text(json.dumps(content), encoding="utf-8")
+    assert ExperimentManifest.load(manifest_path).experiment_role == "primary_hest_hoptimus1"
+
+    content["encoder"]["repository"] = "MahmoodLab/UNI2-h"
+    manifest_path.write_text(json.dumps(content), encoding="utf-8")
+    with pytest.raises(ValueError, match="requires encoder bioptimus/H-optimus-1"):
+        ExperimentManifest.load(manifest_path)
+
+
 def test_experiment_manifest_rejects_gene_relabel_and_protocol_drift(tmp_path: Path) -> None:
     protocol = tmp_path / "protocol.json"
     source = tmp_path / "source.npz"

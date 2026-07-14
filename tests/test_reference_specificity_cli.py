@@ -94,7 +94,7 @@ def _input_v2() -> dict[str, np.ndarray]:
 
 def _write_prerequisites(tmp_path: Path) -> tuple[Path, Path]:
     paths = (tmp_path / "primary.json", tmp_path / "external.json")
-    roles = ("primary_hest_uni2h", "external_confirmation_independent")
+    roles = ("primary_hest_hoptimus1", "external_confirmation_independent")
     for path, role in zip(paths, roles):
         path.write_text(
             json.dumps(
@@ -197,7 +197,7 @@ def test_reference_cli_maps_the_complete_v2_contract(
     }
     result = json.loads(output.read_text(encoding="utf-8"))
     assert [item["role"] for item in result["morphology_prerequisites"]] == [
-        "primary_hest_uni2h",
+        "primary_hest_hoptimus1",
         "external_confirmation_independent",
     ]
 

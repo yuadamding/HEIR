@@ -96,7 +96,9 @@ class ExperimentManifest:
         allowed = {
             "regional_hescape_uni2h",
             "regional_hescape_uni2h_context",
+            "regional_hescape_hoptimus1",
             "primary_hest_uni2h",
+            "primary_hest_hoptimus1",
             "replication_hest_hoptimus1",
             "replication_hest_h0mini",
         }
@@ -162,6 +164,17 @@ class ExperimentManifest:
         _sha256(encoder["checkpoint_sha256"], "encoder.checkpoint_sha256")
         if not str(encoder["repository"]).strip() or not str(encoder["revision"]).strip():
             raise ValueError("experiment manifest encoder identity is empty")
+        expected_encoder = {
+            "regional_hescape_uni2h": "MahmoodLab/UNI2-h",
+            "regional_hescape_uni2h_context": "MahmoodLab/UNI2-h",
+            "primary_hest_uni2h": "MahmoodLab/UNI2-h",
+            "regional_hescape_hoptimus1": "bioptimus/H-optimus-1",
+            "primary_hest_hoptimus1": "bioptimus/H-optimus-1",
+            "replication_hest_hoptimus1": "bioptimus/H-optimus-1",
+            "replication_hest_h0mini": "bioptimus/H0-mini",
+        }.get(role)
+        if expected_encoder is not None and str(encoder["repository"]) != expected_encoder:
+            raise ValueError("experiment manifest role requires encoder %s" % expected_encoder)
         if not isinstance(encoder["feature_width"], int) or int(encoder["feature_width"]) <= 0:
             raise ValueError("experiment manifest encoder feature width must be positive")
 

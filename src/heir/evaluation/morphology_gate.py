@@ -708,6 +708,7 @@ def validate_experiment_identity(
 
     expected_encoder = {
         "primary_hest_uni2h": "MahmoodLab/UNI2-h",
+        "primary_hest_hoptimus1": "bioptimus/H-optimus-1",
         "primary_hoptimus1": "bioptimus/H-optimus-1",
         "replication_h0mini": "bioptimus/H0-mini",
         "confirmation_xenium": "bioptimus/H-optimus-1",
@@ -716,6 +717,7 @@ def validate_experiment_identity(
     }.get(experiment_role)
     if experiment_role not in {
         "primary_hoptimus1",
+        "primary_hest_hoptimus1",
         "primary_hest_uni2h",
         "replication_h0mini",
         "context_sensitivity",
@@ -728,6 +730,7 @@ def validate_experiment_identity(
         raise ValueError("%s requires frozen %s features" % (experiment_role, expected_encoder))
     expected_crop = {
         "primary_hest_uni2h": "registered_cell_local_context_112um",
+        "primary_hest_hoptimus1": "registered_cell_local_context_112um",
         "context_sensitivity": "full_context",
         "confirmation_xenium": "nucleus_centered",
         "regional_hescape_hoptimus1": "full_context",
@@ -739,12 +742,15 @@ def validate_experiment_identity(
     } and artifact.crop_scale in {"full_context", "target_matched_55um"}
     if artifact.crop_scale != expected_crop and not regional_crop_ok:
         raise ValueError("%s requires the %s crop" % (experiment_role, expected_crop))
-    if experiment_role in {"primary_hoptimus1", "replication_h0mini"} and (
+    if experiment_role in {
+        "primary_hoptimus1",
+        "replication_h0mini",
+    } and (
         artifact.observation_level not in {"cell", "nucleus"}
         or artifact.target_construction != "registered_cell_expression"
     ):
         raise ValueError("the decisive morphology gate requires registered cell-level targets")
-    if experiment_role == "primary_hest_uni2h" and (
+    if experiment_role in {"primary_hest_hoptimus1", "primary_hest_uni2h"} and (
         artifact.cohort_id != "HEST"
         or artifact.assay != "Xenium"
         or artifact.observation_level != "cell"
@@ -755,7 +761,7 @@ def validate_experiment_identity(
         or artifact.crop_comparison_families[artifact.crop_ids.index(artifact.primary_crop_id)]
         != "g2_primary"
     ):
-        raise ValueError("primary HEST UNI2-h must be the explicit G2 local-context arm")
+        raise ValueError("primary HEST encoder must be the explicit G2 local-context arm")
     if experiment_role in {"regional_hescape_hoptimus1", "regional_hescape_uni2h"} and (
         artifact.cohort_id != "HESCAPE"
         or artifact.cohort_release != "human-lung-healthy-panel"
@@ -2112,10 +2118,12 @@ def evaluate_morphology_ridge_gate(
         "authorizes_external_generalization": False,
         "authorizes_validated_regional_association": False,
         "encoder_hierarchy": {
-            "primary": "MahmoodLab/UNI2-h",
-            "replication_1": "bioptimus/H-optimus-1",
-            "replication_2": "bioptimus/H0-mini",
-            "hierarchy_frozen_before_locked_outcomes": True,
+            "primary": "bioptimus/H-optimus-1",
+            "fixed_historical_comparator": "MahmoodLab/UNI2-h",
+            "gated_replication": "bioptimus/H0-mini",
+            "adopted_on": "2026-07-13",
+            "frozen_before_hoptimus1_molecular_outcomes": True,
+            "frozen_before_historical_hest_outcomes": False,
         },
         "crop_source_not_inferred_from_observation_level": True,
         "hypothesis_decisions": {

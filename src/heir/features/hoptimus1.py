@@ -29,6 +29,9 @@ class HOptimus1Encoder(TorchPatchEncoder):
             manifest.architecture,
             pretrained=False,
             num_classes=0,
+            img_size=manifest.input_pixels,
+            init_values=1.0e-5,
+            dynamic_img_size=False,
             mlp_layer=timm.layers.SwiGLUPacked,
             act_layer=torch.nn.SiLU,
         )

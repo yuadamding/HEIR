@@ -21,10 +21,10 @@ flowchart LR
 | Gate | Required evidence | Pass authorizes |
 | --- | --- | --- |
 | G0 | Registration, segmentation, transcript, crop, and target-reliability QC | Running morphology experiments |
-| G1 | Development-donor HESCAPE + UNI2-h against all regional controls | Exploratory engineering/regional evidence; no validation authorization |
+| G1 | Development-donor HESCAPE + frozen H-optimus-1 against all regional controls; UNI2-h fixed comparator | Exploratory engineering/regional evidence; no validation authorization |
 | G2 | Fresh pristine registered-cell cohort, independent oracle fine type, donor-held-out image effect, and both donor/type and donor/section/type-balanced endpoints | Internal within-study go/no-go evidence to seek external confirmation |
 | G3 | Prespecified mask/crop/context ladder plus registration-quality stratification | The precise nucleus, cell, or context conclusion supported by the pattern |
-| G4 | Same estimand with H-Optimus-1 and then H0-mini | Representation-robust association |
+| G4 | Same estimand with fixed UNI2-h comparator and then H0-mini | Representation-robust association |
 | G5 | Non-GSE250346 registered cell-resolved cohort | External morphology–state generalization |
 | G6 | Image-conditioned matched/wrong/generic bank substitution | Personalized-reference claim |
 | G7 | Predicted H&E type routing and state prediction | Oracle-free H&E-only claim |
@@ -118,8 +118,9 @@ decision, the best-registration estimate must clear the effect threshold and be 
 frozen 0.01 delta-R2 margin to the all-row and any fully supported near-threshold estimate. An intrinsic
 effect confined to near-threshold observations does not establish a nucleus- or cell-local source.
 
-The encoder order is UNI2-h primary, H-Optimus-1 replication 1 when accessible, and H0-mini
-replication 2 when accessible. Because the historical HEST outcomes were materialized, later
-same-cohort encoder runs are sensitivities, not independent confirmation. Section and batch one-hot
-features are development-fold indicators only; they do not fully adjust unseen confirmatory-section
-or confirmatory-batch effects.
+For experiments begun after the 2026-07-13 access decision, the encoder order is H-optimus-1
+primary, UNI2-h fixed historical comparator/encoder sensitivity, and H0-mini gated second
+replication. Because the historical HEST outcomes were materialized, the bounded same-cohort
+H-optimus-1 qualification is not independent confirmation. Section and batch one-hot features are
+development-fold indicators only; they do not fully adjust unseen confirmatory-section or
+confirmatory-batch effects.

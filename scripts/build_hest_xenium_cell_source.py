@@ -49,7 +49,60 @@ RETROSPECTIVE_CROP_IDS = (
     "target_cell_removed_112um",
 )
 RETROSPECTIVE_SAMPLING_SALT = "hest-retrospective-cell-sample-v1"
+HOPTIMUS1_REPOSITORY = "bioptimus/H-optimus-1"
+HOPTIMUS1_REVISION = "3592cb220dec7a150c5d7813fb56e68bd57473b9"
+HOPTIMUS1_PARITY_SCHEMA = "heir.hoptimus1_official_local_parity.v1"
+HOPTIMUS1_MANIFEST_SHA256 = "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa09bdf77747043ac8fd9"
+HOPTIMUS1_CONFIG_SHA256 = "b10c4f37ce804ff58bec7f2ffd35cc29ecbfdb2b96ac81f3c1b3e37e2b27616e"
+HOPTIMUS1_CHECKPOINT_SHA256 = "c4f1e5b457ddf00679626053b0bf2899be6a19c3a04ad191c87ad1cdfd1abfe1"
+HOPTIMUS1_PARITY_RECEIPT_SHA256 = (
+    "a67ca37feae12a3ca444399f12dc983de01283b05f14ffe16adfcdae80a4d761"
+)
+HOPTIMUS1_PARITY_IMPLEMENTATION_SHA256 = (
+    "856a3521fa8388787c43bb8cdd8a8faa202c3d3fd980aeac661f134b8e0711d1"
+)
+HOPTIMUS1_PRODUCTION_RUNTIME_FILES = (
+    "src/heir/features/__init__.py",
+    "src/heir/features/base.py",
+    "src/heir/features/hoptimus1.py",
+)
+REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256 = (
+    "57b77c7be2e30026a2da9ba0f9d5b205cf630f5d138942db6366e15cae2ef7a3"
+)
+UNI2H_REPOSITORY = "MahmoodLab/UNI2-h"
+HEST_ENCODER_CACHE_SCHEMA = "heir.hest_encoder_section_cache.v2"
+ENCODER_DEPENDENT_SOURCE_FIELDS = frozenset(
+    {
+        "encoder_comparison_non_encoder_identity_sha256",
+        "encoder_comparison_source_path",
+        "encoder_comparison_source_sha256",
+        "encoder_manifest_sha256",
+        "encoder_name",
+        "encoder_parity_receipt_path",
+        "encoder_parity_receipt_sha256",
+        "encoder_revision",
+        "feature_checkpoint_sha256",
+        "feature_config_sha256",
+        "feature_space_id",
+        "frozen_feature_names",
+        "frozen_features",
+        "image_features",
+        "image_features_by_crop_and_encoder",
+        "cellvit_nearest_frozen_features",
+        "provenance_json",
+    }
+)
 DUCKDB_RESOURCE_CONFIG = {"threads": "2", "memory_limit": "4GB"}
+
+
+def _experiment_role(encoder_repository: str, retrospective_encoder_qualification: bool) -> str:
+    if retrospective_encoder_qualification:
+        return "hest_hoptimus1_encoder_qualification"
+    if encoder_repository == HOPTIMUS1_REPOSITORY:
+        return "primary_hest_hoptimus1"
+    return "primary_hest_uni2h"
+
+
 ANNOTATION_RECEIPT_SCHEMA = "heir.independent_annotation_receipt.v2"
 ANNOTATION_CROSS_FIT_SCHEMA = "heir.annotation_cross_fitting_receipt.v2"
 TRAINING_LABEL_PROVENANCE_RECEIPT_SCHEMA = "heir.training_label_provenance_receipt.v1"
@@ -178,6 +231,187 @@ def _sha256_file(path: Path) -> str:
 def _canonical_sha256(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _array_sha256(value: object) -> str:
+    array = np.ascontiguousarray(np.asarray(value))
+    if array.dtype.hasobject:
+        raise ValueError("identity-bound arrays cannot contain Python objects")
+    digest = hashlib.sha256()
+    digest.update(array.dtype.str.encode("utf-8"))
+    digest.update(json.dumps(array.shape, separators=(",", ":")).encode("utf-8"))
+    digest.update(array.view(np.uint8))
+    return digest.hexdigest()
+
+
+def _ragged_array_sha256(values: Sequence[object]) -> str:
+    return _canonical_sha256([_array_sha256(value) for value in values])
+
+
+def _validate_retrospective_encoder_qualification(
+    encoder_manifest: EncoderManifest, *, retrospective: bool
+) -> None:
+    if (
+        not retrospective
+        or encoder_manifest.repository != HOPTIMUS1_REPOSITORY
+        or encoder_manifest.revision != HOPTIMUS1_REVISION
+        or encoder_manifest.feature_width != 1536
+        or encoder_manifest.input_pixels != 224
+        or encoder_manifest.model_mpp != 0.5
+        or encoder_manifest.fine_tuning != "prohibited"
+        or encoder_manifest.sha256 != HOPTIMUS1_MANIFEST_SHA256
+        or encoder_manifest.config_sha256 != HOPTIMUS1_CONFIG_SHA256
+        or encoder_manifest.checkpoint_sha256 != HOPTIMUS1_CHECKPOINT_SHA256
+    ):
+        raise ValueError(
+            "retrospective encoder qualification requires the exact frozen H-optimus-1 contract"
+        )
+
+
+def _validate_hoptimus1_parity_receipt(path: Path, encoder_manifest: EncoderManifest) -> str:
+    resolved = path.expanduser().resolve()
+    receipt_sha256 = _sha256_file(resolved)
+    if receipt_sha256 != HOPTIMUS1_PARITY_RECEIPT_SHA256:
+        raise ValueError("H-optimus-1 parity sidecar differs from the frozen real receipt")
+    value = _read_json(resolved)
+    model = value.get("model")
+    embedding = value.get("embedding_contract")
+    runtime = value.get("production_runtime_contract")
+    repository_root = Path(__file__).resolve().parents[1]
+    expected_runtime_sha256 = {
+        relative: _sha256_file(repository_root / relative)
+        for relative in HOPTIMUS1_PRODUCTION_RUNTIME_FILES
+    }
+    if (
+        value.get("schema") != HOPTIMUS1_PARITY_SCHEMA
+        or value.get("status") != "passed"
+        or value.get("passed") is not True
+        or value.get("repository") != HOPTIMUS1_REPOSITORY
+        or value.get("revision") != HOPTIMUS1_REVISION
+        or value.get("encoder_manifest_sha256") != encoder_manifest.sha256
+        or value.get("implementation_sha256") != HOPTIMUS1_PARITY_IMPLEMENTATION_SHA256
+        or not isinstance(model, Mapping)
+        or model.get("repository") != HOPTIMUS1_REPOSITORY
+        or model.get("revision") != HOPTIMUS1_REVISION
+        or model.get("manifest_sha256") != HOPTIMUS1_MANIFEST_SHA256
+        or model.get("config_sha256") != HOPTIMUS1_CONFIG_SHA256
+        or model.get("checkpoint_sha256") != HOPTIMUS1_CHECKPOINT_SHA256
+        or model.get("checkpoint_filename") != "model.safetensors"
+        or model.get("local_fp16_path") != "HOptimus1Encoder.encode_exact_biological_path"
+        or not isinstance(embedding, Mapping)
+        or embedding.get("shape") != [5, 1536]
+        or embedding.get("all_finite") is not True
+        or not isinstance(runtime, Mapping)
+        or runtime.get("code_sha256") != expected_runtime_sha256
+    ):
+        raise ValueError("H-optimus-1 official/local parity receipt did not pass")
+    probe = runtime.get("resampling_probe")
+    native_pixels = int(round(112.0 / 0.2125))
+    probe_input = (
+        np.arange(native_pixels * native_pixels * 3, dtype=np.uint32).reshape(
+            native_pixels, native_pixels, 3
+        )
+        % 251
+    ).astype(np.uint8)
+    probe_output = _resize_hoptimus1_batch(probe_input[None], 224)[0]
+    expected_probe = {
+        "input_shape": list(probe_input.shape),
+        "input_dtype": str(probe_input.dtype),
+        "input_sha256": hashlib.sha256(probe_input.tobytes()).hexdigest(),
+        "output_shape": list(probe_output.shape),
+        "output_dtype": str(probe_output.dtype),
+        "output_sha256": hashlib.sha256(probe_output.tobytes()).hexdigest(),
+        "implementation": "Pillow.Image.Resampling.BICUBIC",
+        "resampling_count": 1,
+    }
+    if not isinstance(probe, Mapping) or any(
+        probe.get(field) != expected for field, expected in expected_probe.items()
+    ):
+        raise ValueError("H-optimus-1 parity receipt does not bind production resampling")
+    comparisons = value.get("comparisons")
+    thresholds = {
+        "official_fp32_vs_local_fp32": 0.999999,
+        "local_fp32_vs_local_fp16": 0.9999,
+    }
+    if not isinstance(comparisons, Mapping):
+        raise ValueError("H-optimus-1 parity comparisons are incomplete or failed")
+    for name, threshold in thresholds.items():
+        row = comparisons.get(name)
+        numeric_fields = (
+            "minimum_cosine",
+            "mean_cosine",
+            "mean_absolute_error",
+            "maximum_absolute_error",
+        )
+        if (
+            not isinstance(row, Mapping)
+            or row.get("passed") is not True
+            or float(row.get("minimum_required_cosine", float("nan"))) != threshold
+            or float(row.get("minimum_cosine", float("nan"))) < threshold
+            or not np.isfinite(
+                [float(row.get(field, float("nan"))) for field in numeric_fields]
+            ).all()
+        ):
+            raise ValueError("H-optimus-1 parity comparisons are incomplete or failed")
+    return receipt_sha256
+
+
+def _validate_registered_comparison_source(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if (
+        not resolved.is_file()
+        or _sha256_file(resolved) != REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256
+    ):
+        raise ValueError("comparison source differs from the registered UNI2-h HEST artifact")
+    with np.load(resolved, allow_pickle=False) as archive:
+        required = {
+            "schema_version": RETROSPECTIVE_SOURCE_SCHEMA,
+            "study_stage": RETROSPECTIVE_SOURCE_STAGE,
+            "analysis_status": "retrospective_exposed_non_authorizing",
+            "encoder_name": UNI2H_REPOSITORY,
+        }
+        for field, expected in required.items():
+            if (
+                field not in archive.files
+                or np.asarray(archive[field]).reshape(()).item() != expected
+            ):
+                raise ValueError("comparison source identity is not the registered UNI2-h artifact")
+    return resolved
+
+
+def _validate_only_encoder_changed(
+    payload: Mapping[str, object], comparison_source: Path
+) -> Mapping[str, object]:
+    """Require byte-identical non-encoder HEST source content."""
+
+    with np.load(comparison_source, allow_pickle=False) as archive:
+        candidate_fields = set(payload) - ENCODER_DEPENDENT_SOURCE_FIELDS
+        comparison_fields = set(archive.files) - ENCODER_DEPENDENT_SOURCE_FIELDS
+        if candidate_fields != comparison_fields:
+            missing = sorted(comparison_fields - candidate_fields)
+            added = sorted(candidate_fields - comparison_fields)
+            raise ValueError(
+                "H-optimus-1 qualification non-encoder field set differs from UNI2-h: "
+                f"missing={missing[:5]} added={added[:5]}"
+            )
+        field_hashes: dict[str, str] = {}
+        for field in sorted(candidate_fields):
+            candidate = np.asarray(payload[field])
+            comparison = np.asarray(archive[field])
+            candidate_sha256 = _array_sha256(candidate)
+            comparison_sha256 = _array_sha256(comparison)
+            if candidate_sha256 != comparison_sha256:
+                raise ValueError(
+                    "H-optimus-1 qualification changed non-encoder HEST field: " + field
+                )
+            field_hashes[field] = candidate_sha256
+    return {
+        "schema": "heir.hest_only_encoder_changed.v1",
+        "comparison_source_sha256": REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256,
+        "excluded_encoder_fields": sorted(ENCODER_DEPENDENT_SOURCE_FIELDS),
+        "compared_field_count": len(field_hashes),
+        "field_hash_manifest_sha256": _canonical_sha256(field_hashes),
+    }
 
 
 REGISTRATION_QUALITY_DEFINITION = (
@@ -3199,6 +3433,33 @@ def _apply_crop_variant(
     return patch, padding_fraction, float(mask.mean())
 
 
+def _resize_hoptimus1_batch(patches: np.ndarray, input_pixels: int) -> np.ndarray:
+    """Apply the one qualified Pillow-bicubic HEST canvas conversion."""
+
+    values = np.asarray(patches)
+    if values.ndim != 4 or values.shape[-1] != 3 or values.dtype != np.uint8:
+        raise ValueError("registered HEST patches must be NHWC uint8 RGB")
+    if values.shape[1] != values.shape[2] or values.shape[1] == input_pixels:
+        raise ValueError(
+            "H-optimus-1 HEST qualification requires one native-canvas-to-224 resampling"
+        )
+    try:
+        from PIL import Image
+    except ImportError as error:  # pragma: no cover - optional runtime dependency
+        raise RuntimeError("install Pillow for qualified H-optimus-1 resampling") from error
+    return np.stack(
+        [
+            np.asarray(
+                Image.fromarray(patch, mode="RGB").resize(
+                    (input_pixels, input_pixels), resample=Image.Resampling.BICUBIC
+                ),
+                dtype=np.uint8,
+            )
+            for patch in values
+        ]
+    )
+
+
 GEOMETRY_FEATURE_NAMES = (
     "area_um2",
     "perimeter_um",
@@ -3752,6 +4013,154 @@ def _write_npz(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
+def _section_cache_input_identity(
+    rows: _Rows,
+    start: int,
+    end: int,
+    sample: Sample,
+) -> Mapping[str, object]:
+    cellvit_centres = (
+        np.asarray(rows.cellvit_centres[start:end], dtype=np.float64)
+        if rows.cellvit_names is not None
+        else np.empty((0, 2), dtype=np.float64)
+    )
+    return {
+        "sample_id": sample.sample_id,
+        "pixel_size_um": sample.pixel_size_um,
+        "input_files": {
+            "wsi_sha256": sample.wsi.sha256,
+            "transcripts_sha256": sample.transcripts.sha256,
+            "cell_seg_sha256": sample.cell_seg.sha256,
+            "nucleus_seg_sha256": sample.nucleus_seg.sha256,
+            "cellvit_seg_sha256": None if sample.cellvit_seg is None else sample.cellvit_seg.sha256,
+        },
+        "observation_ids_sha256": _array_sha256(
+            np.asarray(rows.observation_ids[start:end], dtype=str)
+        ),
+        "nucleus_centres_sha256": _array_sha256(
+            np.asarray(rows.centres[start:end], dtype=np.float64)
+        ),
+        "cell_centres_sha256": _array_sha256(
+            np.asarray(rows.cell_centres[start:end], dtype=np.float64)
+        ),
+        "nucleus_polygons_sha256": _ragged_array_sha256(rows.nucleus_vertices[start:end]),
+        "cell_polygons_sha256": _ragged_array_sha256(rows.cell_vertices[start:end]),
+        "cellvit_centres_sha256": _array_sha256(cellvit_centres),
+    }
+
+
+def _validated_cache_array(
+    cache: object,
+    name: str,
+    shape: tuple[int, ...],
+    dtype: np.dtype,
+    *,
+    unit_interval: bool = False,
+) -> np.ndarray:
+    files = set(getattr(cache, "files", cache.keys() if isinstance(cache, Mapping) else ()))
+    if name not in files:
+        raise ValueError("HEST encoder section cache is missing array: " + name)
+    array = np.asarray(cache[name])  # type: ignore[index]
+    if array.shape != shape or array.dtype != dtype or not np.isfinite(array).all():
+        raise ValueError("HEST encoder section cache array is malformed: " + name)
+    if unit_interval and (np.any(array < 0.0) or np.any(array > 1.0)):
+        raise ValueError("HEST encoder section cache fraction is outside [0, 1]: " + name)
+    return array
+
+
+def _load_hest_encoder_section_cache(
+    cache: object,
+    *,
+    expected_identity_sha256: str,
+    expected_observation_ids: np.ndarray,
+    rows: int,
+    crops: int,
+    feature_width: int,
+    has_cellvit: bool,
+) -> Mapping[str, np.ndarray]:
+    files = set(getattr(cache, "files", cache.keys() if isinstance(cache, Mapping) else ()))
+    required_scalars = {"schema", "cache_identity_sha256", "cache_identity_json"}
+    if not required_scalars <= files:
+        raise ValueError("HEST encoder section cache identity is incomplete")
+    if (
+        str(np.asarray(cache["schema"]).reshape(()).item()) != HEST_ENCODER_CACHE_SCHEMA  # type: ignore[index]
+        or str(np.asarray(cache["cache_identity_sha256"]).reshape(()).item())  # type: ignore[index]
+        != expected_identity_sha256
+    ):
+        raise ValueError("HEST encoder section cache identity differs from inputs")
+    try:
+        cached_identity = json.loads(
+            str(np.asarray(cache["cache_identity_json"]).reshape(()).item())  # type: ignore[index]
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("HEST encoder section cache identity JSON is malformed") from error
+    if _canonical_sha256(cached_identity) != expected_identity_sha256:
+        raise ValueError("HEST encoder section cache identity JSON differs from inputs")
+    observation_ids = np.asarray(cache["observation_ids"]).astype(str)  # type: ignore[index]
+    if observation_ids.shape != (rows,) or not np.array_equal(
+        observation_ids, expected_observation_ids.astype(str)
+    ):
+        raise ValueError("HEST encoder section cache observation IDs differ from inputs")
+    result = {
+        "image_features": _validated_cache_array(
+            cache, "image_features", (rows, crops, feature_width), np.dtype(np.float32)
+        ),
+        "crop_padding_fractions": _validated_cache_array(
+            cache,
+            "crop_padding_fractions",
+            (rows, crops),
+            np.dtype(np.float32),
+            unit_interval=True,
+        ),
+        "crop_mask_fractions": _validated_cache_array(
+            cache,
+            "crop_mask_fractions",
+            (rows, crops),
+            np.dtype(np.float32),
+            unit_interval=True,
+        ),
+        "stain_quality_local": _validated_cache_array(
+            cache,
+            "stain_quality_local",
+            (rows, len(STAIN_QUALITY_FEATURE_NAMES)),
+            np.dtype(np.float32),
+        ),
+        "nucleus_texture_features": _validated_cache_array(
+            cache,
+            "nucleus_texture_features",
+            (rows, len(REGION_TEXTURE_FEATURE_NAMES)),
+            np.dtype(np.float32),
+        ),
+        "cell_texture_features": _validated_cache_array(
+            cache,
+            "cell_texture_features",
+            (rows, len(REGION_TEXTURE_FEATURE_NAMES)),
+            np.dtype(np.float32),
+        ),
+        "coordinate_base_features": _validated_cache_array(
+            cache,
+            "coordinate_base_features",
+            (rows, len(COORDINATE_BASE_FEATURE_NAMES)),
+            np.dtype(np.float32),
+        ),
+    }
+    if has_cellvit:
+        result["cellvit_nearest_features"] = _validated_cache_array(
+            cache,
+            "cellvit_nearest_features",
+            (rows, feature_width),
+            np.dtype(np.float32),
+        )
+        result["cellvit_nearest_padding_fractions"] = _validated_cache_array(
+            cache,
+            "cellvit_nearest_padding_fractions",
+            (rows,),
+            np.dtype(np.float32),
+            unit_interval=True,
+        )
+    return result
+
+
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -3789,9 +4198,13 @@ def build_source(
     training_label_ontology_source_path: Optional[Path] = None,
     annotation_validation_export_path: Optional[Path] = None,
     device: str = "cuda",
-    batch_size: int = 64,
+    batch_size: int = 4,
     encoder: Optional[FrozenPatchEncoder] = None,
     retrospective: bool = False,
+    retrospective_encoder_qualification: bool = False,
+    encoder_parity_receipt_path: Optional[Path] = None,
+    comparison_source_path: Optional[Path] = None,
+    embedding_cache_dir: Optional[Path] = None,
     retrospective_max_cells_per_section_type_pool: int = 32,
     retrospective_max_observations: int = 75_000,
 ) -> None:
@@ -3804,6 +4217,9 @@ def build_source(
     output_path = output_path.expanduser().resolve()
     plan_output_path = plan_output_path.expanduser().resolve()
     qc_output_path = qc_output_path.expanduser().resolve()
+    if embedding_cache_dir is not None:
+        embedding_cache_dir = embedding_cache_dir.expanduser().resolve()
+        embedding_cache_dir.mkdir(parents=True, exist_ok=True)
     repository_root = Path(__file__).resolve().parents[1]
     manifest_identity = StudyManifest.load(study_manifest_path)
     if retrospective:
@@ -3869,7 +4285,29 @@ def build_source(
     encoder_manifest = _load_encoder_manifest(encoder_manifest_path)
     crop_manifest = _load_crop_manifest(crop_manifest_path)
     protocol = _read_json(protocol_path)
-    samples = _validate_protocol(protocol, encoder_manifest, crop_manifest)
+    if retrospective_encoder_qualification:
+        _validate_retrospective_encoder_qualification(encoder_manifest, retrospective=retrospective)
+        if not 1 <= batch_size <= 4:
+            raise ValueError("H-optimus-1 qualification batch size must lie in [1, 4]")
+        qualification_protocol = dict(protocol)
+        qualification_protocol["encoder_manifest_sha256"] = encoder_manifest.sha256
+        samples = _validate_protocol(qualification_protocol, encoder_manifest, crop_manifest)
+        if encoder_parity_receipt_path is None:
+            raise ValueError("H-optimus-1 qualification requires a parity receipt")
+        if comparison_source_path is None:
+            raise ValueError("H-optimus-1 qualification requires --comparison-source")
+        comparison_source_path = _validate_registered_comparison_source(comparison_source_path)
+        if comparison_source_path == output_path:
+            raise ValueError("comparison source cannot be overwritten by the qualification output")
+        encoder_parity_receipt_path = encoder_parity_receipt_path.expanduser().resolve()
+        encoder_parity_receipt_sha256 = _validate_hoptimus1_parity_receipt(
+            encoder_parity_receipt_path, encoder_manifest
+        )
+    else:
+        if comparison_source_path is not None:
+            raise ValueError("comparison source is accepted only for H-optimus-1 qualification")
+        samples = _validate_protocol(protocol, encoder_manifest, crop_manifest)
+        encoder_parity_receipt_sha256 = None
     if retrospective:
         indexed_variants = {variant.crop_id: variant for variant in crop_manifest.variants}
         crop_manifest = CropManifest(
@@ -4215,9 +4653,11 @@ def build_source(
         coordinate_registration = _fit_coordinate_registration(
             transcript_path, sample.pixel_size_um
         )
-        if coordinate_registration.residual_p95_um > float(
-            protocol["maximum_affine_registration_residual_p95_um"]
-        ) and not retrospective:
+        if (
+            coordinate_registration.residual_p95_um
+            > float(protocol["maximum_affine_registration_residual_p95_um"])
+            and not retrospective
+        ):
             raise ValueError(
                 "HEST %s Xenium-to-H&E affine registration p95 %.6f um exceeds the protocol"
                 % (sample.sample_id, coordinate_registration.residual_p95_um)
@@ -4254,8 +4694,7 @@ def build_source(
                 % (sample.sample_id, annotation_distance_p95)
             )
         if (
-            registration_outlier_fraction
-            > float(protocol["maximum_registration_outlier_fraction"])
+            registration_outlier_fraction > float(protocol["maximum_registration_outlier_fraction"])
             and not retrospective
         ):
             raise ValueError(
@@ -4305,10 +4744,9 @@ def build_source(
                     continue
                 key = (annotated[cell_id].fine_type, spatial.pool_role)
                 score = hashlib.sha256(
-                    (
-                        "%s|%s|%s"
-                        % (RETROSPECTIVE_SAMPLING_SALT, sample.sample_id, cell_id)
-                    ).encode("utf-8")
+                    ("%s|%s|%s" % (RETROSPECTIVE_SAMPLING_SALT, sample.sample_id, cell_id)).encode(
+                        "utf-8"
+                    )
                 ).hexdigest()
                 candidates.setdefault(key, []).append((score, index))
             retrospective_selected = {
@@ -4546,8 +4984,7 @@ def build_source(
                     < minimum_evaluation
                 )
                 locked_stratum = bool(
-                    prospective_confirmatory
-                    and np.all(preliminary_splits[local] == "locked_test")
+                    prospective_confirmatory and np.all(preliminary_splits[local] == "locked_test")
                 )
                 if insufficient and not locked_stratum:
                     retained[local] = False
@@ -4703,8 +5140,7 @@ def build_source(
     for donor in active_donors:
         donor_mask = donors == str(donor)
         locked_donor = bool(
-            prospective_confirmatory
-            and str(donor) in set(study_manifest.locked_test_donors)
+            prospective_confirmatory and str(donor) in set(study_manifest.locked_test_donors)
         )
         for section_id in sorted(set(sections[donor_mask].tolist())):
             section_mask = donor_mask & (sections == section_id)
@@ -4793,6 +5229,71 @@ def build_source(
     for start, end, sample, wsi_path in rows.sample_rows:
         if start == end:
             continue
+        cache_path = (
+            None
+            if embedding_cache_dir is None
+            else embedding_cache_dir
+            / (
+                f"{sample.sample_id}.{encoder_manifest.encoder_id}."
+                f"{active_crop_manifest_sha256[:12]}.npz"
+            )
+        )
+        expected_observation_ids = np.asarray(rows.observation_ids[start:end])
+        section_cache_identity = {
+            "schema": HEST_ENCODER_CACHE_SCHEMA,
+            "encoder_manifest_sha256": encoder_manifest.sha256,
+            "encoder_parity_receipt_sha256": encoder_parity_receipt_sha256,
+            "encoder_parity_implementation_sha256": (
+                HOPTIMUS1_PARITY_IMPLEMENTATION_SHA256
+                if retrospective_encoder_qualification
+                else None
+            ),
+            "crop_materialization_sha256": active_crop_manifest_sha256,
+            "encoder_input_preprocessing": (
+                {
+                    "physical_field_of_view_um": float(primary_variant.diameter_um),
+                    "native_source_mpp": float(crop_manifest.source_mpp),
+                    "model_mpp": float(encoder_manifest.model_mpp),
+                    "model_input_pixels": int(encoder_manifest.input_pixels),
+                    "resampling": "Pillow.Image.Resampling.BICUBIC",
+                    "resampling_count": 1,
+                }
+                if retrospective_encoder_qualification
+                else "encoder_adapter_manifest_preprocessing"
+            ),
+            "section_inputs": _section_cache_input_identity(rows, start, end, sample),
+        }
+        section_cache_identity_sha256 = _canonical_sha256(section_cache_identity)
+        if cache_path is not None and cache_path.is_file():
+            with np.load(cache_path, allow_pickle=False) as cache:
+                cached = _load_hest_encoder_section_cache(
+                    cache,
+                    expected_identity_sha256=section_cache_identity_sha256,
+                    expected_observation_ids=expected_observation_ids,
+                    rows=end - start,
+                    crops=len(crop_manifest.variants),
+                    feature_width=encoder_manifest.feature_width,
+                    has_cellvit=cellvit_nearest_features is not None,
+                )
+                image_features[start:end] = cached["image_features"]
+                crop_padding_fractions[start:end] = cached["crop_padding_fractions"]
+                crop_mask_fractions[start:end] = cached["crop_mask_fractions"]
+                stain_quality_local[start:end] = cached["stain_quality_local"]
+                nucleus_texture_features[start:end] = cached["nucleus_texture_features"]
+                cell_texture_features[start:end] = cached["cell_texture_features"]
+                coordinate_base_features[start:end] = cached["coordinate_base_features"]
+                if cellvit_nearest_features is not None:
+                    cellvit_nearest_features[start:end] = cached["cellvit_nearest_features"]
+                    assert cellvit_nearest_padding_fractions is not None
+                    cellvit_nearest_padding_fractions[start:end] = cached[
+                        "cellvit_nearest_padding_fractions"
+                    ]
+            print(
+                "HEST image features: sample=%s rows=%d complete_cached"
+                % (sample.sample_id, end - start),
+                flush=True,
+            )
+            continue
         with _TiffPatchReader(wsi_path) as slide:
             local_centres = rows.centres[start:end]
             local_nucleus_vertices = rows.nucleus_vertices[start:end]
@@ -4805,18 +5306,19 @@ def build_source(
                 batch_end: int,
             ) -> None:
                 patches = np.stack([value[0] for value in rendered])
-                encoded = np.asarray(encoder.encode(patches), dtype=np.float32)
+                encoder_patches = (
+                    _resize_hoptimus1_batch(patches, encoder_manifest.input_pixels)
+                    if retrospective_encoder_qualification
+                    else patches
+                )
+                encoded = np.asarray(encoder.encode(encoder_patches), dtype=np.float32)
                 expected = (batch_end - batch_start, encoder_manifest.feature_width)
                 if encoded.shape != expected or not np.isfinite(encoded).all():
                     raise ValueError("HEST frozen encoder features are malformed")
                 output_slice = slice(start + batch_start, start + batch_end)
                 image_features[output_slice, crop_index] = encoded
-                crop_padding_fractions[output_slice, crop_index] = [
-                    value[1] for value in rendered
-                ]
-                crop_mask_fractions[output_slice, crop_index] = [
-                    value[2] for value in rendered
-                ]
+                crop_padding_fractions[output_slice, crop_index] = [value[1] for value in rendered]
+                crop_mask_fractions[output_slice, crop_index] = [value[2] for value in rendered]
                 if crop_index == primary_crop_index:
                     primary_size = int(
                         round(primary_variant.diameter_um / crop_manifest.source_mpp)
@@ -4905,8 +5407,14 @@ def build_source(
                         )
                         for index in range(batch_start, batch_end)
                     ]
+                    patches = np.stack([value[0] for value in rendered])
+                    encoder_patches = (
+                        _resize_hoptimus1_batch(patches, encoder_manifest.input_pixels)
+                        if retrospective_encoder_qualification
+                        else patches
+                    )
                     encoded = np.asarray(
-                        encoder.encode(np.stack([value[0] for value in rendered])),
+                        encoder.encode(encoder_patches),
                         dtype=np.float32,
                     )
                     expected = (batch_end - batch_start, encoder_manifest.feature_width)
@@ -4948,6 +5456,32 @@ def build_source(
                     edge_distance_um,
                 )
             )
+        if cache_path is not None:
+            cache_payload: Dict[str, object] = {
+                "schema": np.asarray(HEST_ENCODER_CACHE_SCHEMA),
+                "cache_identity_sha256": np.asarray(section_cache_identity_sha256),
+                "cache_identity_json": np.asarray(
+                    json.dumps(section_cache_identity, sort_keys=True, separators=(",", ":"))
+                ),
+                "encoder_manifest_sha256": np.asarray(encoder_manifest.sha256),
+                "crop_materialization_sha256": np.asarray(active_crop_manifest_sha256),
+                "wsi_sha256": np.asarray(sample.wsi.sha256),
+                "observation_ids": expected_observation_ids,
+                "image_features": image_features[start:end],
+                "crop_padding_fractions": crop_padding_fractions[start:end],
+                "crop_mask_fractions": crop_mask_fractions[start:end],
+                "stain_quality_local": stain_quality_local[start:end],
+                "nucleus_texture_features": nucleus_texture_features[start:end],
+                "cell_texture_features": cell_texture_features[start:end],
+                "coordinate_base_features": coordinate_base_features[start:end],
+            }
+            if cellvit_nearest_features is not None:
+                assert cellvit_nearest_padding_fractions is not None
+                cache_payload["cellvit_nearest_features"] = cellvit_nearest_features[start:end]
+                cache_payload["cellvit_nearest_padding_fractions"] = (
+                    cellvit_nearest_padding_fractions[start:end]
+                )
+            _write_npz(cache_path, cache_payload)
         print(
             "HEST image features: sample=%s rows=%d complete" % (sample.sample_id, end - start),
             flush=True,
@@ -5350,27 +5884,51 @@ def build_source(
                 "sampling_salt_sha256": hashlib.sha256(
                     RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
                 ).hexdigest(),
-                "max_cells_per_section_type_pool": (
-                    retrospective_max_cells_per_section_type_pool
-                ),
+                "max_cells_per_section_type_pool": (retrospective_max_cells_per_section_type_pool),
                 "max_observations": retrospective_max_observations,
             }
             if retrospective
             else None
         ),
-        "locked_donor_outcomes_materialized": (
-            prospective_confirmatory or retrospective
-        ),
+        "locked_donor_outcomes_materialized": (prospective_confirmatory or retrospective),
         "protocol_sha256": _sha256_file(protocol_path),
         "dataset_repo": DATASET_REPO,
         "dataset_revision": DATASET_REVISION,
         "encoder_manifest_sha256": encoder_manifest.sha256,
+        "encoder_parity_receipt_sha256": encoder_parity_receipt_sha256,
+        "encoder_parity_receipt_path": (
+            None if encoder_parity_receipt_path is None else str(encoder_parity_receipt_path)
+        ),
+        "encoder_comparison_source": (
+            None
+            if comparison_source_path is None
+            else {
+                "path": str(comparison_source_path),
+                "sha256": REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256,
+            }
+        ),
         "crop_manifest_sha256": parent_crop_manifest_sha256,
         "crop_materialization_sha256": active_crop_manifest_sha256,
         "model_repo": encoder_manifest.repository,
         "model_revision": encoder_manifest.revision,
         "model_config_sha256": encoder_manifest.config_sha256,
         "model_checkpoint_sha256": encoder_manifest.checkpoint_sha256,
+        "encoder_input_preprocessing": (
+            {
+                "physical_field_of_view_um": float(primary_variant.diameter_um),
+                "native_source_mpp": float(crop_manifest.source_mpp),
+                "native_crop_pixels": int(
+                    round(primary_variant.diameter_um / crop_manifest.source_mpp)
+                ),
+                "model_mpp": float(encoder_manifest.model_mpp),
+                "model_input_pixels": int(encoder_manifest.input_pixels),
+                "resampling": "Pillow.Image.Resampling.BICUBIC",
+                "resampling_count": 1,
+                "encoder_received_pre_sized_input": True,
+            }
+            if retrospective_encoder_qualification
+            else {"method": "encoder_adapter_manifest_preprocessing"}
+        ),
         "annotation_source": "GSE250346 corrected Seurat metadata export",
         "annotation_sha256": annotation_declaration.sha256,
         "annotation_parent_sha256": full_annotation_declaration.sha256,
@@ -5478,9 +6036,7 @@ def build_source(
         "prior_outcome_exposure_receipt_sha256": np.asarray(exposure_receipt_sha256 or ""),
         "source_scope": np.asarray(source_scope),
         "analysis_status": np.asarray(
-            "retrospective_exposed_non_authorizing"
-            if retrospective
-            else "prospective_contract"
+            "retrospective_exposed_non_authorizing" if retrospective else "prospective_contract"
         ),
         "authorizes_h_cell": np.asarray(False),
         "authorizes_h_intrinsic": np.asarray(False),
@@ -5503,9 +6059,7 @@ def build_source(
             )
         ),
         "opposite_pool_guard_um": np.asarray(float(protocol["opposite_pool_guard_um"])),
-        "locked_donor_outcomes_materialized": np.asarray(
-            prospective_confirmatory or retrospective
-        ),
+        "locked_donor_outcomes_materialized": np.asarray(prospective_confirmatory or retrospective),
         "observation_ids": np.asarray(rows.observation_ids),
         "observation_id": np.asarray(rows.observation_ids),
         "cell_id": np.asarray(rows.cell_ids),
@@ -5709,6 +6263,7 @@ def build_source(
         "feature_config_sha256": np.asarray(encoder_manifest.config_sha256),
         "encoder_revision": np.asarray(encoder_manifest.revision),
         "encoder_manifest_sha256": np.asarray(encoder_manifest.sha256),
+        "encoder_parity_receipt_sha256": np.asarray(encoder_parity_receipt_sha256 or ""),
         "crop_manifest_sha256": np.asarray(parent_crop_manifest_sha256),
         "crop_materialization_sha256": np.asarray(active_crop_manifest_sha256),
         "registration_method": np.asarray(protocol["registration_method"]),
@@ -5833,6 +6388,19 @@ def build_source(
     else:
         payload["cellvit_context_features"] = np.empty((observations, 0), dtype=np.float32)
         payload["cellvit_context_feature_names"] = np.asarray([], dtype=str)
+    comparison_receipt: Optional[Mapping[str, object]] = None
+    if retrospective_encoder_qualification:
+        assert comparison_source_path is not None
+        assert encoder_parity_receipt_path is not None
+        payload["encoder_parity_receipt_path"] = np.asarray(str(encoder_parity_receipt_path))
+        payload["encoder_comparison_source_path"] = np.asarray(str(comparison_source_path))
+        payload["encoder_comparison_source_sha256"] = np.asarray(
+            REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256
+        )
+        comparison_receipt = _validate_only_encoder_changed(payload, comparison_source_path)
+        payload["encoder_comparison_non_encoder_identity_sha256"] = np.asarray(
+            comparison_receipt["field_hash_manifest_sha256"]
+        )
     print("HEST writing registered source: %s" % output_path, flush=True)
     _write_npz(output_path, payload)
     source_sha256 = _sha256_file(output_path)
@@ -5873,17 +6441,13 @@ def build_source(
                 "sampling_salt_sha256": hashlib.sha256(
                     RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
                 ).hexdigest(),
-                "max_cells_per_section_type_pool": (
-                    retrospective_max_cells_per_section_type_pool
-                ),
+                "max_cells_per_section_type_pool": (retrospective_max_cells_per_section_type_pool),
                 "max_observations": retrospective_max_observations,
             }
             if retrospective
             else None
         ),
-        "locked_donor_outcomes_materialized": (
-            prospective_confirmatory or retrospective
-        ),
+        "locked_donor_outcomes_materialized": (prospective_confirmatory or retrospective),
         "source_schema": source_schema,
         "source_schema_sha256": _canonical_sha256(source_schema),
         "source_observations_sha256": source_sha256,
@@ -5895,12 +6459,33 @@ def build_source(
             "path": str(encoder_manifest_path),
             "sha256": encoder_manifest.sha256,
         },
+        "encoder_parity_receipt_sha256": encoder_parity_receipt_sha256,
+        "encoder_parity_receipt_path": (
+            None if encoder_parity_receipt_path is None else str(encoder_parity_receipt_path)
+        ),
+        "encoder_comparison_source": (
+            None
+            if comparison_source_path is None
+            else {
+                "path": str(comparison_source_path),
+                "sha256": REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256,
+                "only_encoder_changed_receipt": comparison_receipt,
+            }
+        ),
         "crop_manifest": {
             "path": str(crop_manifest_path),
             "sha256": parent_crop_manifest_sha256,
             "materialization_sha256": active_crop_manifest_sha256,
         },
-        "experiment_role": "primary_hest_uni2h",
+        "experiment_role": _experiment_role(
+            encoder_manifest.repository, retrospective_encoder_qualification
+        ),
+        "encoder_comparison_role": (
+            "primary_encoder_qualification_against_prespecified_UNI2h_historical_comparator"
+            if retrospective_encoder_qualification
+            else "prespecified_UNI2h_historical_comparator"
+        ),
+        "qualification_changes_only_encoder": bool(retrospective_encoder_qualification),
         "scientific_scope": "registered_cell_local_context_112um_association",
         "g2_claim_scope": "registered_cell_local_context_112um",
         "nucleus_hypothesis_tested": False,
@@ -6197,9 +6782,7 @@ def build_source(
             "permutations_per_seed": 100,
             "minimum_support": minimum_evaluation,
             "minimum_development_donors": 5,
-            "minimum_locked_donors": (
-                5 if prospective_confirmatory else 0
-            ),
+            "minimum_locked_donors": (5 if prospective_confirmatory else 0),
             "minimum_coverage_fraction": 0.7,
             "minimum_shuffled_fraction": 0.7,
             "nulls": ["within_roi_derangement", "spatial_block_reassignment"],
@@ -6269,17 +6852,13 @@ def build_source(
                 "sampling_salt_sha256": hashlib.sha256(
                     RETROSPECTIVE_SAMPLING_SALT.encode("utf-8")
                 ).hexdigest(),
-                "max_cells_per_section_type_pool": (
-                    retrospective_max_cells_per_section_type_pool
-                ),
+                "max_cells_per_section_type_pool": (retrospective_max_cells_per_section_type_pool),
                 "max_observations": retrospective_max_observations,
             }
             if retrospective
             else None
         ),
-        "locked_donor_outcomes_materialized": (
-            prospective_confirmatory or retrospective
-        ),
+        "locked_donor_outcomes_materialized": (prospective_confirmatory or retrospective),
         "source_observations": {
             "path": str(output_path),
             "sha256": source_sha256,
@@ -6291,6 +6870,19 @@ def build_source(
         },
         "protocol_sha256": _sha256_file(protocol_path),
         "encoder_manifest_sha256": encoder_manifest.sha256,
+        "encoder_parity_receipt_sha256": encoder_parity_receipt_sha256,
+        "encoder_parity_receipt_path": (
+            None if encoder_parity_receipt_path is None else str(encoder_parity_receipt_path)
+        ),
+        "encoder_comparison_source": (
+            None
+            if comparison_source_path is None
+            else {
+                "path": str(comparison_source_path),
+                "sha256": REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256,
+                "only_encoder_changed_receipt": comparison_receipt,
+            }
+        ),
         "crop_manifest_sha256": parent_crop_manifest_sha256,
         "crop_materialization_sha256": active_crop_manifest_sha256,
         "annotation_sha256": annotation_declaration.sha256,
@@ -6298,9 +6890,7 @@ def build_source(
             "method": str(protocol["registration_method"]),
             "primary_key": "section_scoped_native_xenium_cell_id",
             "annotation_centroid_distance_role": (
-                "retrospective_stress_qc_not_pairing_key"
-                if retrospective
-                else "prospective_gate"
+                "retrospective_stress_qc_not_pairing_key" if retrospective else "prospective_gate"
             ),
             "one_to_one": True,
             "duplicate_observation_ids": 0,
@@ -6423,11 +7013,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--training-label-ontology-source", type=Path, default=None)
     parser.add_argument("--annotation-validation-export", type=Path, default=None)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--embedding-cache-dir",
+        type=Path,
+        default=None,
+        help="optional atomic per-section frozen-feature cache for resumable long runs",
+    )
     parser.add_argument(
         "--retrospective",
         action="store_true",
         help="build an exposed, all-15-donor, non-authorizing four-arm source",
+    )
+    parser.add_argument(
+        "--retrospective-encoder-qualification",
+        action="store_true",
+        help=(
+            "reuse the exposed HEST design while changing only the encoder to the exact "
+            "pinned H-optimus-1 qualification arm"
+        ),
+    )
+    parser.add_argument(
+        "--encoder-parity-receipt",
+        type=Path,
+        default=None,
+        help="passed official-versus-local H-optimus-1 parity JSON",
+    )
+    parser.add_argument(
+        "--comparison-source",
+        type=Path,
+        default=None,
+        help=(
+            "registered UNI2-h HEST source; required for exact only-encoder-changed "
+            "H-optimus-1 qualification"
+        ),
     )
     parser.add_argument(
         "--retrospective-max-cells-per-section-type-pool",
@@ -6460,6 +7079,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         device=args.device,
         batch_size=args.batch_size,
         retrospective=args.retrospective,
+        retrospective_encoder_qualification=args.retrospective_encoder_qualification,
+        encoder_parity_receipt_path=args.encoder_parity_receipt,
+        comparison_source_path=args.comparison_source,
+        embedding_cache_dir=args.embedding_cache_dir,
         retrospective_max_cells_per_section_type_pool=(
             args.retrospective_max_cells_per_section_type_pool
         ),

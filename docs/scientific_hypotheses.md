@@ -152,8 +152,10 @@ Authorization: a pass permits a general morphology–state claim within the lock
 
 ## Frozen encoder hierarchy
 
-The H-CELL primary encoder is UNI2-h. H-Optimus-1 is replication 1 when its gated checkpoint is
-available, and H0-mini is replication 2 when available. These are frozen design-template labels,
-not evidence of a valid historical preregistration: the existing HEST outcomes were already
-materialized. They may not be reassigned in a future pristine study after any confirmatory molecular
-outcome is observed.
+For experiments begun after the 2026-07-13 access decision, the H-CELL primary encoder is frozen
+H-optimus-1 revision `3592cb220dec7a150c5d7813fb56e68bd57473b9`. UNI2-h is the fixed secondary
+encoder comparator because the already-opened negative HEST evidence used UNI2-h; it is never
+silently substituted into a new primary arm. H0-mini remains a gated second replication when
+available. These roles were frozen before any H-optimus-1 molecular outcome was opened. The existing
+HEST outcomes remain retrospective, so a same-cohort H-optimus-1 run is a bounded encoder
+qualification rather than pristine confirmation.

@@ -435,6 +435,14 @@ def test_ridge_gate_refits_preserving_null_and_does_not_authorize_heir() -> None
     assert report["nucleus_hypothesis_tested"] is False
     assert report["morphology_source_conclusion"] == "not_tested"
     assert report["crop_source_not_inferred_from_observation_level"] is True
+    assert report["encoder_hierarchy"] == {
+        "primary": "bioptimus/H-optimus-1",
+        "fixed_historical_comparator": "MahmoodLab/UNI2-h",
+        "gated_replication": "bioptimus/H0-mini",
+        "adopted_on": "2026-07-13",
+        "frozen_before_hoptimus1_molecular_outcomes": True,
+        "frozen_before_historical_hest_outcomes": False,
+    }
     assert report["hypothesis_decisions"]["G2_local_context"]["tested"] is True
     assert [row["split_id"] for row in report["reference_split_sensitivity"]] == [
         "primary",
@@ -901,6 +909,19 @@ def test_primary_identity_rejects_historical_cross_modal_encoder() -> None:
         replace(artifact, encoder_name="bioptimus/H-optimus-1"),
         "primary_hoptimus1",
     )
+    hest_hoptimus = replace(
+        artifact,
+        encoder_name="bioptimus/H-optimus-1",
+        crop_scale="registered_cell_local_context_112um",
+        registration_method="native_xenium_cell_id_join",
+        target_construction="nucleus_overlapping_xenium_transcripts",
+    )
+    validate_experiment_identity(hest_hoptimus, "primary_hest_hoptimus1")
+    with pytest.raises(ValueError, match="requires frozen bioptimus/H-optimus-1"):
+        validate_experiment_identity(
+            replace(hest_hoptimus, encoder_name="MahmoodLab/UNI2-h"),
+            "primary_hest_hoptimus1",
+        )
     regional = replace(
         artifact,
         encoder_name="bioptimus/H-optimus-1",

@@ -64,8 +64,8 @@ def _load_prerequisites(paths: Sequence[Path]) -> list[Mapping[str, object]]:
                 "locked_test_data_sha256": locked_test_sha,
             }
         )
-    if "primary_hest_uni2h" not in roles:
-        raise ValueError("reference utility requires a passing primary_hest_uni2h report")
+    if "primary_hest_hoptimus1" not in roles:
+        raise ValueError("reference utility requires a passing primary_hest_hoptimus1 report")
     if not any(role.startswith("external_confirmation_") for role in roles):
         raise ValueError("reference utility requires a genuinely external confirmation report")
     return result
@@ -109,7 +109,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not isinstance(power_receipt, Mapping):
         raise ValueError("reference-utility power receipt must be a JSON object")
     primary_prerequisite = next(
-        value for value in prerequisites if value["role"] == "primary_hest_uni2h"
+        value for value in prerequisites if value["role"] == "primary_hest_hoptimus1"
     )
     external_prerequisites = [
         value for value in prerequisites if str(value["role"]).startswith("external_confirmation_")

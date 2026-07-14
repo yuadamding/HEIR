@@ -1,0 +1,99 @@
+{
+  "schema": "heir.natcommun_matched_regional_protocol.v1",
+  "cohort_id": "NatCommun_2025_s41467_025_59005_9_E-MTAB-14560",
+  "doi": "10.1038/s41467-025-59005-9",
+  "analysis_scope": "retrospective_regional_non_authorizing",
+  "hypothesis": "L(ST_measurement_floor) < L(H_and_E_plus_matched_snRNA) < L(H_and_E)",
+  "decisive_hypothesis": "L(M3) < min[L(M0), L(M1), L(M2), L(M4), L(M6), L(M7)]",
+  "observation_level": "Visium_v2_spot_regional",
+  "reference_modality": "Chromium_FLEX_snRNA_from_two_25um_curls_same_FFPE_block",
+  "h_and_e_encoder": {
+    "repository": "bioptimus/H-optimus-1",
+    "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "manifest": "manifests/encoders/hoptimus1.json",
+    "mode": "frozen_CUDA_inference_only",
+    "fine_tuning": "prohibited"
+  },
+  "published_processing": {
+    "spaceranger_version": "2.0.1",
+    "reference": "GRCh38-2020-A",
+    "probe_set": "Visium_Human_Transcriptome_Probe_Set_v2.0_GRCh38-2020-A"
+  },
+  "local_processing": {
+    "spaceranger_version": "4.1.0",
+    "reference": "GRCh38-2020-A",
+    "probe_set": "Visium_Human_Transcriptome_Probe_Set_v2.0_GRCh38-2020-A",
+    "create_bam": false,
+    "secondary_analysis": false,
+    "nucleus_segmentation": "not_applicable_to_standard_Visium_v2_spot_array_do_not_force_HD_only_option",
+    "default_local_cores_per_section": 4,
+    "default_local_memory_gb_per_section": 24,
+    "virtual_address_space_gb_per_section": 64,
+    "default_parallel_sections": 2,
+    "pipestance_root": "/storage/HEIR_work/natcommun_spaceranger",
+    "pipestance_filesystem_reason": "Martian_requires_POSIX_symlinks_unavailable_on_exFAT_mnt_seagate",
+    "compact_scientific_outputs_root": "/mnt/seagate/HEIR_runs"
+  },
+  "primary_donors": [
+    "B1", "B3", "B4", "L1", "L2", "L3", "L4",
+    "D1", "D2", "D3", "D4", "D5", "D6"
+  ],
+  "failed_reference_sensitivity_donors": ["B2"],
+  "sections": [
+    {"donor":"B1","indication":"breast","section":"B1_2","fastq_sample":"V4_B1_2_OPHI","h_and_e":"B1_2.tif","cytassist":"cytassist_V4_B1_2_OPHI.tiff","slide":"V42T01-122","area":"A1","h5ad":"breast","h5ad_donor":"7","primary_eligible":true},
+    {"donor":"B1","indication":"breast","section":"B1_4","fastq_sample":"V6_B1_4_OPHI","h_and_e":"B1_4.tif","cytassist":"cytassist_V6_B1_4_OPHI.tiff","slide":"V42L29-335","area":"A1","h5ad":"breast","h5ad_donor":"7","primary_eligible":true},
+    {"donor":"B2","indication":"breast","section":"B2_2","fastq_sample":"V5_B2_2_1256","h_and_e":"B2_2.tif","cytassist":"cytassist_V5_B2_2_1256.tiff","slide":"V42T01-122","area":"D1","h5ad":"breast","h5ad_donor":"2","primary_eligible":false,"exclusion_reason":"published_Chromium_failure_50_nuclei_no_tumor_cells"},
+    {"donor":"B3","indication":"breast","section":"B3_2","fastq_sample":"V8_B3_2_1GVR","h_and_e":"B3_2.tif","cytassist":"cytassist_V8_B3_2_1GVR.tiff","slide":"V42L29-369","area":"A1","h5ad":"breast","h5ad_donor":"0","primary_eligible":true},
+    {"donor":"B4","indication":"breast","section":"B4_2","fastq_sample":"V10_B4_2_1FHZ","h_and_e":"B4_2.tif","cytassist":"cytassist_V10_B4_2_1FHZ.tiff","slide":"V42L29-276","area":"A1","h5ad":"breast","h5ad_donor":"1","primary_eligible":true},
+    {"donor":"L1","indication":"lung","section":"L1_2","fastq_sample":"V7_L1_2_0PSV","h_and_e":"L1_2.tif","cytassist":"cytassist_V7_L1_2_0PSV.tiff","slide":"V42L29-335","area":"D1","h5ad":"lung","h5ad_donor":"5","primary_eligible":true},
+    {"donor":"L1","indication":"lung","section":"L1_4","fastq_sample":"V9_L1_4_0PSV","h_and_e":"L1_4.tif","cytassist":"cytassist_V9_L1_4_0PSV.tiff","slide":"V42L29-369","area":"D1","h5ad":"lung","h5ad_donor":"5","primary_eligible":true},
+    {"donor":"L2","indication":"lung","section":"L2_2","fastq_sample":"V11_L2_2_0WMU","h_and_e":"L2_2.tif","cytassist":"cytassist_V11_L2_2_0WMU.tiff","slide":"V42L29-276","area":"D1","h5ad":"lung","h5ad_donor":"4","primary_eligible":true},
+    {"donor":"L3","indication":"lung","section":"L3_2","fastq_sample":"V12_L3_2_1G73","h_and_e":"L3_2.tif","cytassist":"cytassist_V12_L3_2_1G73.tiff","slide":"V42T01-013","area":"A1","h5ad":"lung","h5ad_donor":"3","primary_eligible":true},
+    {"donor":"L4","indication":"lung","section":"L4_2","fastq_sample":"V13_L4_2_1GA2","h_and_e":"L4_2.tif","cytassist":"cytassist_V13_L4_2_1GA2.tiff","slide":"V42T01-013","area":"D1","h5ad":"lung","h5ad_donor":"6","primary_eligible":true},
+    {"donor":"D1","indication":"dlbcl","section":"D1","fastq_sample":"V14_DLBCL_1","h_and_e":"D1.tif","cytassist":"cytassist_V14_DLBCL_1.tiff","slide":"V42L29-133","area":"A1","h5ad":"dlbcl","h5ad_donor":"D1","primary_eligible":true},
+    {"donor":"D2","indication":"dlbcl","section":"D2","fastq_sample":"V15_DLBCL_2","h_and_e":"D2.tif","cytassist":"cytassist_V15_DLBCL_2.tiff","slide":"V42L29-133","area":"D1","h5ad":"dlbcl","h5ad_donor":"D2","primary_eligible":true},
+    {"donor":"D3","indication":"dlbcl","section":"D3","fastq_sample":"V16_DLBCL_3","h_and_e":"D3.tif","cytassist":"cytassist_V16_DLBCL_3.tiff","slide":"V42L29-376","area":"A1","h5ad":"dlbcl","h5ad_donor":"D3","primary_eligible":true},
+    {"donor":"D4","indication":"dlbcl","section":"D4","fastq_sample":"V17_DLBCL_4","h_and_e":"D4.tif","cytassist":"cytassist_V17_DLBCL_4.tiff","slide":"V42L29-376","area":"D1","h5ad":"dlbcl","h5ad_donor":"D4","primary_eligible":true},
+    {"donor":"D5","indication":"dlbcl","section":"D5","fastq_sample":"V18_DLBCL_5","h_and_e":"D5.tif","cytassist":"cytassist_V18_DLBCL_5.tiff","slide":"V42L29-002","area":"A1","h5ad":"dlbcl","h5ad_donor":"D5","primary_eligible":true},
+    {"donor":"D6","indication":"dlbcl","section":"D6","fastq_sample":"V19_DLBCL_6","h_and_e":"D6.tif","cytassist":"cytassist_V19_DLBCL_6.tiff","slide":"V42L29-002","area":"D1","h5ad":"dlbcl","h5ad_donor":"D6","primary_eligible":true}
+  ],
+  "h5ad_files": {
+    "breast": "Breast_cancer_4_patients_archival_FFPE_samples_profiling_with_Chromium_FLEX__f04ec2aa-2272-48df-b2d6-9864078c9892.h5ad",
+    "lung": "Lung_cancer_4_patients_archival_FFPE_samples_profiling_with_Chromium_FLEX__c4cb7c18-761d-40ce-a6ea-29ebd9413123.h5ad",
+    "dlbcl": "Diffuse_large_B_cell_lymphoma_DLBCL_6_patients_archival_FFPE_samples_profiling_with_Chromium_FLEX__2cd70fd4-9042-42f5-8f46-3780f1ad0626.h5ad"
+  },
+  "required_model_arms": [
+    "M0_H_only", "M1_matched_snRNA_only",
+    "M2_H_type_routing_plus_matched_snRNA",
+    "M3_full_H_query_plus_matched_snRNA",
+    "M4_shuffled_H_plus_matched_snRNA",
+    "M5_blank_or_coordinates_plus_matched_snRNA",
+    "M6_H_plus_hard_wrong_donor_snRNA",
+    "M7_H_plus_generic_pooled_snRNA",
+    "M8_ST_cross_fitted_split_half_or_replicate"
+  ],
+  "primary_endpoints": [
+    "reliable_fixed_molecular_programs",
+    "training_donor_only_PCA_20_to_50",
+    "total_expression",
+    "within_type_residual_state"
+  ],
+  "bank_conditions": [
+    "natural_composition",
+    "composition_depth_quality_equalized"
+  ],
+  "reference_coverage": {
+    "report_support_distance": true,
+    "report_type_coverage": true,
+    "report_state_prototype_coverage": true,
+    "report_uncertainty": true,
+    "unsupported_action": "adaptive_alpha_to_zero_and_fallback_to_H_only",
+    "major_type_minimum_qualified_cells": 50
+  },
+  "iteration_gate": {
+    "one_step_fusion_updates": 1,
+    "iterative_rounds_in_first_experiment": 0,
+    "iterative_refinement_status": "not_run_by_latest_scientific_plan",
+    "reason": "One-step matched tri-modal synergy must be demonstrated and replicated before iteration."
+  }
+}

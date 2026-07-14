@@ -56,6 +56,19 @@ current representation and ridge probe; they neither fail nor authorize the pros
 See the [explicit experiment report](reports/hest_retrospective.md) for the frozen design, complete
 decision metrics, source QC, per-donor effects, null results, and artifact hashes.
 
+The bounded H-optimus-1 qualification is implemented in
+`scripts/benchmark_hest_scientific_reanalysis.py`. The H-optimus source matches the registered UNI2
+source on all 217 non-encoder fields and uses full 1,536D features as the primary representation.
+Its frozen visible-control gate failed: broad lineage, fine type, gray intensity, hematoxylin optical
+density, and GLCM contrast passed, while natural-context nucleus area, perimeter, circularity, and
+solidity all failed. Execution therefore stopped before H-optimus molecular fitting. The existing
+UNI2 result was rerun only as an explicitly exposed, descriptive, non-authorizing baseline; UNI2
+failed the same four geometry controls. A strong secondary nucleus-mask morphology score cannot
+rescue the natural unmasked-image gate. The inherited registered-source QC also remains failed for
+prospective registration/per-row crop criteria (the transcript-target audit passes); this limitation
+is shared byte-for-byte across encoders and independently keeps the run non-authorizing. See the
+[H-optimus qualification report](reports/hest_scientific_reanalysis.md).
+
 The only completed historical cohort was snPATHO (4066, 4399, 4411), using frozen
 `omiclip-loki-coca-vit-l-14` features with checkpoint SHA-256
 `fc38e84f8b6f916cce87650cc096ebe6ad5cfa648a53a9a82e99fd231ca2f042`. That experiment is not the
@@ -71,9 +84,11 @@ Local inventory confirms:
   Xenium cell/nucleus boundaries, and CellViT boundaries.
 - Corrected GSE250346 RNA annotations are downloaded. Their source-study identities show that the
   20 sections represent **15 biological donors**, not the 19 pseudo-patients in HESCAPE metadata.
-- UNI2-h is approved, downloaded, and frozen as the **designated primary encoder**.
-  H-Optimus-1 is replication 1 but still returns manual-approval HTTP 403; H0-mini is replication 2
-  and has not been materialized. These roles must not change after a locked outcome is opened.
+- H-optimus-1 access is approved. Revision `3592cb220dec7a150c5d7813fb56e68bd57473b9`
+  is downloaded outside Git, checksum-pinned, and is the **required encoder for every experiment
+  started after 2026-07-13**. Existing UNI2-h artifacts remain the prespecified, separately scored
+  encoder comparator; they are never substituted for H-optimus-1 inputs in a primary arm. H0-mini
+  has not been materialized.
 - snPATHO and NatCommun/MOSAIC remain development/reference-sensitivity material only.
 
 See [the readiness decision](reports/morphology_ridge_readiness.json) and
@@ -96,13 +111,18 @@ while HESCAPE assigns them different pseudo-patient IDs and sometimes different 
 from a donor together. That grouping remains useful for development and retrospective analyses,
 but the five test donors are no longer prospectively locked. [GSE250346](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE250346)
 
-Primary encoder: frozen `MahmoodLab/UNI2-h`, 224-pixel input and 1,536-dimensional direct feature.
-Its canonical `pytorch_model.bin` is pinned outside Git. It cannot repair pseudo-spot targets; it
-only changes the image encoder. [UNI2-h model card](https://huggingface.co/MahmoodLab/UNI2-h)
+Current encoder: frozen `bioptimus/H-optimus-1`, 224 px at 0.5 µm/px, producing a
+1,536-dimensional direct feature. Its `model.safetensors` checkpoint and `config.json` are pinned
+outside Git by `manifests/encoders/hoptimus1.json`; loading is local-only and fine-tuning is
+prohibited. A receipt-bound five-regime official-versus-local parity qualification passed the frozen
+FP32 and mixed-precision cosine/error thresholds and verified the single-resampling 112-µm to
+224-pixel input path.
+[H-optimus-1 model card](https://huggingface.co/bioptimus/H-optimus-1)
 
-Replication 1: frozen `bioptimus/H-optimus-1`, 224 px at 0.5 µm/px, producing 1,536 features.
-The authenticated account currently lacks its required manual approval.
-[H-Optimus-1 model card](https://huggingface.co/bioptimus/H-optimus-1)
+Comparator encoder: frozen `MahmoodLab/UNI2-h`. It remains named in retrospective HEST reports so
+those results preserve their true experiment identity, and it is retained as a fixed secondary
+encoder sensitivity rather than being pooled with or substituted for the H-optimus-1 primary.
+[UNI2-h model card](https://huggingface.co/MahmoodLab/UNI2-h)
 
 Replication 2: frozen `bioptimus/H0-mini`, using the recommended 768-dimensional CLS feature. It is
 gated and non-commercial. [H0-mini model card](https://huggingface.co/bioptimus/H0-mini)
@@ -255,7 +275,7 @@ python scripts/benchmark_morphology_state_gate.py \
   --development-data /external/ridge_development.npz \
   --locked-test-data /external/ridge_locked_test.npz \
   --calibration-receipt /external/exact_gate_calibration_receipt.json \
-  --report-output /external/pristine_uni2h_cell_gate.json
+  --report-output /external/pristine_hoptimus1_cell_gate.json
 ```
 
 The five exposed HEST donors may be run only under a report explicitly labeled retrospective and
@@ -264,8 +284,9 @@ H0-mini as sensitivities; same-cohort post-exposure runs are not independent rep
 `scripts/benchmark_reference_specificity.py` only after prospective morphology and independent
 external confirmation pass.
 
-Build the explicitly exposed registered source with four crop arms, deterministic per-stratum
-sampling, CUDA extraction, and hard memory bounds (artifacts and checkpoints remain outside Git):
+Reproduce the historical UNI2-h comparator source on the explicitly exposed cohort with four crop
+arms, deterministic per-stratum sampling, CUDA extraction, and hard memory bounds (artifacts and
+checkpoints remain outside Git):
 
 ```bash
 mkdir -p /mnt/seagate/HEIR_runs/hest_retrospective
@@ -297,15 +318,38 @@ OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2
 Runs below 100 permutations are labeled smoke-only because they cannot resolve an empirical
 one-sided p-value below `1 / (B + 1)` for each null family.
 
+Reproduce the frozen H-optimus qualification with bounded CPU threads and deterministic CUDA:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 \
+  .venv/bin/python scripts/benchmark_hest_scientific_reanalysis.py \
+  --source /mnt/seagate/HEIR_runs/hest_hoptimus1_qualification/source.npz \
+  --output /mnt/seagate/HEIR_runs/hest_hoptimus1_qualification/report.json \
+  --markdown-output /mnt/seagate/HEIR_runs/hest_hoptimus1_qualification/report.md \
+  --phase full --representation-profile full --device cuda --inner-folds 3 \
+  --seed 20260713 --torch-threads 2 --max-gpu-memory-gb 8 \
+  --expected-source-sha256 f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636 \
+  --expected-encoder bioptimus/H-optimus-1 \
+  --comparison-source /mnt/seagate/HEIR_runs/hest_retrospective/source.npz \
+  --comparison-report /mnt/seagate/HEIR_runs/hest_uni2h_same_runner_qualification/report.json
+```
+
 ## Repository contents
 
 ```text
 src/heir/data/                 strict registered-observation artifact
 src/heir/evaluation/           oracle ridge and reference-specificity tests
-scripts/                       preparation and two benchmark entry points
+scripts/                       preparation and core scientific benchmark entry points
 manifests/                     local cohort readiness ledger
 reports/                       no-run readiness decision
 tests/                         deterministic scientific-contract tests
 ```
 
 Raw data, extracted features, checkpoints, and run outputs must remain outside Git.
+
+H-optimus-1 use is restricted to the accepted noncommercial research terms. Do not redistribute or
+embed the checkpoint in a repository/container; each user must obtain access separately. Treat heads
+or datasets derived from its outputs as subject to the model's derivative-use terms, and obtain
+written permission before commercial or monetized use. HEIR and H-optimus-1 are research artifacts,
+not certified medical devices, and require independent validation before healthcare use.

@@ -14,5 +14,7 @@ checkpoints/
 *.ckpt
 *.pt
 *.pth
+*.safetensors
+pytorch_model.bin
 *.zarr/
 *.parquet

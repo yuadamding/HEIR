@@ -48,7 +48,10 @@
   conclusion must remain noninferior in the best-registration subset within the frozen 0.01 delta-R2
   margin. An apparent intrinsic effect confined to near-threshold rows cannot be promoted to strong
   nucleus- or cell-local evidence.
-- Encoder roles are frozen as UNI2-h primary, H-Optimus-1 replication 1, and H0-mini replication 2.
+- For experiments begun after the 2026-07-13 access decision, encoder roles are frozen as
+  H-optimus-1 primary, UNI2-h historical comparator/encoder sensitivity, and H0-mini gated second
+  replication. Existing UNI2-h artifacts retain their true encoder identity; same-cohort HEST
+  H-optimus-1 results are retrospective qualification, not independent confirmation.
 - Synthetic calibration can become authorizing only after H-MEAS and after a quantitative truth
   matrix is frozen for the global null, G2 boundary, nucleus-only, cell-only, context-only, and
   mixed boundaries. Power is assessed only where a decision is true; false-pass control includes

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import struct
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1652,10 +1653,7 @@ def test_retrospective_builder_materializes_all_donors_and_four_crops(
     protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
     draft = json.loads(
         (
-            REPOSITORY_ROOT
-            / "manifests"
-            / "studies"
-            / "hest_lung_cell_association.draft.json"
+            REPOSITORY_ROOT / "manifests" / "studies" / "hest_lung_cell_association.draft.json"
         ).read_text(encoding="utf-8")
     )
     draft["analysis_plan_sha256"] = _sha256(protocol_path)
@@ -1733,13 +1731,260 @@ def test_encoder_manifests_record_access_status_and_handcrafted_control() -> Non
     uni2h = load_encoder_manifest(ENCODER_MANIFEST_PATH)
     assert uni2h.available
     assert uni2h.repository == "MahmoodLab/UNI2-h"
-    inaccessible = REPOSITORY_ROOT / "manifests" / "encoders" / "hoptimus1.inaccessible.json"
-    status = load_encoder_manifest(inaccessible, require_available=False)
-    assert not status.available
-    assert status.checkpoint_sha256 == "0" * 64
-    with pytest.raises(ValueError, match="inaccessible"):
-        load_encoder_manifest(inaccessible)
+    hoptimus = REPOSITORY_ROOT / "manifests" / "encoders" / "hoptimus1.json"
+    status = load_encoder_manifest(hoptimus)
+    assert status.available
+    assert status.repository == "bioptimus/H-optimus-1"
+    assert status.revision == "3592cb220dec7a150c5d7813fb56e68bd57473b9"
+    assert status.feature_width == 1536
+    assert status.input_pixels == 224
+    assert status.fine_tuning == "prohibited"
     patches = np.zeros((2, 4, 4, 3), dtype=np.uint8)
     features = HandcraftedPatchEncoder().encode(patches)
     assert features.shape == (2, 12)
     assert np.isfinite(features).all()
+
+
+def test_future_hest_plan_role_tracks_the_selected_primary_encoder() -> None:
+    assert (
+        builder._experiment_role("bioptimus/H-optimus-1", False)
+        == "primary_hest_hoptimus1"
+    )
+    assert builder._experiment_role("MahmoodLab/UNI2-h", False) == "primary_hest_uni2h"
+    assert (
+        builder._experiment_role("bioptimus/H-optimus-1", True)
+        == "hest_hoptimus1_encoder_qualification"
+    )
+
+
+def test_hoptimus_qualification_is_exact_and_retrospective_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from heir.features import load_encoder_manifest
+
+    manifest = load_encoder_manifest(REPOSITORY_ROOT / "manifests" / "encoders" / "hoptimus1.json")
+    builder._validate_retrospective_encoder_qualification(manifest, retrospective=True)
+    with pytest.raises(ValueError, match="exact frozen H-optimus-1"):
+        builder._validate_retrospective_encoder_qualification(manifest, retrospective=False)
+    with pytest.raises(ValueError, match="exact frozen H-optimus-1"):
+        builder._validate_retrospective_encoder_qualification(
+            replace(manifest, revision="floating-main"), retrospective=True
+        )
+    native_pixels = int(round(112.0 / 0.2125))
+    probe_input = (
+        np.arange(native_pixels * native_pixels * 3, dtype=np.uint32).reshape(
+            native_pixels, native_pixels, 3
+        )
+        % 251
+    ).astype(np.uint8)
+    probe_output = builder._resize_hoptimus1_batch(probe_input[None], 224)[0]
+    parity = {
+        "schema": builder.HOPTIMUS1_PARITY_SCHEMA,
+        "status": "passed",
+        "passed": True,
+        "repository": builder.HOPTIMUS1_REPOSITORY,
+        "revision": builder.HOPTIMUS1_REVISION,
+        "encoder_manifest_sha256": manifest.sha256,
+        "implementation_sha256": builder.HOPTIMUS1_PARITY_IMPLEMENTATION_SHA256,
+        "model": {
+            "repository": builder.HOPTIMUS1_REPOSITORY,
+            "revision": builder.HOPTIMUS1_REVISION,
+            "manifest_sha256": builder.HOPTIMUS1_MANIFEST_SHA256,
+            "config_sha256": builder.HOPTIMUS1_CONFIG_SHA256,
+            "checkpoint_sha256": builder.HOPTIMUS1_CHECKPOINT_SHA256,
+            "checkpoint_filename": "model.safetensors",
+            "local_fp16_path": "HOptimus1Encoder.encode_exact_biological_path",
+        },
+        "embedding_contract": {"shape": [5, 1536], "all_finite": True},
+        "production_runtime_contract": {
+            "code_sha256": {
+                relative: _sha256(REPOSITORY_ROOT / relative)
+                for relative in builder.HOPTIMUS1_PRODUCTION_RUNTIME_FILES
+            },
+            "resampling_probe": {
+                "input_shape": list(probe_input.shape),
+                "input_dtype": str(probe_input.dtype),
+                "input_sha256": hashlib.sha256(probe_input.tobytes()).hexdigest(),
+                "output_shape": list(probe_output.shape),
+                "output_dtype": str(probe_output.dtype),
+                "output_sha256": hashlib.sha256(probe_output.tobytes()).hexdigest(),
+                "implementation": "Pillow.Image.Resampling.BICUBIC",
+                "resampling_count": 1,
+            },
+        },
+        "comparisons": {
+            "official_fp32_vs_local_fp32": {
+                "passed": True,
+                "minimum_required_cosine": 0.999999,
+                "minimum_cosine": 1.0,
+                "mean_cosine": 1.0,
+                "mean_absolute_error": 0.0,
+                "maximum_absolute_error": 0.0,
+            },
+            "local_fp32_vs_local_fp16": {
+                "passed": True,
+                "minimum_required_cosine": 0.9999,
+                "minimum_cosine": 0.99999,
+                "mean_cosine": 0.999999,
+                "mean_absolute_error": 0.001,
+                "maximum_absolute_error": 0.01,
+            },
+        },
+    }
+    parity_path = tmp_path / "parity.json"
+    parity_path.write_text(json.dumps(parity), encoding="utf-8")
+    monkeypatch.setattr(builder, "HOPTIMUS1_PARITY_RECEIPT_SHA256", _sha256(parity_path))
+    assert builder._validate_hoptimus1_parity_receipt(parity_path, manifest) == _sha256(parity_path)
+    parity["comparisons"]["local_fp32_vs_local_fp16"]["passed"] = False
+    parity_path.write_text(json.dumps(parity), encoding="utf-8")
+    monkeypatch.setattr(builder, "HOPTIMUS1_PARITY_RECEIPT_SHA256", _sha256(parity_path))
+    with pytest.raises(ValueError, match="comparisons"):
+        builder._validate_hoptimus1_parity_receipt(parity_path, manifest)
+
+
+def test_only_encoder_changed_receipt_compares_every_non_encoder_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    comparison = {
+        "schema_version": np.asarray(builder.RETROSPECTIVE_SOURCE_SCHEMA),
+        "study_stage": np.asarray(builder.RETROSPECTIVE_SOURCE_STAGE),
+        "analysis_status": np.asarray("retrospective_exposed_non_authorizing"),
+        "encoder_name": np.asarray(builder.UNI2H_REPOSITORY),
+        "encoder_manifest_sha256": np.asarray("1" * 64),
+        "image_features": np.zeros((2, 1, 3), dtype=np.float32),
+        "observation_ids": np.asarray(["S:1", "S:2"]),
+        "pool_roles": np.asarray(["reference", "evaluation"]),
+        "molecular_targets": np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        "nucleus_target_counts_half_a": np.asarray([[1, 0], [0, 1]], dtype=np.uint32),
+        "program_gene_membership": np.asarray([[True, False]], dtype=np.bool_),
+        "crop_ids": np.asarray(["crop_112um"]),
+        "technical_covariates": np.asarray([[0.1], [0.2]], dtype=np.float32),
+    }
+    comparison_path = tmp_path / "registered-uni2h.npz"
+    np.savez(comparison_path, **comparison)
+    monkeypatch.setattr(
+        builder,
+        "REGISTERED_UNI2H_COMPARISON_SOURCE_SHA256",
+        _sha256(comparison_path),
+    )
+    assert builder._validate_registered_comparison_source(comparison_path) == comparison_path
+
+    candidate = dict(comparison)
+    candidate["encoder_name"] = np.asarray(builder.HOPTIMUS1_REPOSITORY)
+    candidate["encoder_manifest_sha256"] = np.asarray(builder.HOPTIMUS1_MANIFEST_SHA256)
+    candidate["image_features"] = np.ones((2, 1, 3), dtype=np.float32)
+    receipt = builder._validate_only_encoder_changed(candidate, comparison_path)
+    assert receipt["compared_field_count"] == 10
+    assert len(str(receipt["field_hash_manifest_sha256"])) == 64
+
+    candidate["molecular_targets"] = comparison["molecular_targets"].copy()
+    candidate["molecular_targets"][0, 0] += 1.0
+    with pytest.raises(ValueError, match="molecular_targets"):
+        builder._validate_only_encoder_changed(candidate, comparison_path)
+
+
+def test_hest_section_cache_binds_geometry_and_rejects_malformed_arrays() -> None:
+    sample = builder.Sample(
+        sample_id="NCBI856",
+        donor_id="D1",
+        split_id="development",
+        pixel_size_um=builder.SOURCE_MPP,
+        wsi=builder.InputFile("wsi.tif", "1" * 64),
+        transcripts=builder.InputFile("transcripts.parquet", "2" * 64),
+        cell_seg=builder.InputFile("cell.parquet", "3" * 64),
+        nucleus_seg=builder.InputFile("nucleus.parquet", "4" * 64),
+        cellvit_seg=builder.InputFile("cellvit.geojson", "5" * 64),
+    )
+    rows = SimpleNamespace(
+        observation_ids=["NCBI856:1", "NCBI856:2"],
+        centres=[(10.0, 20.0), (30.0, 40.0)],
+        cell_centres=[(10.5, 20.5), (30.5, 40.5)],
+        nucleus_vertices=[
+            np.asarray([[9.0, 19.0], [11.0, 19.0], [10.0, 21.0]]),
+            np.asarray([[29.0, 39.0], [31.0, 39.0], [30.0, 41.0]]),
+        ],
+        cell_vertices=[
+            np.asarray([[8.0, 18.0], [12.0, 18.0], [10.0, 22.0]]),
+            np.asarray([[28.0, 38.0], [32.0, 38.0], [30.0, 42.0]]),
+        ],
+        cellvit_names=("inflammatory",),
+        cellvit_centres=[(11.0, 21.0), (31.0, 41.0)],
+    )
+    identity = builder._section_cache_input_identity(rows, 0, 2, sample)
+    changed_rows = SimpleNamespace(**vars(rows))
+    changed_rows.nucleus_vertices = [value.copy() for value in rows.nucleus_vertices]
+    changed_rows.nucleus_vertices[0][0, 0] += 0.25
+    assert builder._section_cache_input_identity(changed_rows, 0, 2, sample) != identity
+
+    cache_identity = {
+        "schema": builder.HEST_ENCODER_CACHE_SCHEMA,
+        "encoder_manifest_sha256": "a" * 64,
+        "crop_materialization_sha256": "b" * 64,
+        "section_inputs": identity,
+    }
+    identity_sha256 = builder._canonical_sha256(cache_identity)
+    cache = {
+        "schema": np.asarray(builder.HEST_ENCODER_CACHE_SCHEMA),
+        "cache_identity_sha256": np.asarray(identity_sha256),
+        "cache_identity_json": np.asarray(
+            json.dumps(cache_identity, sort_keys=True, separators=(",", ":"))
+        ),
+        "observation_ids": np.asarray(rows.observation_ids),
+        "image_features": np.zeros((2, 2, 3), dtype=np.float32),
+        "crop_padding_fractions": np.zeros((2, 2), dtype=np.float32),
+        "crop_mask_fractions": np.zeros((2, 2), dtype=np.float32),
+        "stain_quality_local": np.zeros(
+            (2, len(builder.STAIN_QUALITY_FEATURE_NAMES)), dtype=np.float32
+        ),
+        "nucleus_texture_features": np.zeros(
+            (2, len(builder.REGION_TEXTURE_FEATURE_NAMES)), dtype=np.float32
+        ),
+        "cell_texture_features": np.zeros(
+            (2, len(builder.REGION_TEXTURE_FEATURE_NAMES)), dtype=np.float32
+        ),
+        "coordinate_base_features": np.zeros(
+            (2, len(builder.COORDINATE_BASE_FEATURE_NAMES)), dtype=np.float32
+        ),
+        "cellvit_nearest_features": np.zeros((2, 3), dtype=np.float32),
+        "cellvit_nearest_padding_fractions": np.zeros(2, dtype=np.float32),
+    }
+    loaded = builder._load_hest_encoder_section_cache(
+        cache,
+        expected_identity_sha256=identity_sha256,
+        expected_observation_ids=np.asarray(rows.observation_ids),
+        rows=2,
+        crops=2,
+        feature_width=3,
+        has_cellvit=True,
+    )
+    assert loaded["image_features"].shape == (2, 2, 3)
+    cache["image_features"] = cache["image_features"].copy()
+    cache["image_features"][0, 0, 0] = np.nan
+    with pytest.raises(ValueError, match="image_features"):
+        builder._load_hest_encoder_section_cache(
+            cache,
+            expected_identity_sha256=identity_sha256,
+            expected_observation_ids=np.asarray(rows.observation_ids),
+            rows=2,
+            crops=2,
+            feature_width=3,
+            has_cellvit=True,
+        )
+
+
+def test_hoptimus_qualification_resamples_native_canvas_exactly_once() -> None:
+    from PIL import Image
+
+    patch = np.arange(7 * 7 * 3, dtype=np.uint8).reshape(7, 7, 3)
+    observed = builder._resize_hoptimus1_batch(patch[None], 4)
+    expected = np.asarray(
+        Image.fromarray(patch, mode="RGB").resize(
+            (4, 4), resample=Image.Resampling.BICUBIC
+        ),
+        dtype=np.uint8,
+    )
+    assert observed.shape == (1, 4, 4, 3)
+    assert observed.dtype == np.uint8
+    np.testing.assert_array_equal(observed[0], expected)
+    with pytest.raises(ValueError, match="requires one native-canvas-to-224 resampling"):
+        builder._resize_hoptimus1_batch(observed, 4)
