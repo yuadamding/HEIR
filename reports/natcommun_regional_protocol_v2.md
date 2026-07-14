@@ -2,18 +2,19 @@
 
 ## Current status
 
-**PRE-RESULT TECHNICAL AMENDMENT, NOT YET RE-EXECUTED.** Space Ranger, the 16-section registration
-review, the registered source, both H-optimus crop arms, and the original H-optimus preflight are
-complete. The first primary benchmark attempt stopped during construction of an inner molecular
-reference bank because its fixed 100-iteration k-means cap was shorter than the 105 iterations
-needed for exact label stability. It wrote zero experiment checkpoints and no report, endpoint
-summary, effect, p-value, or decision. The amended implementation must be committed and receive a
-fresh H-optimus preflight before the benchmark restarts in a new output tree.
+**COMPLETED H-OPTIMUS PRIMARY EXPERIMENT.** The amended H-optimus-1 preflight and all 10 benchmark
+experiments completed from clean commit `69c1865daeb3b1eaec8d05f5b3ecad646a889e3b`. Both crop arms
+were evaluable and both were `not_supported`; the overall regional decision is `not_supported`.
+The 64-test family was complete, the final report passed an independent internal-consistency audit,
+and neither regional nor cell-level HEIR development was authorized. See the
+[explicit experiment report](natcommun_hoptimus_primary_results_v2.md) for decisions, metrics,
+guardrail failures, artifact hashes, and the claim boundary.
 
 UNI2-h is excluded by user instruction. It will not be built, preflighted, benchmarked, pooled with,
 or used to rescue the H-optimus primary result.
 
-This document is a protocol/readiness report, not an experiment report.
+This document preserves the protocol and readiness rationale. Results are recorded separately so
+the post-result interpretation is not confused with the preregistered design.
 
 ## Pre-result deterministic-completion amendment
 

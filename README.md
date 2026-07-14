@@ -72,17 +72,18 @@ prospective registration/per-row crop criteria (the transcript-target audit pass
 is shared byte-for-byte across encoders and independently keeps the run non-authorizing. See the
 [H-optimus qualification report](reports/hest_scientific_reanalysis.md).
 
-The regional NatCommun M0-M8 experiment is now decoupled under a new, preregistered protocol rather
-than by editing that completed result. It uses a NatCommun-specific preflight, molecular-state
+The regional NatCommun M0-M8 experiment was decoupled under a new, preregistered protocol rather
+than by editing the earlier HEST result. It uses a NatCommun-specific preflight, molecular-state
 k-means prototypes, indication-aware diagonal calibration, a full `[0, 1]` fusion grid, 55/112-µm
 crop sensitivity, indication-balanced reporting, preregistered variance/coverage/rare-state
 guardrails, atomic experiment checkpoints, a cell-nonauthorizing regional claim boundary, and a
-nonblocking secondary M8 floor. H-optimus-1 is
-the primary encoder; UNI2-h is a separately preflighted, separately reported secondary sensitivity
-and cannot rescue or override the primary decision. Each encoder/crop arm must independently pass
-feature nondegeneracy and a donor-held-out visible-control preflight. It is not yet executable
-because only 12 of 16 Space Ranger sections are complete. See
-[the v2 regional protocol and readiness report](reports/natcommun_regional_protocol_v2.md).
+nonblocking secondary M8 floor. The amended H-optimus-1 primary run completed all 10 experiments
+from a clean, hash-bound commit. Both crop arms were evaluable and `not_supported`; seven of eight
+primary gains were below 5%, all eight failed molecular-variance preservation, and only 45/64
+paired comparisons survived global Holm correction. Regional implementation is not justified.
+UNI2-h was excluded by user instruction and was not run, pooled, or used to rescue this decision.
+See [the explicit result report](reports/natcommun_hoptimus_primary_results_v2.md) and
+[the v2 protocol/readiness report](reports/natcommun_regional_protocol_v2.md).
 
 The only completed historical cohort was snPATHO (4066, 4399, 4411), using frozen
 `omiclip-loki-coca-vit-l-14` features with checkpoint SHA-256
@@ -101,9 +102,9 @@ Local inventory confirms:
   20 sections represent **15 biological donors**, not the 19 pseudo-patients in HESCAPE metadata.
 - H-optimus-1 access is approved. Revision `3592cb220dec7a150c5d7813fb56e68bd57473b9`
   is downloaded outside Git, checksum-pinned, and is the **required encoder for every experiment
-  started after 2026-07-13**. Existing UNI2-h artifacts remain the prespecified, separately scored
-  encoder comparator; they are never substituted for H-optimus-1 inputs in a primary arm. H0-mini
-  has not been materialized.
+  started after 2026-07-13**. Existing UNI2-h artifacts are historical and excluded from current
+  NatCommun execution by user instruction; they are never substituted for H-optimus-1 inputs in a
+  primary arm. H0-mini has not been materialized.
 - snPATHO and NatCommun/MOSAIC remain development/reference-sensitivity material only.
 
 See [the readiness decision](reports/morphology_ridge_readiness.json) and
@@ -357,7 +358,7 @@ src/heir/data/                 strict registered-observation artifact
 src/heir/evaluation/           oracle ridge and reference-specificity tests
 scripts/                       preparation and core scientific benchmark entry points
 manifests/                     local cohort readiness ledger
-reports/                       no-run readiness decision
+reports/                       protocols, readiness decisions, and explicit result reports
 tests/                         deterministic scientific-contract tests
 ```
 
