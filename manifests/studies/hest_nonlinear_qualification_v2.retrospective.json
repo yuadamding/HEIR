@@ -1,0 +1,84 @@
+{
+  "schema": "heir.hest_nonlinear_qualification_manifest.v2",
+  "study_id": "hest_nonlinear_qualification_v2",
+  "status": "registered_pending_runner_and_synthetic_calibration",
+  "analysis_status": "retrospective_exposed_non_authorizing",
+  "study_role": "retrospective_estimator_qualification_only",
+  "all_molecular_outcomes_previously_exposed": true,
+  "prospective_lock_eligible": false,
+  "molecular_outcomes_opened_under_v2": false,
+  "supports_prospective_local_context_estimator_design": false,
+  "supports_intrinsic_localization_followup": false,
+  "authorizes_h_cell": false,
+  "authorizes_h_intrinsic": false,
+  "authorizes_h_ref": false,
+  "authorizes_full_heir": false,
+  "protocol_binding": {
+    "path": "configs/hest_nonlinear_qualification_v2.json",
+    "sha256": "0dadc4ab0e38920d1da473fc016ddca3692c98b4574f5b59b933c96aee9c96df",
+    "frozen_before_molecular_execution": true,
+    "intermediate_results_may_modify_protocol": false
+  },
+  "registered_source": {
+    "path": "/mnt/seagate/HEIR_runs/hest_hoptimus1_qualification/source.npz",
+    "sha256": "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636",
+    "rows": 36121,
+    "outcomes_previously_exposed": true
+  },
+  "outcome_blind_artifacts": {
+    "blank_supplement_sha256": "a7495d795c6a73e9a8bfc172448d0d161a99402b0bc63cd1ae6966e1c3968219",
+    "blank_receipt_sha256": "41917b39c0e50f27e252d76a4507e0a7599591e00c09b25074f49b9413bbd962",
+    "blank_feature_sha256": "d81926fd76fef69e9e59b8777e068a008716eedbf939b0b85ef1e4018b57df6f",
+    "registration_topology_sha256": "8f619537486e7e5814797551c5e8f22681118f4cfef49a98bf343f6aea170742",
+    "selected_quality_band_id": "Q3",
+    "selected_rows": 3991,
+    "included_donor_ids": [
+      "THD0008",
+      "THD0011",
+      "TILD117",
+      "TILD175",
+      "VUHD069",
+      "VUHD116",
+      "VUILD102",
+      "VUILD105",
+      "VUILD106",
+      "VUILD107",
+      "VUILD115",
+      "VUILD78",
+      "VUILD91",
+      "VUILD96"
+    ],
+    "molecular_outcomes_read": false
+  },
+  "experiment_ids": [
+    "B0",
+    "B1",
+    "B2",
+    "B3",
+    "N0",
+    "N1",
+    "N2",
+    "N3",
+    "N4",
+    "N5",
+    "N6",
+    "N7",
+    "C_blank",
+    "C_target_removed"
+  ],
+  "execution": {
+    "preflight_authorized": true,
+    "synthetic_calibration_authorized": true,
+    "full_biological_execution_authorized_at_registration": false,
+    "full_biological_execution_requires": [
+      "clean_committed_full_runner",
+      "all_preflight_hash_and_contract_checks_pass",
+      "passing_200_trial_per_condition_synthetic_calibration_receipt",
+      "calibration_receipt_records_molecular_outcomes_read_false"
+    ],
+    "biological_experiment_run": false,
+    "engineering_decision_available": false,
+    "final_report_available": false
+  },
+  "claim_boundary": "A complete retrospective v2 pass can support only the design of a new prospective estimator protocol. RNA-derived HEST fine types and prior outcome exposure prohibit H-CELL, H-INTRINSIC, H-REF, and full-HEIR authorization."
+}
