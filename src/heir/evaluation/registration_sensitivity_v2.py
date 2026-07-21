@@ -47,7 +47,7 @@ def paired_standardized_gain(
     focal_prediction: object,
     comparator_prediction: object,
     *,
-    rank: int,
+    rank: object,
 ) -> np.ndarray:
     """Return per-cell comparator error minus focal error, divided by rank."""
 
@@ -56,13 +56,27 @@ def paired_standardized_gain(
     comparator = _matrix(comparator_prediction, "comparator_prediction")
     if focal.shape != observed.shape or comparator.shape != observed.shape:
         raise ValueError("truth and both prediction matrices must have identical shapes")
-    if isinstance(rank, bool) or not isinstance(rank, (int, np.integer)) or int(rank) <= 0:
-        raise ValueError("coordinate rank must be a positive integer")
-    if observed.shape[1] != int(rank):
-        raise ValueError("coordinate matrix width differs from the declared rank")
-    comparator_error = np.square(observed - comparator).sum(axis=1)
-    focal_error = np.square(observed - focal).sum(axis=1)
-    result = (comparator_error - focal_error) / float(rank)
+    raw_rank = np.asarray(rank)
+    if raw_rank.ndim == 0:
+        if raw_rank.dtype.kind not in {"i", "u"}:
+            raise ValueError("coordinate rank must be an integer or row-aligned integer vector")
+        ranks = np.full(len(observed), int(raw_rank), dtype=np.int64)
+    elif raw_rank.shape == (len(observed),) and raw_rank.dtype.kind in {"i", "u"}:
+        ranks = raw_rank.astype(np.int64, copy=False)
+    else:
+        raise ValueError("coordinate rank must be an integer or row-aligned integer vector")
+    if np.any(ranks <= 0) or np.any(ranks > observed.shape[1]):
+        raise ValueError("coordinate ranks must lie within the padded matrix width")
+    active = np.arange(observed.shape[1])[None, :] < ranks[:, None]
+    if (
+        np.any(observed[~active] != 0.0)
+        or np.any(focal[~active] != 0.0)
+        or np.any(comparator[~active] != 0.0)
+    ):
+        raise ValueError("inactive padded coordinates must be exactly zero")
+    comparator_error = np.where(active, np.square(observed - comparator), 0.0).sum(axis=1)
+    focal_error = np.where(active, np.square(observed - focal), 0.0).sum(axis=1)
+    result = (comparator_error - focal_error) / ranks
     if not np.isfinite(result).all():
         raise ValueError("paired standardized gains are non-finite")
     return result
@@ -201,7 +215,7 @@ def evaluate_registration_noninferiority(
     donor_ids: object,
     type_labels: object,
     *,
-    rank: int,
+    rank: object,
     quality_mask: object,
     all_rows_mask: object,
     best_mask: object,
@@ -292,10 +306,16 @@ def evaluate_registration_noninferiority(
     return {
         "schema": SCHEMA,
         "comparison_id": comparison_id,
-        "gain_definition": (
-            "(squared_error_comparator_minus_squared_error_focal)/coordinate_rank"
+        "gain_definition": ("(squared_error_comparator_minus_squared_error_focal)/coordinate_rank"),
+        "coordinate_rank": (
+            int(np.asarray(rank))
+            if np.asarray(rank).ndim == 0
+            else {
+                "minimum": int(np.min(np.asarray(rank))),
+                "maximum": int(np.max(np.asarray(rank))),
+                "varies_by_outer_donor": bool(len(set(np.asarray(rank).tolist())) > 1),
+            }
         ),
-        "coordinate_rank": int(rank),
         "selected_quality_band_id": selected_quality_band_id,
         "selected_quality": selected,
         "all_rows_same_supported_donor_type_strata": all_matched,

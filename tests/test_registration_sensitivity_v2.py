@@ -14,6 +14,26 @@ def test_paired_gain_uses_fixed_coordinate_rank_denominator() -> None:
     assert np.allclose(gain, [2.0, 1.5])
 
 
+def test_paired_gain_supports_outer_donor_specific_zero_padded_ranks() -> None:
+    truth = np.asarray([[1.0, 2.0, 0.0], [1.0, 2.0, 3.0]])
+    focal = np.zeros_like(truth)
+    comparator = np.asarray([[2.0, 4.0, 0.0], [2.0, 4.0, 6.0]])
+    gain = sensitivity.paired_standardized_gain(
+        truth,
+        focal,
+        comparator,
+        rank=np.asarray([2, 3]),
+    )
+    assert np.allclose(gain, [0.0, 0.0])
+    with pytest.raises(ValueError, match="inactive padded"):
+        sensitivity.paired_standardized_gain(
+            truth + np.asarray([[0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]),
+            focal,
+            comparator,
+            rank=np.asarray([2, 3]),
+        )
+
+
 def test_hierarchy_weights_types_and_donors_equally() -> None:
     gains = np.asarray([1.0] * 5 + [3.0] * 10 + [9.0] * 5)
     donors = np.asarray(["D1"] * 15 + ["D2"] * 5)
@@ -76,8 +96,9 @@ def test_noninferiority_reuses_quality_supported_strata_and_passes() -> None:
         bootstrap_resamples=1_000,
     )
     assert result["selected_quality"]["supported_donors"] == 12
-    assert result["selected_quality"]["supported_strata_keys"] == (
-        result["all_rows_same_supported_donor_type_strata"]["supported_strata_keys"]
+    assert (
+        result["selected_quality"]["supported_strata_keys"]
+        == (result["all_rows_same_supported_donor_type_strata"]["supported_strata_keys"])
     )
     assert result["noninferiority"]["passed"] is True
     assert result["absolute_best_descriptive"]["formal_primary_band"] is False

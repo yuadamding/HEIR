@@ -95,6 +95,11 @@ def test_D1_and_D2_are_separate_and_permanently_nonauthorizing() -> None:
     assert result["supports_prospective_local_context_estimator_design"] is False
     assert result["supports_intrinsic_localization_followup"] is False
 
+    unavailable = _passing_d1()
+    unavailable["registration_quality_one_sided_lower_bound"] = None
+    result = contract.evaluate_decisions(unavailable, d2)
+    assert result["D1"]["passed"] is False
+
 
 def test_exact_sign_flip_uses_one_synchronous_sign_per_donor_across_family() -> None:
     effects = {
@@ -112,10 +117,7 @@ def test_exact_sign_flip_uses_one_synchronous_sign_per_donor_across_family() -> 
 
 def test_synthetic_calibration_uses_simultaneous_exact_bounds() -> None:
     counts = {
-        condition: {
-            decision: 190 if expected else 0
-            for decision, expected in decisions.items()
-        }
+        condition: {decision: 190 if expected else 0 for decision, expected in decisions.items()}
         for condition, decisions in contract.CALIBRATION_EXPECTATIONS.items()
     }
     result = contract.evaluate_synthetic_calibration(counts)

@@ -257,8 +257,7 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
         or registration.get("minimum_formal_donors") != 12
         or registration.get("all_rows_composition_rule")
         != "reuse_selected_quality_supported_donor_type_strata"
-        or registration.get("comparisons")
-        != ["A_star_vs_N0", "N1_vs_N5", "N3_vs_N5", "N4_vs_N5"]
+        or registration.get("comparisons") != ["A_star_vs_N0", "N1_vs_N5", "N3_vs_N5", "N4_vs_N5"]
         or registration.get("noninferiority_margin") != -0.01
         or registration.get("models_retrained_on_quality_subset") is not False
         or registration.get("primary_support_20_R2_threshold_changed") is not False
@@ -283,8 +282,7 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
     nulls = _mapping(value.get("refitted_null_details"), "refitted null details")
     if (
         nulls.get("stratification") != ["donor", "section", "fine_type", "pool_role"]
-        or nulls.get("multiview_mapping")
-        != "one_synchronous_row_mapping_for_all_image_branches"
+        or nulls.get("multiview_mapping") != "one_synchronous_row_mapping_for_all_image_branches"
         or nulls.get("smoke_permutations_per_family") != 20
         or nulls.get("final_permutations_per_family") != 100
         or nulls.get("post_fit_feature_shuffle") != "prohibited"
@@ -303,19 +301,21 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
     ):
         raise ValueError("v2 refitted-null construction changed")
     decisions = _mapping(value.get("decision_rules"), "decision_rules")
-    if _normalized_rules(
-        _mapping(
-            decisions.get("D1_supports_prospective_local_context_estimator_design"),
-            "D1 rules",
+    if (
+        _normalized_rules(
+            _mapping(
+                decisions.get("D1_supports_prospective_local_context_estimator_design"),
+                "D1 rules",
+            )
         )
-    ) != D1_THRESHOLDS:
+        != D1_THRESHOLDS
+    ):
         raise ValueError("v2 D1 thresholds changed")
     d2 = _mapping(decisions.get("D2_supports_intrinsic_localization_followup"), "D2 rules")
     if (
         d2.get("eligible_arms") != ["N3", "N4"]
         or d2.get("D1_must_also_pass") is not True
-        or _normalized_rules(_mapping(d2.get("per_arm_rules"), "D2 arm rules"))
-        != D2_THRESHOLDS
+        or _normalized_rules(_mapping(d2.get("per_arm_rules"), "D2 arm rules")) != D2_THRESHOLDS
     ):
         raise ValueError("v2 D2 thresholds changed")
     calibration = _mapping(value.get("synthetic_calibration"), "synthetic_calibration")
@@ -338,9 +338,7 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
             "same_scoring_multiplicity_registration_and_decision_code_as_biological_run"
         )
         is not True
-        or generator.get(
-            "nested_training_and_refit_path_checked_by_separate_implementation_smoke"
-        )
+        or generator.get("nested_training_and_refit_path_checked_by_separate_implementation_smoke")
         is not True
     ):
         raise ValueError("v2 synthetic calibration contract changed")
@@ -382,12 +380,16 @@ def validate_manifest(
     ):
         raise ValueError("v2 manifest must remain registered, unexecuted, and exposed")
     binding = _mapping(value.get("protocol_binding"), "protocol binding")
-    if binding != {
-        "path": "configs/hest_nonlinear_qualification_v2.json",
-        "sha256": V2_PROTOCOL_SHA256,
-        "frozen_before_molecular_execution": True,
-        "intermediate_results_may_modify_protocol": False,
-    } or protocol_file_sha256 != V2_PROTOCOL_SHA256:
+    if (
+        binding
+        != {
+            "path": "configs/hest_nonlinear_qualification_v2.json",
+            "sha256": V2_PROTOCOL_SHA256,
+            "frozen_before_molecular_execution": True,
+            "intermediate_results_may_modify_protocol": False,
+        }
+        or protocol_file_sha256 != V2_PROTOCOL_SHA256
+    ):
         raise ValueError("v2 manifest protocol binding differs from actual frozen bytes")
     source = _mapping(value.get("registered_source"), "manifest registered source")
     if source != {
@@ -462,6 +464,17 @@ def _criteria(
     result = []
     for name, (operator, threshold) in thresholds.items():
         raw = metrics[name]
+        if raw is None:
+            result.append(
+                {
+                    "metric": name,
+                    "operator": operator,
+                    "threshold": threshold,
+                    "observed": None,
+                    "passed": False,
+                }
+            )
+            continue
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             raise ValueError(f"decision metric {name} must be numeric")
         observed = float(raw)
@@ -495,9 +508,7 @@ def evaluate_decisions(
             "criteria": criteria,
             "passed_all_arm_rules": all(bool(row["passed"]) for row in criteria),
         }
-    d2_pass = d1_pass and any(
-        bool(value["passed_all_arm_rules"]) for value in arm_results.values()
-    )
+    d2_pass = d1_pass and any(bool(value["passed_all_arm_rules"]) for value in arm_results.values())
     return {
         "schema": REPORT_SCHEMA,
         "analysis_status": ANALYSIS_STATUS,
@@ -547,9 +558,7 @@ def exact_sign_flip_max_test(
             [np.count_nonzero(maximum >= value - 1.0e-15) for value in observed],
             dtype=np.int64,
         )
-    adjusted = {
-        name: float(exceed[index] / total) for index, name in enumerate(comparison_ids)
-    }
+    adjusted = {name: float(exceed[index] / total) for index, name in enumerate(comparison_ids)}
     return {
         "method": "exact_donor_sign_flip_max_statistic",
         "donor_ids": list(donors),
@@ -568,17 +577,13 @@ def _binomial_cdf(k: int, n: int, probability: float) -> float:
         return 1.0 if k >= n else 0.0
     return float(
         sum(
-            math.comb(n, index)
-            * probability**index
-            * (1.0 - probability) ** (n - index)
+            math.comb(n, index) * probability**index * (1.0 - probability) ** (n - index)
             for index in range(k + 1)
         )
     )
 
 
-def _clopper_pearson_one_sided(
-    successes: int, trials: int, *, alpha: float
-) -> tuple[float, float]:
+def _clopper_pearson_one_sided(successes: int, trials: int, *, alpha: float) -> tuple[float, float]:
     if not 0 <= successes <= trials or trials <= 0 or not 0.0 < alpha < 1.0:
         raise ValueError("binomial confidence inputs are invalid")
     if successes == 0:
@@ -628,9 +633,7 @@ def evaluate_synthetic_calibration(
             count = observed[decision]
             if isinstance(count, bool) or not isinstance(count, int):
                 raise ValueError("calibration pass counts must be integers")
-            lower, upper = _clopper_pearson_one_sided(
-                count, trials_per_condition, alpha=alpha
-            )
+            lower, upper = _clopper_pearson_one_sided(count, trials_per_condition, alpha=alpha)
             expected_pass = expectations[decision]
             passed = lower > 0.80 if expected_pass else upper < 0.05
             rows.append(
