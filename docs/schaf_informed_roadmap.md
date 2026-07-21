@@ -12,7 +12,9 @@ Preserve frozen evidence
         |
         +-- Exposed HEST nonlinear qualification
         |       |
-        |       +-- fail: stop neural expansion; improve measurement/representation
+        |       +-- interpretable fail: stop neural expansion; improve measurement/representation
+        |       |
+        |       +-- procedural failure: seal version; redesign on unexposed data
         |       |
         |       +-- pass: preregister prospective_nonlinear_v1
         |
@@ -33,9 +35,11 @@ Preserve frozen evidence
    smoke, and 2,000-trial calibration were completed before opening the target.
 3. **V2 stopped at B0.** The target opened once, but every registered B0 ridge candidate was
    ineligible in the first outer fold. No held-out estimate or refitted null completed.
-4. **Stop decision.** D1 and D2 are unsupported. Do not tune on exposed HEST or proceed to token
-   pooling, nonlinear RNA targets, reference expansion, or a prospective nonlinear estimator from
-   this qualification.
+4. **Procedural result.** D1 and D2 were not evaluable, because zero outer folds completed. The
+   pre-outcome calibration tested synthetic held-out predictions but not production B0 selection,
+   and the B0 rejection registry was not persisted. Seal v2 and do not tune or rerun on exposed
+   HEST. This result does not establish absence of nonlinear signal; any further test needs a new
+   protocol and unexposed outcomes.
 
 ## Track B — scientific authorization infrastructure
 

@@ -111,3 +111,34 @@ def test_calibration_receipt_and_checkpoint_paths_cannot_collide(tmp_path: Path)
     )
     with pytest.raises(ValueError, match="must differ"):
         cli._calibration_paths(args)
+
+
+def test_terminal_exposed_v2_cannot_reopen_molecular_outcomes(tmp_path: Path) -> None:
+    result = tmp_path / "result.json"
+    result.write_text(
+        """{
+          "schema": "heir.hest_nonlinear_qualification_result.v2",
+          "source_access": {"molecular_outcomes_opened_under_v2": true},
+          "failure": {"completed_observed_outer_folds": 0}
+        }""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="terminal after molecular-outcome exposure"):
+        cli._assert_full_execution_is_not_terminal(result)
+
+
+def test_unexposed_identity_does_not_trigger_terminal_lock(tmp_path: Path) -> None:
+    absent = tmp_path / "absent.json"
+    cli._assert_full_execution_is_not_terminal(absent)
+
+    result = tmp_path / "result.json"
+    result.write_text(
+        """{
+          "schema": "heir.hest_nonlinear_qualification_result.v2",
+          "source_access": {"molecular_outcomes_opened_under_v2": false},
+          "failure": {"completed_observed_outer_folds": 0}
+        }""",
+        encoding="utf-8",
+    )
+    cli._assert_full_execution_is_not_terminal(result)

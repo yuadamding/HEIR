@@ -55,14 +55,36 @@ def test_registered_v2_manifest_binds_exact_protocol_and_outcome_blind_inputs() 
 
 
 def test_v2_result_preserves_registration_and_fails_closed() -> None:
+    assert RESULT["result_record_revision"] == {
+        "revision_type": "post_execution_scientific_erratum",
+        "original_commit": "a498d396af2d9ae18e0c793ea49e1484302125e1",
+        "original_result_file_sha256": (
+            "10386e159c594f8307488ae92dd2417d8f1d62081298a28c03ff9c10b14d81a9"
+        ),
+        "original_external_receipts_preserved": True,
+        "frozen_protocol_or_manifest_changed": False,
+    }
     assert RESULT["protocol_binding"]["sha256"] == contract.V2_PROTOCOL_SHA256
     assert RESULT["registration_manifest_binding"]["sha256"] == contract.file_sha256(
         MANIFEST_PATH
     )
     assert RESULT["source_access"]["molecular_outcomes_opened_under_v2"] is True
     assert RESULT["failure"]["completed_observed_outer_folds"] == 0
-    assert RESULT["decision"]["stop_nonlinear_expansion_on_this_representation"] is True
+    assert RESULT["decision"]["engineering_decision_available"] is False
+    assert RESULT["decision"]["D1_D2_status"] == "not_evaluable_zero_completed_outer_folds"
+    assert RESULT["decision"]["supports_prospective_local_context_estimator_design"] is None
+    assert RESULT["decision"]["supports_intrinsic_localization_followup"] is None
+    assert RESULT["decision"]["stop_nonlinear_expansion_on_this_representation"] is None
+    assert RESULT["decision"]["v2_execution_terminal"] is True
+    assert RESULT["decision"]["v2_rerun_authorized"] is False
     assert RESULT["decision"]["model_grid_or_threshold_changed_after_outcome_open"] is False
+    assert RESULT["post_execution_audit"]["scientific_hypothesis_result"] == (
+        "indeterminate_procedural_qualification_failure"
+    )
+    assert (
+        RESULT["post_execution_audit"]["production_B0_selection_exercised_by_calibration"]
+        is False
+    )
     assert RESULT["authorizes_h_cell"] is False
     assert RESULT["authorizes_h_intrinsic"] is False
     assert RESULT["authorizes_h_ref"] is False

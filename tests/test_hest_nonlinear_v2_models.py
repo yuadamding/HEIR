@@ -127,6 +127,52 @@ def test_nested_ridge_selection_uses_inner_donors_and_rank_grid() -> None:
     assert len(result.candidates[0]["folds"]) == 3
 
 
+def test_failed_ridge_selection_preserves_the_rejected_candidate_registry() -> None:
+    rng = np.random.default_rng(12)
+    donors = np.repeat(["D1", "D2", "D3"], 8)
+    sections = np.asarray([f"{donor}-S" for donor in donors])
+    labels = np.zeros(len(donors), dtype=np.int64)
+    ids = np.asarray([f"row-{index:03d}" for index in range(len(donors))])
+    features = rng.normal(size=(len(donors), 2))
+    signal = features[:, 0] - 0.5 * features[:, 1]
+    targets = np.column_stack((signal, -signal, 0.5 * signal))
+    grid = models.TrainingGrid(
+        ranks=(1,),
+        ridge_alphas=(0.01,),
+        weight_decays=(0.01,),
+        seeds=(17,),
+        maximum_epochs=1,
+        batch_size=8,
+        patience=1,
+        minimum_support=2,
+        minimum_variance_ratio=1.0e9,
+        minimum_basis_ceiling_r2=0.0,
+    )
+
+    with pytest.raises(models.NoEligibleRidgeCandidateError) as captured:
+        models.select_ridge_hyperparameters(
+            {"technical": features},
+            targets,
+            np.zeros_like(targets),
+            labels,
+            donors,
+            sections,
+            ids,
+            np.zeros((len(donors), 1)),
+            num_types=1,
+            grid=grid,
+            device="cpu",
+        )
+
+    error = captured.value
+    assert error.inner_donors == ("D1", "D2", "D3")
+    assert len(error.candidates) == 1
+    assert error.candidates[0]["accepted"] is False
+    assert error.candidates[0]["rejection_reason"] == "median_variance_ratio_below_threshold"
+    assert error.rejection_counts == {"median_variance_ratio_below_threshold": 1}
+    assert "rejection_counts" in str(error)
+
+
 def test_image_mapping_cannot_cross_a_frozen_null_stratum() -> None:
     data = SimpleNamespace(
         observation_ids=np.asarray(["a", "b", "c", "d"]),

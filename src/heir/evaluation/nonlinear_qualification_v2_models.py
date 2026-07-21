@@ -106,6 +106,30 @@ class RidgeSelectionResult:
     selection_rule: str
 
 
+class NoEligibleRidgeCandidateError(RuntimeError):
+    """Fail closed while preserving every rejected ridge-candidate diagnostic."""
+
+    def __init__(
+        self,
+        candidates: Sequence[Mapping[str, object]],
+        inner_donors: Sequence[str],
+    ) -> None:
+        self.candidates = tuple(dict(candidate) for candidate in candidates)
+        self.inner_donors = tuple(str(donor) for donor in inner_donors)
+        counts: dict[str, int] = {}
+        for candidate in self.candidates:
+            reason = str(candidate.get("rejection_reason") or "unspecified")
+            counts[reason] = counts.get(reason, 0) + 1
+        self.rejection_counts = dict(sorted(counts.items()))
+        summary = ", ".join(
+            f"{reason}={count}" for reason, count in self.rejection_counts.items()
+        )
+        super().__init__(
+            "every registered ridge candidate failed nested selection"
+            + (f"; rejection_counts: {summary}" if summary else "")
+        )
+
+
 @dataclass(frozen=True)
 class NeuralArmSelection:
     arm_id: str
@@ -444,7 +468,7 @@ def select_ridge_hyperparameters(
         )
     accepted = [row for row in receipts if row["accepted"]]
     if not accepted:
-        raise RuntimeError("every registered ridge candidate failed nested selection")
+        raise NoEligibleRidgeCandidateError(receipts, inner_donors)
     winner = min(
         accepted,
         key=lambda row: (
@@ -1188,6 +1212,7 @@ def fit_null_outer_fold(
 __all__ = [
     "ARM_IDS",
     "FROZEN_TRAINING_GRID",
+    "NoEligibleRidgeCandidateError",
     "FeatureArm",
     "FittedArm",
     "OuterFoldModels",

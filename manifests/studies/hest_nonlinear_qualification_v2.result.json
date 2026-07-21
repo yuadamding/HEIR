@@ -3,6 +3,13 @@
   "study_id": "hest_nonlinear_qualification_v2",
   "status": "execution_failed_no_eligible_B0_ridge_candidate",
   "analysis_status": "retrospective_exposed_non_authorizing",
+  "result_record_revision": {
+    "revision_type": "post_execution_scientific_erratum",
+    "original_commit": "a498d396af2d9ae18e0c793ea49e1484302125e1",
+    "original_result_file_sha256": "10386e159c594f8307488ae92dd2417d8f1d62081298a28c03ff9c10b14d81a9",
+    "original_external_receipts_preserved": true,
+    "frozen_protocol_or_manifest_changed": false
+  },
   "protocol_binding": {
     "path": "configs/hest_nonlinear_qualification_v2.json",
     "sha256": "901aea1c9b464aaa20cfa8198e716638271db88231eae9984aa979d69912d44d",
@@ -48,11 +55,30 @@
     "candidate_diagnostics_available": false
   },
   "decision": {
-    "engineering_decision_available": true,
-    "supports_prospective_local_context_estimator_design": false,
-    "supports_intrinsic_localization_followup": false,
-    "stop_nonlinear_expansion_on_this_representation": true,
+    "engineering_decision_available": false,
+    "D1_D2_status": "not_evaluable_zero_completed_outer_folds",
+    "supports_prospective_local_context_estimator_design": null,
+    "supports_intrinsic_localization_followup": null,
+    "support_claim_available": false,
+    "stop_nonlinear_expansion_on_this_representation": null,
+    "v2_execution_terminal": true,
+    "v2_rerun_authorized": false,
+    "new_unexposed_protocol_required_for_any_further_test": true,
     "model_grid_or_threshold_changed_after_outcome_open": false
+  },
+  "post_execution_audit": {
+    "scientific_hypothesis_result": "indeterminate_procedural_qualification_failure",
+    "all_row_support_20_topology_passed": true,
+    "production_B0_failure_cause_classifiable": false,
+    "calibration_scope": "shared_scoring_multiplicity_registration_and_D1_D2_on_synthetic_heldout_predictions",
+    "production_B0_selection_exercised_by_calibration": false,
+    "production_B0_selection_exercised_by_implementation_smoke": false,
+    "implementation_smoke_eligibility_thresholds": {
+      "minimum_support": 5,
+      "minimum_variance_ratio": 0.0,
+      "minimum_basis_ceiling_r2": 0.0
+    },
+    "interpretation": "No held-out effect estimate exists, so this is neither a D1 failure nor evidence that the representation lacks nonlinear molecular signal. The exposed v2 identity remains terminal and nonauthorizing."
   },
   "authorizes_h_cell": false,
   "authorizes_h_intrinsic": false,

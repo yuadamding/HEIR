@@ -201,3 +201,18 @@ def test_receipt_schema_distinguishes_git_commit_from_sha256() -> None:
         "$ref": "#/$defs/gitCommit"
     }
     assert schema["$defs"]["gitCommit"]["pattern"] == "^[0-9a-f]{40}$"
+
+
+def test_historical_receipt_validation_uses_generation_not_current_implementation() -> None:
+    historical = {
+        "builder_sha256": "1" * 64,
+        "receipt_validator_sha256": "2" * 64,
+        "encoder_adapter_sha256": "3" * 64,
+        "encoder_base_sha256": "4" * 64,
+    }
+
+    assert BUILDER._recorded_implementation_identity(
+        {"implementation": historical}
+    ) == historical
+    with pytest.raises(ValueError, match="provenance is malformed"):
+        BUILDER._recorded_implementation_identity({})

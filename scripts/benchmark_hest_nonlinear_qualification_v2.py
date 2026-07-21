@@ -50,6 +50,8 @@ DEFAULT_SMOKE_CHECKPOINTS = Path(
 DEFAULT_WORK_DIR = Path("/mnt/seagate/HEIR_runs/hest_nonlinear_v2/full")
 DEFAULT_OUTPUT = Path("/mnt/seagate/HEIR_runs/hest_nonlinear_v2/report.json")
 DEFAULT_MARKDOWN = Path("/mnt/seagate/HEIR_runs/hest_nonlinear_v2/report.md")
+TERMINAL_RESULT = ROOT / "manifests/studies/hest_nonlinear_qualification_v2.result.json"
+TERMINAL_RESULT_SCHEMA = "heir.hest_nonlinear_qualification_result.v2"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -102,9 +104,29 @@ def _calibration_paths(args: argparse.Namespace) -> tuple[Path, Path]:
     return output, checkpoint
 
 
+def _assert_full_execution_is_not_terminal(result_path: Path = TERMINAL_RESULT) -> None:
+    """Prevent outcome-informed reuse of the exposed, terminal v2 identity."""
+
+    if not result_path.is_file():
+        return
+    result = _json(result_path)
+    source_access = result.get("source_access")
+    if (
+        result.get("schema") == TERMINAL_RESULT_SCHEMA
+        and isinstance(source_access, dict)
+        and source_access.get("molecular_outcomes_opened_under_v2") is True
+    ):
+        raise RuntimeError(
+            "HEST nonlinear qualification v2 is terminal after molecular-outcome exposure; "
+            "the target must not be reopened or rerun under this protocol identity"
+        )
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.phase != "calibrate" and (args.smoke or args.trials_per_condition is not None):
         raise ValueError("--smoke and --trials-per-condition apply only to calibration")
+    if args.phase == "full":
+        _assert_full_execution_is_not_terminal()
     calibration_output, calibration_checkpoint = _calibration_paths(args)
     receipt = dict(
         preflight(

@@ -70,6 +70,21 @@ def _implementation_identity() -> Mapping[str, object]:
     return {name: file_sha256(path) for name, path in paths.items()}
 
 
+def _recorded_implementation_identity(receipt: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the implementation that generated a historical receipt.
+
+    Independent validation recomputes the pixels with the current validator, but the receipt's
+    provenance must continue to describe the clean commit that originally generated it. Requiring
+    those historical hashes to equal the current checkout makes a valid frozen artifact
+    unverifiable after any validator maintenance.
+    """
+
+    implementation = receipt.get("implementation")
+    if not isinstance(implementation, Mapping):
+        raise ValueError("blank receipt implementation provenance is malformed")
+    return dict(implementation)
+
+
 def _cuda_device_index(device: str, current_device: int) -> int:
     if device == "cuda":
         return int(current_device)
@@ -245,6 +260,7 @@ def validate(args: argparse.Namespace) -> Mapping[str, object]:
     )
     supplement = contract.load_supplement(args.output)
     receipt = _json(args.receipt)
+    recorded_implementation = _recorded_implementation_identity(receipt)
     torch = _configure_torch(args.device)
     encoder = HOptimus1Encoder(args.model_dir, manifest, device=args.device)
     try:
@@ -257,7 +273,7 @@ def validate(args: argparse.Namespace) -> Mapping[str, object]:
         supplement=supplement,
         manifest=manifest,
         protocol_sha256=str(frozen["sha256"]),
-        expected_implementation=_implementation_identity(),
+        expected_implementation=recorded_implementation,
         recomputed_batch_one=batch_one,
         recomputed_batch_32=batch_32,
     )
@@ -268,6 +284,8 @@ def validate(args: argparse.Namespace) -> Mapping[str, object]:
         "supplement_sha256": supplement.sha256,
         "receipt_sha256": file_sha256(args.receipt),
         "recomputed_feature_sha256": contract.array_sha256(batch_one),
+        "receipt_generation_implementation": recorded_implementation,
+        "validation_implementation": _implementation_identity(),
         "molecular_outcomes_read": False,
         "predictions_read": False,
         "device": args.device,
