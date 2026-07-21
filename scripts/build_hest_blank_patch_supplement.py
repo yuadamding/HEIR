@@ -70,6 +70,15 @@ def _implementation_identity() -> Mapping[str, object]:
     return {name: file_sha256(path) for name, path in paths.items()}
 
 
+def _cuda_device_index(device: str, current_device: int) -> int:
+    if device == "cuda":
+        return int(current_device)
+    prefix, separator, index = device.partition(":")
+    if prefix != "cuda" or separator != ":" or not index.isdigit():
+        raise ValueError("blank encoding device must be cuda or an indexed CUDA device")
+    return int(index)
+
+
 def _configure_torch(device: str) -> object:
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     if os.environ["CUBLAS_WORKSPACE_CONFIG"] not in {":4096:8", ":16:8"}:
@@ -82,7 +91,7 @@ def _configure_torch(device: str) -> object:
         raise ValueError("the registered HEST blank must use the CUDA production encoder path")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the registered HEST blank encoding")
-    torch.cuda.set_device(torch.device(device))
+    torch.cuda.set_device(_cuda_device_index(device, torch.cuda.current_device()))
     torch.manual_seed(0)
     torch.cuda.manual_seed_all(0)
     torch.backends.cuda.matmul.allow_tf32 = False

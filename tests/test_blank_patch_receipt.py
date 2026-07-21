@@ -171,6 +171,13 @@ def test_builder_constructs_both_batches_internally_and_has_no_feature_argument(
         BUILDER._parser().parse_args(["--feature", "externally-supplied.npy"])
 
 
+def test_default_and_indexed_cuda_devices_resolve_to_integer_indices() -> None:
+    assert BUILDER._cuda_device_index("cuda", 3) == 3
+    assert BUILDER._cuda_device_index("cuda:0", 3) == 0
+    with pytest.raises(ValueError, match="indexed CUDA"):
+        BUILDER._cuda_device_index("cpu", 0)
+
+
 def test_frozen_protocol_and_encoder_identity_are_accepted() -> None:
     frozen = BUILDER._protocol_contract(ROOT / "configs/hest_nonlinear_qualification_v1.json")
     assert frozen["source_rows"] == 36121
