@@ -1,6 +1,6 @@
 # HEST nonlinear estimator qualification v2
 
-**Status:** registered, retrospective, exposed, nonauthorizing, and not yet executed.
+**Status:** registered runner; retrospective, exposed, nonauthorizing, and pending execution gates.
 
 This protocol tests one narrow SCHAF-inspired proposition: whether a bounded nonlinear,
 type-conditioned model on frozen H-optimus-1 features exposes donor-generalizing molecular
@@ -75,7 +75,11 @@ An exact donor sign-flip max statistic controls the direct family `A* - B2`, `A*
 derangement and different-spatial-block nulls each use 20 permutations for smoke and 100 for the
 final run, with one synchronous image mapping across multiview branches. Both nulls preserve
 donor, section, fine type, and pool role, and test the registered `A* - N0` donor/type macro
-residual-coordinate R2 statistic.
+residual-coordinate R2 statistic. Mapping seeds start at 20260720, add 1000003 by null family,
+and add 104729 by permutation. On the frozen topology, different-block reassignment changes
+34,809/36,121 source rows (96.37%) and 17,326/18,062 evaluation rows (95.93%). The 41 infeasible
+strata retain identity mappings and remain reported as a conservative null component; every
+mapping must change at least 95% of both source and evaluation rows.
 
 D1 supports design of a prospective local-context estimator only when every frozen absolute,
 incremental, variance, coverage, rare-state, null, multiplicity, and registration criterion
@@ -89,7 +93,8 @@ Neither decision authorizes a biological HEIR hypothesis.
 Before opening `nucleus_molecular_targets`, the exact scoring, multiplicity, registration, and
 D1/D2 code must run on synthetic held-out predictions for 200 trials in each of ten frozen
 conditions on the real donor/section/type/block/registration topology. The separate implementation
-smoke covers nested fitting, checkpoint replay, and complete refits. Exact one-sided
+smoke covers nested architecture/rank selection, checkpoint replay, and 20 complete refits for
+each null family. Exact one-sided
 Clopper-Pearson bounds use Bonferroni control across all 20 D1/D2 expectations. False-positive
 upper bounds must be below 0.05 and true-positive lower bounds above 0.80.
 

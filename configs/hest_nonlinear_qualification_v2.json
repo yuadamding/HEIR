@@ -210,10 +210,14 @@
   },
   "refitted_null_details": {
     "registered_statistic": "A_star_minus_N0_donor_type_macro_residual_coordinate_R2",
+    "mapping_seed_rule": "20260720_plus_1000003_times_family_index_plus_104729_times_permutation_index",
     "stratification": ["donor", "section", "fine_type", "pool_role"],
     "within_section_type_image_derangement": "permute_image_row_assignment_within_each_stratum",
     "multiview_mapping": "one_synchronous_row_mapping_for_all_image_branches",
     "different_spatial_block_reassignment": "source_image_views_must_come_from_a_different_spatial_block_within_the_same_stratum",
+    "infeasible_different_spatial_block_strata": "retain_identity_mapping_and_report_as_a_conservative_null_component",
+    "minimum_different_spatial_block_changed_fraction": 0.95,
+    "minimum_changed_fraction_scope": "registered_evaluation_rows_and_all_source_rows",
     "complete_refit_steps": [
       "feature_preprocessing",
       "technical_correction",
@@ -361,6 +365,7 @@
   "execution_order": [
     "verify_all_input_protocol_manifest_and_implementation_hashes_before_outcomes",
     "run_preflight_without_molecular_targets",
+    "run_nested_fit_checkpoint_and_20_refit_per_family_implementation_smoke_without_molecular_targets",
     "run_complete_synthetic_calibration_without_molecular_targets",
     "require_clean_committed_protocol_and_passing_calibration_receipt",
     "open_nucleus_molecular_targets_once",

@@ -16,6 +16,16 @@ ONE_SIDED_ALPHA = 0.05
 COMPARISON_IDS = ("A_star_vs_N0", "N1_vs_N5", "N3_vs_N5", "N4_vs_N5")
 
 
+def _group_indices(*values: np.ndarray) -> tuple[tuple[tuple[object, ...], np.ndarray], ...]:
+    arrays = tuple(np.asarray(value) for value in values)
+    if not arrays or any(array.shape != arrays[0].shape for array in arrays):
+        raise ValueError("registration grouping vectors are not row aligned")
+    groups: dict[tuple[object, ...], list[int]] = {}
+    for row, key in enumerate(zip(*(array.tolist() for array in arrays))):
+        groups.setdefault(key, []).append(row)
+    return tuple((key, np.asarray(groups[key], dtype=np.int64)) for key in sorted(groups))
+
+
 def _matrix(value: object, name: str) -> np.ndarray:
     array = np.asarray(value, dtype=np.float64)
     if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] == 0:
@@ -144,11 +154,13 @@ def hierarchical_gain_summary(
             raise ValueError("allowed_donors must be unique nonempty identifiers")
         selected &= np.isin(donors, allowed)
 
-    observed_keys = sorted(set(zip(donors[selected].tolist(), labels[selected].tolist())))
-    counts = {
-        key: int(np.count_nonzero(selected & (donors == key[0]) & (labels == key[1])))
-        for key in observed_keys
+    selected_groups = {
+        (str(donor), str(label)): indices[selected[indices]]
+        for (donor, label), indices in _group_indices(donors, labels)
+        if np.any(selected[indices])
     }
+    observed_keys = sorted(selected_groups)
+    counts = {key: len(selected_groups[key]) for key in observed_keys}
     if required_strata is None:
         supported = tuple(key for key in observed_keys if counts[key] >= minimum_support)
     else:
@@ -163,9 +175,9 @@ def hierarchical_gain_summary(
     donor_type_effects: dict[str, list[float]] = {}
     supported_rows = 0
     for donor, label in supported:
-        mask = selected & (donors == donor) & (labels == label)
-        count = int(mask.sum())
-        effect = float(values[mask].mean())
+        indices = selected_groups[(donor, label)]
+        count = len(indices)
+        effect = float(values[indices].mean())
         supported_rows += count
         donor_type_effects.setdefault(donor, []).append(effect)
         type_rows.append(

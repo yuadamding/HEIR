@@ -9,9 +9,6 @@ import numpy as np
 
 from heir.evaluation.hierarchical_metrics import (
     donor_dominance,
-    donor_section_type_macro_r2,
-    macro_error_reduction,
-    macro_r2,
     paired_donor_effects,
 )
 from heir.evaluation.nonlinear_qualification_v2_contract import (
@@ -48,6 +45,16 @@ NULL_FAMILIES = (
     "within_section_type_refitted_null_empirical_p",
     "different_spatial_block_refitted_null_empirical_p",
 )
+
+
+def _group_indices(*values: np.ndarray) -> tuple[tuple[tuple[object, ...], np.ndarray], ...]:
+    arrays = tuple(np.asarray(value) for value in values)
+    if not arrays or any(array.shape != arrays[0].shape for array in arrays):
+        raise ValueError("qualification grouping vectors are not row aligned")
+    groups: dict[tuple[object, ...], list[int]] = {}
+    for row, key in enumerate(zip(*(array.tolist() for array in arrays))):
+        groups.setdefault(key, []).append(row)
+    return tuple((key, np.asarray(groups[key], dtype=np.int64)) for key in sorted(groups))
 
 
 @dataclass(frozen=True)
@@ -122,6 +129,125 @@ def _rank_vector(value: object, rows: int, width: int) -> np.ndarray:
     return result
 
 
+def _donor_type_summary(
+    truth: np.ndarray,
+    prediction: np.ndarray,
+    groups: tuple[tuple[tuple[object, ...], np.ndarray], ...],
+    minimum_support: int,
+    *,
+    baseline: Optional[np.ndarray] = None,
+) -> tuple[float, list[Mapping[str, object]], Mapping[str, float]]:
+    rows = []
+    donor_values: dict[str, list[float]] = {}
+    for (donor, type_index), indices in groups:
+        support = len(indices)
+        if support < minimum_support:
+            continue
+        local_truth = truth[indices]
+        if baseline is None:
+            centered = local_truth - local_truth.mean(axis=0, keepdims=True)
+            denominator = float(np.square(centered).sum())
+            error = float(np.square(prediction[indices] - local_truth).sum())
+            value = 1.0 - error / denominator if denominator > 1.0e-12 else float("nan")
+            if not np.isfinite(value):
+                continue
+            metric = {"residual_coordinate_r2": float(value)}
+        else:
+            baseline_rmse = float(np.sqrt(np.mean(np.square(local_truth - baseline[indices]))))
+            model_rmse = float(np.sqrt(np.mean(np.square(local_truth - prediction[indices]))))
+            value = (baseline_rmse - model_rmse) / max(baseline_rmse, 1.0e-12)
+            metric = {"relative_rmse_reduction": float(value)}
+        rows.append(
+            {
+                "donor_id": donor,
+                "type_index": int(type_index),
+                "support": support,
+                **metric,
+            }
+        )
+        donor_values.setdefault(str(donor), []).append(float(value))
+    donor_macro = {
+        donor: float(np.mean(values)) for donor, values in donor_values.items() if values
+    }
+    if not donor_macro:
+        raise ValueError(
+            "no supported locked donor/type stratum is evaluable"
+            if baseline is None
+            else "no supported donor/type error-reduction stratum is evaluable"
+        )
+    return float(np.mean(list(donor_macro.values()))), rows, donor_macro
+
+
+def _donor_section_type_r2(
+    truth: np.ndarray,
+    prediction: np.ndarray,
+    groups: tuple[tuple[tuple[object, ...], np.ndarray], ...],
+    minimum_support: int,
+) -> tuple[
+    float,
+    list[Mapping[str, object]],
+    Mapping[str, float],
+    Mapping[str, Mapping[str, float]],
+]:
+    rows = []
+    grouped: dict[str, dict[str, list[tuple[object, np.ndarray]]]] = {}
+    for (donor, section, type_index), indices in groups:
+        grouped.setdefault(str(donor), {}).setdefault(str(section), []).append(
+            (type_index, indices)
+        )
+    donor_sections: dict[str, dict[str, float]] = {}
+    donor_macro: dict[str, float] = {}
+    for donor in sorted(grouped):
+        sections = {}
+        for section in sorted(grouped[donor]):
+            type_values = []
+            for type_index, indices in grouped[donor][section]:
+                support = len(indices)
+                row = {
+                    "donor_id": donor,
+                    "section_id": section,
+                    "type_index": int(type_index),
+                    "support": support,
+                }
+                if support < minimum_support:
+                    rows.append(
+                        {
+                            **row,
+                            "evaluable": False,
+                            "residual_coordinate_r2": None,
+                            "reason": "support_below_minimum",
+                        }
+                    )
+                    continue
+                local_truth = truth[indices]
+                centered = local_truth - local_truth.mean(axis=0, keepdims=True)
+                denominator = float(np.square(centered).sum())
+                error = float(np.square(prediction[indices] - local_truth).sum())
+                value = 1.0 - error / denominator if denominator > 1.0e-12 else float("nan")
+                if not np.isfinite(value):
+                    rows.append(
+                        {
+                            **row,
+                            "evaluable": False,
+                            "residual_coordinate_r2": None,
+                            "reason": "zero_truth_variance",
+                        }
+                    )
+                    continue
+                rows.append({**row, "evaluable": True, "residual_coordinate_r2": float(value)})
+                type_values.append(float(value))
+            if not type_values:
+                raise ValueError(
+                    f"observed donor/section has no evaluable type support: {donor}/{section}"
+                )
+            sections[section] = float(np.mean(type_values))
+        donor_sections[donor] = sections
+        donor_macro[donor] = float(np.mean(list(sections.values())))
+    if not donor_macro:
+        raise ValueError("no donor/section/type stratum is evaluable")
+    return float(np.mean(list(donor_macro.values()))), rows, donor_macro, donor_sections
+
+
 def _validated_arm(
     arm: ArmPrediction,
     *,
@@ -157,26 +283,21 @@ def _validated_arm(
 def _molecular_variance_ratio(
     truth: np.ndarray,
     prediction: np.ndarray,
-    donors: np.ndarray,
-    labels: np.ndarray,
     minimum_support: int,
+    groups: tuple[tuple[tuple[object, ...], np.ndarray], ...],
 ) -> float:
-    donor_values = []
-    for donor in sorted(set(donors.tolist())):
-        type_values = []
-        for label in sorted(set(labels[donors == donor].tolist())):
-            selected = (donors == donor) & (labels == label)
-            if int(selected.sum()) < minimum_support:
-                continue
-            truth_scale = np.std(truth[selected], axis=0)
-            prediction_scale = np.std(prediction[selected], axis=0)
-            evaluable = truth_scale > 1.0e-12
-            if np.any(evaluable):
-                type_values.append(
-                    float(np.median(prediction_scale[evaluable] / truth_scale[evaluable]))
-                )
-        if type_values:
-            donor_values.append(float(np.mean(type_values)))
+    grouped: dict[str, list[float]] = {}
+    for (donor, _), indices in groups:
+        if len(indices) < minimum_support:
+            continue
+        truth_scale = np.std(truth[indices], axis=0)
+        prediction_scale = np.std(prediction[indices], axis=0)
+        evaluable = truth_scale > 1.0e-12
+        if np.any(evaluable):
+            grouped.setdefault(str(donor), []).append(
+                float(np.median(prediction_scale[evaluable] / truth_scale[evaluable]))
+            )
+    donor_values = [float(np.mean(grouped[donor])) for donor in sorted(grouped)]
     if not donor_values:
         raise ValueError("molecular variance ratio has no supported donor/type strata")
     return float(np.mean(donor_values))
@@ -188,39 +309,44 @@ def _rare_state_recall(
     ranks: np.ndarray,
     lower: np.ndarray,
     upper: np.ndarray,
-    donors: np.ndarray,
-    labels: np.ndarray,
+    groups: tuple[tuple[tuple[object, ...], np.ndarray], ...],
 ) -> Mapping[str, object]:
     donor_values: dict[str, float] = {}
     evaluable_tails = 0
-    for donor in sorted(set(donors.tolist())):
-        type_values = []
-        for label in sorted(set(labels[donors == donor].tolist())):
-            selected = (donors == donor) & (labels == label)
-            coordinate_values = []
-            for coordinate in range(truth.shape[1]):
-                active = selected & (ranks > coordinate)
-                if not active.any():
-                    continue
-                tail_values = []
-                low = active & (truth[:, coordinate] <= lower[:, coordinate])
-                high = active & (truth[:, coordinate] >= upper[:, coordinate])
-                if low.any():
-                    tail_values.append(
-                        float(np.mean(prediction[low, coordinate] <= lower[low, coordinate]))
+    grouped: dict[str, list[float]] = {}
+    for (donor, _), indices in groups:
+        local_truth = truth[indices]
+        local_prediction = prediction[indices]
+        local_ranks = ranks[indices]
+        local_lower = lower[indices]
+        local_upper = upper[indices]
+        coordinate_values = []
+        for coordinate in range(truth.shape[1]):
+            active = local_ranks > coordinate
+            if not active.any():
+                continue
+            tail_values = []
+            low = active & (local_truth[:, coordinate] <= local_lower[:, coordinate])
+            high = active & (local_truth[:, coordinate] >= local_upper[:, coordinate])
+            if low.any():
+                tail_values.append(
+                    float(
+                        np.mean(local_prediction[low, coordinate] <= local_lower[low, coordinate])
                     )
-                    evaluable_tails += 1
-                if high.any():
-                    tail_values.append(
-                        float(np.mean(prediction[high, coordinate] >= upper[high, coordinate]))
+                )
+                evaluable_tails += 1
+            if high.any():
+                tail_values.append(
+                    float(
+                        np.mean(local_prediction[high, coordinate] >= local_upper[high, coordinate])
                     )
-                    evaluable_tails += 1
-                if tail_values:
-                    coordinate_values.append(float(np.mean(tail_values)))
-            if coordinate_values:
-                type_values.append(float(np.mean(coordinate_values)))
-        if type_values:
-            donor_values[donor] = float(np.mean(type_values))
+                )
+                evaluable_tails += 1
+            if tail_values:
+                coordinate_values.append(float(np.mean(tail_values)))
+        if coordinate_values:
+            grouped.setdefault(str(donor), []).append(float(np.mean(coordinate_values)))
+    donor_values = {donor: float(np.mean(grouped[donor])) for donor in sorted(grouped)}
     return {
         "mean_recall": float(np.mean(list(donor_values.values()))) if donor_values else None,
         "per_donor": donor_values,
@@ -238,6 +364,8 @@ def _score_arm(
     molecular_truth: np.ndarray,
     reference: np.ndarray,
     minimum_support: int,
+    donor_type_groups: tuple[tuple[tuple[object, ...], np.ndarray], ...],
+    donor_section_type_groups: tuple[tuple[tuple[object, ...], np.ndarray], ...],
 ) -> Mapping[str, object]:
     truth, prediction, ranks, molecular, lower, upper, available = _validated_arm(
         arm,
@@ -245,36 +373,48 @@ def _score_arm(
         rows=len(donors),
         molecular_width=molecular_truth.shape[1],
     )
-    donor_type, strata, donor_values = macro_r2(truth, prediction, donors, labels, minimum_support)
-    donor_section_type, section_rows, section_donors, _ = donor_section_type_macro_r2(
+    donor_type, strata, donor_values = _donor_type_summary(
         truth,
         prediction,
-        donors,
-        sections,
-        labels,
+        donor_type_groups,
         minimum_support,
     )
-    reduction, reduction_rows, reduction_donors = macro_error_reduction(
+    donor_section_type, section_rows, section_donors, _ = _donor_section_type_r2(
+        truth,
+        prediction,
+        donor_section_type_groups,
+        minimum_support,
+    )
+    reduction, reduction_rows, reduction_donors = _donor_type_summary(
         molecular_truth,
         molecular,
-        reference,
-        donors,
-        labels,
+        donor_type_groups,
         minimum_support,
+        baseline=reference,
     )
     type_coverage = [
         float(np.mean(available[labels == label]))
         for label in sorted(set(labels.tolist()))
         if np.any(labels == label)
     ]
-    rare = _rare_state_recall(truth, prediction, ranks, lower, upper, donors, labels)
+    rare = _rare_state_recall(
+        truth,
+        prediction,
+        ranks,
+        lower,
+        upper,
+        donor_type_groups,
+    )
     return {
         "arm_id": name,
         "donor_type_macro_residual_coordinate_R2": donor_type,
         "donor_section_type_macro_residual_coordinate_R2": donor_section_type,
         "relative_molecular_error_reduction_over_reference_mean": reduction,
         "molecular_variance_ratio": _molecular_variance_ratio(
-            molecular_truth, molecular, donors, labels, minimum_support
+            molecular_truth,
+            molecular,
+            minimum_support,
+            donor_type_groups,
         ),
         "median_type_coverage": float(np.median(type_coverage)),
         "abstention_rate": float(np.mean(~available)),
@@ -348,6 +488,8 @@ def score_qualification(
         raise ValueError("molecular truth and reference prediction shapes differ")
     if not set(REQUIRED_ARMS) <= set(inputs.arms):
         raise ValueError("qualification predictions omit a required v2 arm")
+    donor_type_groups = _group_indices(donors, labels)
+    donor_section_type_groups = _group_indices(donors, sections, labels)
     scores = {
         name: _score_arm(
             arm,
@@ -358,6 +500,8 @@ def score_qualification(
             molecular_truth=molecular_truth,
             reference=reference,
             minimum_support=minimum_support,
+            donor_type_groups=donor_type_groups,
+            donor_section_type_groups=donor_section_type_groups,
         )
         for name, arm in inputs.arms.items()
     }
@@ -517,17 +661,20 @@ def synthetic_trial_inputs(
     donor_names = sorted(set(donors.tolist()))
     donor_index = {name: index for index, name in enumerate(donor_names)}
     compact_labels = {value: index for index, value in enumerate(sorted(set(labels.tolist())))}
-    reference = np.column_stack(
-        [
-            np.asarray(
-                [
-                    0.02 * donor_index[d] + 0.01 * compact_labels[int(t)]
-                    for d, t in zip(donors, labels)
-                ]
-            )
-            * (gene + 1)
-            for gene in range(CALIBRATION_MOLECULAR_WIDTH)
-        ]
+    donor_codes = np.fromiter(
+        (donor_index[value] for value in donors),
+        dtype=np.float64,
+        count=rows,
+    )
+    label_codes = np.fromiter(
+        (compact_labels[int(value)] for value in labels),
+        dtype=np.float64,
+        count=rows,
+    )
+    reference = (0.02 * donor_codes + 0.01 * label_codes)[:, None] * np.arange(
+        1,
+        CALIBRATION_MOLECULAR_WIDTH + 1,
+        dtype=np.float64,
     )
     basis_rng = np.random.default_rng(2_026_072_101)
     basis, _ = np.linalg.qr(basis_rng.normal(size=(CALIBRATION_MOLECULAR_WIDTH, rank)))

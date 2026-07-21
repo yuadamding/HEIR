@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from heir.evaluation import nonlinear_qualification_v2_execution as execution
+
+_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts/benchmark_hest_nonlinear_qualification_v2.py"
+)
+_SPEC = importlib.util.spec_from_file_location("benchmark_hest_nonlinear_qualification_v2", _SCRIPT)
+assert _SPEC is not None and _SPEC.loader is not None
+cli = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(cli)
 
 
 def _source(path: Path) -> tuple[Path, tuple[str, ...], int]:
@@ -71,3 +81,33 @@ def test_source_registry_lists_the_molecular_member_without_opening_it(
 
     assert members.count(execution.MOLECULAR_MEMBER) == 1
     assert "image_features" in members
+
+
+def test_reduced_calibration_defaults_cannot_poison_production_receipts() -> None:
+    smoke_args = cli._parser().parse_args(["--phase", "calibrate", "--smoke"])
+    production_args = cli._parser().parse_args(["--phase", "calibrate"])
+
+    assert cli._calibration_paths(smoke_args) == (
+        cli.DEFAULT_CALIBRATION_SMOKE,
+        cli.DEFAULT_CHECKPOINT_SMOKE,
+    )
+    assert cli._calibration_paths(production_args) == (
+        cli.DEFAULT_CALIBRATION,
+        cli.DEFAULT_CHECKPOINT,
+    )
+
+
+def test_calibration_receipt_and_checkpoint_paths_cannot_collide(tmp_path: Path) -> None:
+    path = tmp_path / "same.json"
+    args = cli._parser().parse_args(
+        [
+            "--phase",
+            "calibrate",
+            "--calibration-output",
+            str(path),
+            "--calibration-checkpoint",
+            str(path),
+        ]
+    )
+    with pytest.raises(ValueError, match="must differ"):
+        cli._calibration_paths(args)

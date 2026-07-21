@@ -21,7 +21,7 @@ PROTOCOL_SCHEMA = "heir.hest_nonlinear_qualification_protocol.v2"
 MANIFEST_SCHEMA = "heir.hest_nonlinear_qualification_manifest.v2"
 REPORT_SCHEMA = "heir.hest_nonlinear_qualification_report.v2"
 BASE_PROTOCOL_SHA256 = "656419fcb75919fb938ba5a351014b7b72ba54b077da4c557103796f269d044f"
-V2_PROTOCOL_SHA256 = "1ea5342d09a702d43daf5b3bffa94d8b069ec11c8af30e266eb632b5765c1fd8"
+V2_PROTOCOL_SHA256 = "901aea1c9b464aaa20cfa8198e716638271db88231eae9984aa979d69912d44d"
 SOURCE_SHA256 = "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636"
 BLANK_SUPPLEMENT_SHA256 = "a7495d795c6a73e9a8bfc172448d0d161a99402b0bc63cd1ae6966e1c3968219"
 BLANK_RECEIPT_SHA256 = "41917b39c0e50f27e252d76a4507e0a7599591e00c09b25074f49b9413bbd962"
@@ -378,8 +378,15 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
     if (
         nulls.get("registered_statistic")
         != "A_star_minus_N0_donor_type_macro_residual_coordinate_R2"
+        or nulls.get("mapping_seed_rule")
+        != "20260720_plus_1000003_times_family_index_plus_104729_times_permutation_index"
         or nulls.get("stratification") != ["donor", "section", "fine_type", "pool_role"]
         or nulls.get("multiview_mapping") != "one_synchronous_row_mapping_for_all_image_branches"
+        or nulls.get("infeasible_different_spatial_block_strata")
+        != "retain_identity_mapping_and_report_as_a_conservative_null_component"
+        or nulls.get("minimum_different_spatial_block_changed_fraction") != 0.95
+        or nulls.get("minimum_changed_fraction_scope")
+        != "registered_evaluation_rows_and_all_source_rows"
         or nulls.get("smoke_permutations_per_family") != 20
         or nulls.get("final_permutations_per_family") != 100
         or nulls.get("post_fit_feature_shuffle") != "prohibited"
@@ -397,6 +404,16 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
         ]
     ):
         raise ValueError("v2 refitted-null construction changed")
+    execution_order = value.get("execution_order")
+    if (
+        not isinstance(execution_order, list)
+        or (
+            "run_nested_fit_checkpoint_and_20_refit_per_family_implementation_smoke_without_"
+            "molecular_targets"
+        )
+        not in execution_order
+    ):
+        raise ValueError("v2 execution order omits the pre-outcome implementation smoke")
     decisions = _mapping(value.get("decision_rules"), "decision_rules")
     if (
         _normalized_rules(
@@ -455,7 +472,7 @@ def validate_manifest(
         raise ValueError("unsupported HEST nonlinear qualification v2 manifest")
     _non_authorizing(value, "v2 manifest")
     if (
-        value.get("status") != "registered_pending_runner_and_synthetic_calibration"
+        value.get("status") != "registered_pending_execution_gates"
         or value.get("study_role") != "retrospective_estimator_qualification_only"
         or value.get("all_molecular_outcomes_previously_exposed") is not True
         or value.get("prospective_lock_eligible") is not False
@@ -516,11 +533,13 @@ def validate_manifest(
     execution = _mapping(value.get("execution"), "manifest execution")
     if execution != {
         "preflight_authorized": True,
+        "implementation_smoke_authorized": True,
         "synthetic_calibration_authorized": True,
         "full_biological_execution_authorized_at_registration": False,
         "full_biological_execution_requires": [
             "clean_committed_full_runner",
             "all_preflight_hash_and_contract_checks_pass",
+            "passing_nested_fit_checkpoint_and_20_refit_per_family_smoke_receipt",
             "passing_200_trial_per_condition_synthetic_calibration_receipt",
             "calibration_receipt_records_molecular_outcomes_read_false",
         ],

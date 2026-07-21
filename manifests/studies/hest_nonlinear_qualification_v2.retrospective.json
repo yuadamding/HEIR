@@ -1,7 +1,7 @@
 {
   "schema": "heir.hest_nonlinear_qualification_manifest.v2",
   "study_id": "hest_nonlinear_qualification_v2",
-  "status": "registered_pending_runner_and_synthetic_calibration",
+  "status": "registered_pending_execution_gates",
   "analysis_status": "retrospective_exposed_non_authorizing",
   "study_role": "retrospective_estimator_qualification_only",
   "all_molecular_outcomes_previously_exposed": true,
@@ -15,7 +15,7 @@
   "authorizes_full_heir": false,
   "protocol_binding": {
     "path": "configs/hest_nonlinear_qualification_v2.json",
-    "sha256": "1ea5342d09a702d43daf5b3bffa94d8b069ec11c8af30e266eb632b5765c1fd8",
+    "sha256": "901aea1c9b464aaa20cfa8198e716638271db88231eae9984aa979d69912d44d",
     "frozen_before_molecular_execution": true,
     "intermediate_results_may_modify_protocol": false
   },
@@ -68,11 +68,13 @@
   ],
   "execution": {
     "preflight_authorized": true,
+    "implementation_smoke_authorized": true,
     "synthetic_calibration_authorized": true,
     "full_biological_execution_authorized_at_registration": false,
     "full_biological_execution_requires": [
       "clean_committed_full_runner",
       "all_preflight_hash_and_contract_checks_pass",
+      "passing_nested_fit_checkpoint_and_20_refit_per_family_smoke_receipt",
       "passing_200_trial_per_condition_synthetic_calibration_receipt",
       "calibration_receipt_records_molecular_outcomes_read_false"
     ],

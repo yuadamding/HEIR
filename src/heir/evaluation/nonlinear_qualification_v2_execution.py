@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Optional
 
 import numpy as np
 
@@ -40,6 +40,12 @@ from heir.evaluation.nonlinear_qualification_v2_contract import (
     validate_manifest,
     validate_protocol,
 )
+from heir.evaluation.nonlinear_qualification_v2_smoke import (
+    COMPLETE_REFIT_STEPS as SMOKE_COMPLETE_REFIT_STEPS,
+)
+from heir.evaluation.nonlinear_qualification_v2_smoke import (
+    run_implementation_smoke,
+)
 from heir.evaluation.registration_topology import (
     RECEIPT_SCHEMA as TOPOLOGY_RECEIPT_SCHEMA,
 )
@@ -53,6 +59,8 @@ from heir.evaluation.registration_topology import (
 PREFLIGHT_SCHEMA = "heir.hest_nonlinear_v2_preflight.v1"
 CHECKPOINT_SCHEMA = "heir.hest_nonlinear_v2_calibration_checkpoint.v1"
 CALIBRATION_SCHEMA = "heir.hest_nonlinear_v2_calibration.v1"
+BIOLOGICAL_AUTHORIZATION_SCHEMA = "heir.hest_nonlinear_v2_biological_authorization.v1"
+IMPLEMENTATION_SMOKE_SCHEMA = "heir.hest_nonlinear_v2_implementation_smoke.v1"
 SOURCE_ROWS = 36_121
 EVALUATION_ROWS = 18_062
 FORMAL_Q3_ROWS = 3_991
@@ -118,10 +126,25 @@ def _git_runtime(repository_root: Path) -> Mapping[str, object]:
 def implementation_hashes(repository_root: Path) -> Mapping[str, str]:
     relative = (
         "scripts/benchmark_hest_nonlinear_qualification_v2.py",
+        "src/heir/evaluation/hest_nested_ridge.py",
+        "src/heir/evaluation/hierarchical_metrics.py",
+        "src/heir/evaluation/neural_checkpoint.py",
+        "src/heir/evaluation/neural_control_models.py",
+        "src/heir/evaluation/neural_model_selection.py",
+        "src/heir/evaluation/neural_nulls.py",
+        "src/heir/evaluation/neural_probe.py",
+        "src/heir/evaluation/neural_training.py",
         "src/heir/evaluation/nonlinear_qualification_v2_acceptance.py",
+        "src/heir/evaluation/nonlinear_qualification_v2_data.py",
+        "src/heir/evaluation/nonlinear_qualification_v2_full.py",
+        "src/heir/evaluation/nonlinear_qualification_v2_models.py",
+        "src/heir/evaluation/nonlinear_qualification_v2_smoke.py",
         "src/heir/evaluation/nonlinear_qualification_v2_contract.py",
         "src/heir/evaluation/nonlinear_qualification_v2_execution.py",
         "src/heir/evaluation/registration_sensitivity_v2.py",
+        "src/heir/evaluation/residual_targets.py",
+        "src/heir/evaluation/ridge_probe.py",
+        "src/heir/evaluation/weighted_basis.py",
     )
     result = {}
     for name in relative:
@@ -588,18 +611,284 @@ def calibrate(
     )
 
 
+def implementation_smoke(
+    *,
+    preflight_receipt: Mapping[str, object],
+    checkpoint_dir: Path,
+    device: str,
+) -> Mapping[str, object]:
+    """Run the separate nested-fit and complete-refit smoke without HEST outcomes."""
+
+    if (
+        preflight_receipt.get("schema") != PREFLIGHT_SCHEMA
+        or preflight_receipt.get("preflight_passed") is not True
+        or preflight_receipt.get("molecular_outcomes_read") is not False
+        or preflight_receipt.get("runtime", {}).get("git_worktree_dirty") is not False
+    ):
+        raise ValueError("implementation smoke requires a clean passing preflight")
+    binding = {
+        "protocol_sha256": preflight_receipt["protocol_sha256"],
+        "manifest_sha256": preflight_receipt["manifest_sha256"],
+        "registered_source_sha256": SOURCE_SHA256,
+        "preflight_sha256": canonical_sha256(preflight_receipt),
+        "implementation": preflight_receipt["implementation"],
+        "git_commit": preflight_receipt["runtime"]["git_commit"],
+        "device": device,
+        "permutations_per_family": 20,
+    }
+    result = dict(run_implementation_smoke(checkpoint_dir, device=device))
+    _validate_implementation_smoke_result(result)
+    return {
+        **result,
+        "binding": binding,
+        "binding_sha256": canonical_sha256(binding),
+    }
+
+
+def _validate_implementation_smoke_result(value: Mapping[str, object]) -> None:
+    nulls = value.get("nulls")
+    checkpoint = value.get("checkpoint_receipt")
+    candidate_ids = value.get("candidate_ids")
+    rank_candidates = value.get("rank_candidates")
+    if (
+        value.get("schema") != IMPLEMENTATION_SMOKE_SCHEMA
+        or value.get("smoke_passed") is not True
+        or value.get("checkpoint_replay_identical") is not True
+        or value.get("permutations_per_family") != 20
+        or value.get("complete_refit_steps") != list(SMOKE_COMPLETE_REFIT_STEPS)
+        or value.get("molecular_outcomes_read") is not False
+        or value.get("biological_experiment_run") is not False
+        or value.get("engineering_decision_available") is not False
+        or any(
+            value.get(name) is not False
+            for name in (
+                "authorizes_h_cell",
+                "authorizes_h_intrinsic",
+                "authorizes_h_ref",
+                "authorizes_full_heir",
+            )
+        )
+        or not isinstance(candidate_ids, list)
+        or len(candidate_ids) < 2
+        or any(not isinstance(candidate_id, str) for candidate_id in candidate_ids)
+        or len(set(candidate_ids)) != len(candidate_ids)
+        or value.get("selected_candidate_id") not in candidate_ids
+        or not isinstance(value.get("selected_epoch"), int)
+        or rank_candidates != [2, 4]
+        or not isinstance(checkpoint, Mapping)
+        or checkpoint.get("schema") != "heir.neural_probe_checkpoint_receipt.v1"
+        or any(
+            not isinstance(checkpoint.get(name), str) or len(str(checkpoint[name])) != 64
+            for name in ("state_sha256", "array_registry_sha256", "metadata_sha256")
+        )
+        or not isinstance(nulls, Mapping)
+        or set(nulls)
+        != {
+            "within_section_type_derangement",
+            "different_spatial_block_reassignment",
+        }
+    ):
+        raise ValueError("v2 nested implementation smoke failed closed")
+    for result in nulls.values():
+        empirical_p = result.get("empirical_p") if isinstance(result, Mapping) else None
+        if (
+            not isinstance(result, Mapping)
+            or result.get("permutations") != 20
+            or result.get("model_refit_for_every_permutation") is not True
+            or result.get("completed_steps") != list(SMOKE_COMPLETE_REFIT_STEPS)
+            or not isinstance(result.get("mapping_set_sha256"), str)
+            or len(str(result["mapping_set_sha256"])) != 64
+            or not isinstance(result.get("refit_receipts_sha256"), str)
+            or len(str(result["refit_receipts_sha256"])) != 64
+            or isinstance(empirical_p, bool)
+            or not isinstance(empirical_p, (int, float))
+            or not np.isfinite(empirical_p)
+            or not 0.0 <= float(empirical_p) <= 1.0
+        ):
+            raise ValueError("implementation-smoke null receipt is incomplete")
+
+
+def validate_biological_authorization(
+    value: Mapping[str, object],
+    *,
+    device: Optional[str] = None,
+) -> Mapping[str, object]:
+    """Validate the fail-closed authorization shared by data and full-run APIs."""
+
+    authorized_device = value.get("device")
+    if (
+        value.get("schema") != BIOLOGICAL_AUTHORIZATION_SCHEMA
+        or value.get("registered_source_sha256") != SOURCE_SHA256
+        or value.get("protocol_sha256") != V2_PROTOCOL_SHA256
+        or value.get("biological_execution_authorized") is not True
+        or value.get("molecular_outcomes_read") is not False
+        or authorized_device not in {"cpu", "cuda", "cuda:0"}
+        or (device is not None and authorized_device != device)
+        or not isinstance(value.get("implementation"), Mapping)
+        or not isinstance(value.get("git_commit"), str)
+        or any(
+            value.get(name) is not False
+            for name in (
+                "authorizes_h_cell",
+                "authorizes_h_intrinsic",
+                "authorizes_h_ref",
+                "authorizes_full_heir",
+            )
+        )
+    ):
+        raise ValueError("HEST biological source requires a valid production authorization")
+    return value
+
+
+def authorize_biological_execution(
+    *,
+    source: Path,
+    preflight_receipt: Mapping[str, object],
+    implementation_smoke_receipt: Mapping[str, object],
+    calibration_receipt: Mapping[str, object],
+    device: Optional[str] = None,
+) -> Mapping[str, object]:
+    """Verify a production calibration and authorize exactly the bound full runner."""
+
+    if (
+        preflight_receipt.get("schema") != PREFLIGHT_SCHEMA
+        or preflight_receipt.get("preflight_passed") is not True
+        or preflight_receipt.get("molecular_outcomes_read") is not False
+        or preflight_receipt.get("runtime", {}).get("git_worktree_dirty") is not False
+    ):
+        raise ValueError("biological execution requires a clean passing preflight")
+    topology, topology_receipt = load_calibration_topology(source)
+    del topology
+    base_binding = {
+        "protocol_sha256": preflight_receipt["protocol_sha256"],
+        "manifest_sha256": preflight_receipt["manifest_sha256"],
+        "registered_source_sha256": SOURCE_SHA256,
+        "registration_topology_sha256": TOPOLOGY_RECEIPT_SHA256,
+        "preflight_sha256": canonical_sha256(preflight_receipt),
+        "implementation": preflight_receipt["implementation"],
+        "git_commit": preflight_receipt["runtime"]["git_commit"],
+        "topology_access": topology_receipt,
+    }
+    smoke_binding = implementation_smoke_receipt.get("binding")
+    if not isinstance(smoke_binding, Mapping):
+        raise ValueError("biological execution implementation-smoke binding is malformed")
+    smoke_device = smoke_binding.get("device")
+    if smoke_device not in {"cpu", "cuda", "cuda:0"} or (
+        device is not None and smoke_device != device
+    ):
+        raise ValueError("full execution device differs from the implementation smoke")
+    expected_smoke_binding = {
+        "protocol_sha256": preflight_receipt["protocol_sha256"],
+        "manifest_sha256": preflight_receipt["manifest_sha256"],
+        "registered_source_sha256": SOURCE_SHA256,
+        "preflight_sha256": canonical_sha256(preflight_receipt),
+        "implementation": preflight_receipt["implementation"],
+        "git_commit": preflight_receipt["runtime"]["git_commit"],
+        "device": smoke_device,
+        "permutations_per_family": 20,
+    }
+    if (
+        implementation_smoke_receipt.get("schema") != IMPLEMENTATION_SMOKE_SCHEMA
+        or implementation_smoke_receipt.get("binding") != expected_smoke_binding
+        or implementation_smoke_receipt.get("binding_sha256")
+        != canonical_sha256(expected_smoke_binding)
+        or implementation_smoke_receipt.get("smoke_passed") is not True
+        or implementation_smoke_receipt.get("checkpoint_replay_identical") is not True
+        or implementation_smoke_receipt.get("permutations_per_family") != 20
+        or implementation_smoke_receipt.get("molecular_outcomes_read") is not False
+        or implementation_smoke_receipt.get("biological_experiment_run") is not False
+    ):
+        raise ValueError("biological execution implementation-smoke receipt is invalid")
+    _validate_implementation_smoke_result(implementation_smoke_receipt)
+    expected_binding = {
+        **base_binding,
+        "trials_per_condition": PRODUCTION_TRIALS,
+        "smoke": False,
+        "registration_bootstrap_resamples": 20_000,
+    }
+    binding_sha256 = canonical_sha256(expected_binding)
+    if (
+        calibration_receipt.get("schema") != CALIBRATION_SCHEMA
+        or calibration_receipt.get("binding") != expected_binding
+        or calibration_receipt.get("binding_sha256") != binding_sha256
+        or calibration_receipt.get("production_calibration") is not True
+        or calibration_receipt.get("trials_per_condition") != PRODUCTION_TRIALS
+        or calibration_receipt.get("completed_trials")
+        != PRODUCTION_TRIALS * len(CALIBRATION_EXPECTATIONS)
+        or calibration_receipt.get("calibration_passed") is not True
+        or calibration_receipt.get("HEST_molecular_execution_authorized") is not True
+        or calibration_receipt.get("molecular_outcomes_read") is not False
+        or calibration_receipt.get("biological_experiment_run") is not False
+    ):
+        raise ValueError("biological execution calibration receipt is not production-valid")
+    checkpoint_path = Path(str(calibration_receipt.get("checkpoint_path", ""))).resolve()
+    checkpoint = _load_checkpoint(checkpoint_path, binding_sha256)
+    if checkpoint.get("sha256") != calibration_receipt.get("checkpoint_sha256"):
+        raise ValueError("calibration receipt is bound to a different checkpoint")
+    records = checkpoint.get("records")
+    if not isinstance(records, Mapping):
+        raise ValueError("production calibration checkpoint records are malformed")
+    pass_counts: dict[str, dict[str, int]] = {}
+    for condition in CALIBRATION_EXPECTATIONS:
+        local = records.get(condition)
+        if not isinstance(local, list) or len(local) != PRODUCTION_TRIALS:
+            raise ValueError("production calibration checkpoint is incomplete")
+        if any(not isinstance(record, Mapping) for record in local):
+            raise ValueError("production calibration trial record is malformed")
+        if [record.get("trial_index") for record in local] != list(range(PRODUCTION_TRIALS)):
+            raise ValueError("production calibration trial sequence is not contiguous")
+        if any(type(record.get(name)) is not bool for record in local for name in ("D1", "D2")):
+            raise ValueError("production calibration decisions are not booleans")
+        pass_counts[condition] = {
+            name: sum(record[name] for record in local) for name in ("D1", "D2")
+        }
+    expected_calibration = evaluate_synthetic_calibration(
+        pass_counts,
+        trials_per_condition=PRODUCTION_TRIALS,
+    )
+    if (
+        calibration_receipt.get("pass_counts") != pass_counts
+        or calibration_receipt.get("calibration") != expected_calibration
+    ):
+        raise ValueError("production calibration summary differs from its checkpoint")
+    return {
+        "schema": BIOLOGICAL_AUTHORIZATION_SCHEMA,
+        "analysis_status": ANALYSIS_STATUS,
+        "registered_source_sha256": SOURCE_SHA256,
+        "protocol_sha256": V2_PROTOCOL_SHA256,
+        "preflight_sha256": canonical_sha256(preflight_receipt),
+        "calibration_receipt_sha256": canonical_sha256(calibration_receipt),
+        "implementation_smoke_receipt_sha256": canonical_sha256(implementation_smoke_receipt),
+        "calibration_checkpoint_sha256": checkpoint["sha256"],
+        "implementation": preflight_receipt["implementation"],
+        "git_commit": preflight_receipt["runtime"]["git_commit"],
+        "device": smoke_device,
+        "biological_execution_authorized": True,
+        "molecular_outcomes_read": False,
+        "authorizes_h_cell": False,
+        "authorizes_h_intrinsic": False,
+        "authorizes_h_ref": False,
+        "authorizes_full_heir": False,
+    }
+
+
 __all__ = [
+    "BIOLOGICAL_AUTHORIZATION_SCHEMA",
     "CALIBRATION_SCHEMA",
     "CALIBRATION_SOURCE_MEMBER_ALLOWLIST",
     "CHECKPOINT_SCHEMA",
     "EVALUATION_ROWS",
     "FORMAL_Q3_ROWS",
+    "IMPLEMENTATION_SMOKE_SCHEMA",
     "PREFLIGHT_SCHEMA",
     "PRODUCTION_TRIALS",
     "atomic_json",
+    "authorize_biological_execution",
     "calibrate",
     "implementation_hashes",
+    "implementation_smoke",
     "load_calibration_topology",
     "preflight",
     "run_calibration_trials",
+    "validate_biological_authorization",
 ]

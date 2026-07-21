@@ -3,6 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from heir.evaluation import nonlinear_qualification_v2_acceptance as acceptance
+from heir.evaluation.hierarchical_metrics import (
+    donor_section_type_macro_r2,
+    macro_error_reduction,
+    macro_r2,
+)
+from heir.evaluation.nonlinear_qualification_contract import canonical_sha256
 from heir.evaluation.nonlinear_qualification_v2_acceptance import (
     NULL_FAMILIES,
     ArmPrediction,
@@ -12,6 +19,52 @@ from heir.evaluation.nonlinear_qualification_v2_acceptance import (
     synthetic_trial_inputs,
 )
 from heir.evaluation.nonlinear_qualification_v2_contract import CALIBRATION_EXPECTATIONS
+
+
+def test_indexed_scoring_is_exactly_equal_to_shared_hierarchical_metrics() -> None:
+    rng = np.random.default_rng(71)
+    donors = np.repeat(["D1", "D2"], 80)
+    sections = np.tile(np.repeat(["S1", "S2"], 40), 2)
+    labels = np.tile(np.repeat([0, 1], 20), 4)
+    truth = rng.normal(size=(len(donors), 3))
+    prediction = truth + rng.normal(scale=0.4, size=truth.shape)
+    baseline = np.zeros_like(truth)
+    donor_type = acceptance._group_indices(donors, labels)
+    donor_section_type = acceptance._group_indices(donors, sections, labels)
+
+    pairs = (
+        (
+            acceptance._donor_type_summary(truth, prediction, donor_type, 20),
+            macro_r2(truth, prediction, donors, labels, 20),
+        ),
+        (
+            acceptance._donor_type_summary(
+                truth,
+                prediction,
+                donor_type,
+                20,
+                baseline=baseline,
+            ),
+            macro_error_reduction(truth, prediction, baseline, donors, labels, 20),
+        ),
+        (
+            acceptance._donor_section_type_r2(
+                truth,
+                prediction,
+                donor_section_type,
+                20,
+            ),
+            donor_section_type_macro_r2(
+                truth,
+                prediction,
+                donors,
+                sections,
+                labels,
+                20,
+            ),
+        ),
+    )
+    assert all(canonical_sha256(indexed) == canonical_sha256(shared) for indexed, shared in pairs)
 
 
 def _topology() -> tuple[np.ndarray, ...]:
