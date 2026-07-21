@@ -209,6 +209,7 @@
     "all_members_of_primary_direct_family_must_pass": true
   },
   "refitted_null_details": {
+    "registered_statistic": "A_star_minus_N0_donor_type_macro_residual_coordinate_R2",
     "stratification": ["donor", "section", "fine_type", "pool_role"],
     "within_section_type_image_derangement": "permute_image_row_assignment_within_each_stratum",
     "multiview_mapping": "one_synchronous_row_mapping_for_all_image_branches",

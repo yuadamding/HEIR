@@ -68,17 +68,20 @@ def within_section_type_derangement(
     donor_ids: np.ndarray,
     section_ids: np.ndarray,
     type_ids: np.ndarray,
+    pool_roles: np.ndarray,
     observation_ids: np.ndarray,
     *,
     seed: int,
 ) -> tuple[np.ndarray, Mapping[str, object]]:
-    donors, sections, types = _aligned_vectors(donor_ids, section_ids, type_ids)
+    donors, sections, types, roles = _aligned_vectors(
+        donor_ids, section_ids, type_ids, pool_roles
+    )
     identities = np.asarray(observation_ids).astype(str)
     if identities.shape != donors.shape or len(set(identities.tolist())) != len(identities):
         raise ValueError("null observation IDs must be unique and row aligned")
     rng = np.random.default_rng(seed)
     mapping = np.arange(len(donors), dtype=np.int64)
-    groups = _groups(identities, donors, sections, types)
+    groups = _groups(identities, donors, sections, types, roles)
     active_rows = 0
     active_groups = 0
     for group in groups:
@@ -92,11 +95,13 @@ def within_section_type_derangement(
         np.array_equal(donors, donors[mapping])
         and np.array_equal(sections, sections[mapping])
         and np.array_equal(types, types[mapping])
+        and np.array_equal(roles, roles[mapping])
     ):
-        raise RuntimeError("within-section/type derangement crossed a frozen stratum")
+        raise RuntimeError("within-section/type/pool-role derangement crossed a frozen stratum")
     changed = mapping != np.arange(len(mapping))
     return mapping, {
         "kind": "within_section_type_derangement",
+        "stratification": ["donor", "section", "fine_type", "pool_role"],
         "seed": int(seed),
         "mapping_sha256": mapping_sha256(mapping, identities),
         "groups": len(groups),
@@ -111,18 +116,21 @@ def different_spatial_block_reassignment(
     donor_ids: np.ndarray,
     section_ids: np.ndarray,
     type_ids: np.ndarray,
+    pool_roles: np.ndarray,
     block_ids: np.ndarray,
     observation_ids: np.ndarray,
     *,
     seed: int,
 ) -> tuple[np.ndarray, Mapping[str, object]]:
-    donors, sections, types, blocks = _aligned_vectors(donor_ids, section_ids, type_ids, block_ids)
+    donors, sections, types, roles, blocks = _aligned_vectors(
+        donor_ids, section_ids, type_ids, pool_roles, block_ids
+    )
     identities = np.asarray(observation_ids).astype(str)
     if identities.shape != donors.shape or len(set(identities.tolist())) != len(identities):
         raise ValueError("null observation IDs must be unique and row aligned")
     rng = np.random.default_rng(seed)
     mapping = np.arange(len(donors), dtype=np.int64)
-    groups = _groups(identities, donors, sections, types)
+    groups = _groups(identities, donors, sections, types, roles)
     feasible = 0
     infeasible = 0
     eligible_rows = 0
@@ -153,13 +161,15 @@ def different_spatial_block_reassignment(
         np.array_equal(donors, donors[mapping])
         and np.array_equal(sections, sections[mapping])
         and np.array_equal(types, types[mapping])
+        and np.array_equal(roles, roles[mapping])
     ):
-        raise RuntimeError("different-block reassignment crossed a frozen stratum")
+        raise RuntimeError("different-block reassignment crossed a frozen pool-role stratum")
     changed = mapping != np.arange(len(mapping))
     if np.any(changed & (blocks == blocks[mapping])):
         raise RuntimeError("active different-block reassignment retained a spatial block")
     return mapping, {
         "kind": "different_spatial_block_reassignment",
+        "stratification": ["donor", "section", "fine_type", "pool_role"],
         "seed": int(seed),
         "mapping_sha256": mapping_sha256(mapping, identities),
         "groups": len(groups),
@@ -177,6 +187,7 @@ def build_neural_null_design(
     donor_ids: np.ndarray,
     section_ids: np.ndarray,
     type_ids: np.ndarray,
+    pool_roles: np.ndarray,
     block_ids: np.ndarray,
     observation_ids: np.ndarray,
     *,
@@ -190,13 +201,19 @@ def build_neural_null_design(
         local_seed = int(seed + index * 104729)
         if kind == "within_section_type_derangement":
             mapping, receipt = within_section_type_derangement(
-                donor_ids, section_ids, type_ids, observation_ids, seed=local_seed
+                donor_ids,
+                section_ids,
+                type_ids,
+                pool_roles,
+                observation_ids,
+                seed=local_seed,
             )
         else:
             mapping, receipt = different_spatial_block_reassignment(
                 donor_ids,
                 section_ids,
                 type_ids,
+                pool_roles,
                 block_ids,
                 observation_ids,
                 seed=local_seed,

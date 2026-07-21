@@ -21,7 +21,7 @@ PROTOCOL_SCHEMA = "heir.hest_nonlinear_qualification_protocol.v2"
 MANIFEST_SCHEMA = "heir.hest_nonlinear_qualification_manifest.v2"
 REPORT_SCHEMA = "heir.hest_nonlinear_qualification_report.v2"
 BASE_PROTOCOL_SHA256 = "656419fcb75919fb938ba5a351014b7b72ba54b077da4c557103796f269d044f"
-V2_PROTOCOL_SHA256 = "468c90554042c061208d1f295ff310874195e24ca76404ebd2fa3186af71d5fa"
+V2_PROTOCOL_SHA256 = "1ea5342d09a702d43daf5b3bffa94d8b069ec11c8af30e266eb632b5765c1fd8"
 SOURCE_SHA256 = "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636"
 BLANK_SUPPLEMENT_SHA256 = "a7495d795c6a73e9a8bfc172448d0d161a99402b0bc63cd1ae6966e1c3968219"
 BLANK_RECEIPT_SHA256 = "41917b39c0e50f27e252d76a4507e0a7599591e00c09b25074f49b9413bbd962"
@@ -376,7 +376,9 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
         raise ValueError("v2 multiplicity families changed")
     nulls = _mapping(value.get("refitted_null_details"), "refitted null details")
     if (
-        nulls.get("stratification") != ["donor", "section", "fine_type", "pool_role"]
+        nulls.get("registered_statistic")
+        != "A_star_minus_N0_donor_type_macro_residual_coordinate_R2"
+        or nulls.get("stratification") != ["donor", "section", "fine_type", "pool_role"]
         or nulls.get("multiview_mapping") != "one_synchronous_row_mapping_for_all_image_branches"
         or nulls.get("smoke_permutations_per_family") != 20
         or nulls.get("final_permutations_per_family") != 100

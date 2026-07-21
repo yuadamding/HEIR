@@ -15,7 +15,7 @@
   "authorizes_full_heir": false,
   "protocol_binding": {
     "path": "configs/hest_nonlinear_qualification_v2.json",
-    "sha256": "468c90554042c061208d1f295ff310874195e24ca76404ebd2fa3186af71d5fa",
+    "sha256": "1ea5342d09a702d43daf5b3bffa94d8b069ec11c8af30e266eb632b5765c1fd8",
     "frozen_before_molecular_execution": true,
     "intermediate_results_may_modify_protocol": false
   },

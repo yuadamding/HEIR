@@ -73,7 +73,9 @@ remain separately descriptive. Models are never retrained on a registration subs
 An exact donor sign-flip max statistic controls the direct family `A* - B2`, `A* - N0`, and
 `A* - C_blank`. A separate family controls N1, N3, and N4 versus N5. The complete-refit image
 derangement and different-spatial-block nulls each use 20 permutations for smoke and 100 for the
-final run, with one synchronous image mapping across multiview branches.
+final run, with one synchronous image mapping across multiview branches. Both nulls preserve
+donor, section, fine type, and pool role, and test the registered `A* - N0` donor/type macro
+residual-coordinate R2 statistic.
 
 D1 supports design of a prospective local-context estimator only when every frozen absolute,
 incremental, variance, coverage, rare-state, null, multiplicity, and registration criterion

@@ -18,30 +18,36 @@ def _identities() -> tuple[np.ndarray, ...]:
     donors = np.repeat("D", 8)
     sections = np.repeat("S", 8)
     types = np.repeat("T", 8)
+    roles = np.tile(["reference", "evaluation"], 4)
     blocks = np.repeat(["a", "b"], 4)
-    return ids, donors, sections, types, blocks
+    return ids, donors, sections, types, roles, blocks
 
 
 def test_nulls_preserve_strata_cross_blocks_and_hash_by_observation_id() -> None:
-    ids, donors, sections, types, blocks = _identities()
-    local, local_receipt = within_section_type_derangement(donors, sections, types, ids, seed=17)
+    ids, donors, sections, types, roles, blocks = _identities()
+    local, local_receipt = within_section_type_derangement(
+        donors, sections, types, roles, ids, seed=17
+    )
     block, block_receipt = different_spatial_block_reassignment(
-        donors, sections, types, blocks, ids, seed=17
+        donors, sections, types, roles, blocks, ids, seed=17
     )
     assert np.all(local != np.arange(len(local)))
     assert np.all(blocks != blocks[block])
     assert np.array_equal(donors, donors[block])
+    assert np.array_equal(roles, roles[local])
+    assert np.array_equal(roles, roles[block])
+    assert local_receipt["stratification"] == ["donor", "section", "fine_type", "pool_role"]
 
     order = np.asarray([7, 2, 5, 0, 3, 6, 1, 4])
     _, reordered_receipt = within_section_type_derangement(
-        donors[order], sections[order], types[order], ids[order], seed=17
+        donors[order], sections[order], types[order], roles[order], ids[order], seed=17
     )
     assert reordered_receipt["mapping_sha256"] == local_receipt["mapping_sha256"]
     assert block_receipt["cross_block_fraction"] == pytest.approx(1.0)
 
 
 def test_joint_views_move_together_and_every_null_is_refitted() -> None:
-    ids, donors, sections, types, blocks = _identities()
+    ids, donors, sections, types, roles, blocks = _identities()
     images = np.arange(8 * 3 * 2).reshape(8, 3, 2)
     design = build_neural_null_design(
         "within_section_type_derangement",
@@ -49,6 +55,7 @@ def test_joint_views_move_together_and_every_null_is_refitted() -> None:
         donors,
         sections,
         types,
+        roles,
         blocks,
         ids,
         seed=9,
@@ -73,7 +80,7 @@ def test_joint_views_move_together_and_every_null_is_refitted() -> None:
 
 
 def test_null_callback_must_attest_the_complete_refit() -> None:
-    ids, donors, sections, types, blocks = _identities()
+    ids, donors, sections, types, roles, blocks = _identities()
     images = np.arange(8 * 2).reshape(8, 2)
     design = build_neural_null_design(
         "within_section_type_derangement",
@@ -81,6 +88,7 @@ def test_null_callback_must_attest_the_complete_refit() -> None:
         donors,
         sections,
         types,
+        roles,
         blocks,
         ids,
         seed=5,

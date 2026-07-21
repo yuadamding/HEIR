@@ -418,6 +418,7 @@ def _synthetic_smoke(checkpoint_dir: Path, *, device: str) -> Mapping[str, objec
         raise RuntimeError("synthetic checkpoint replay changed predictions")
 
     null_results = {}
+    pool_roles = np.full(len(donors), "evaluation", dtype="<U10")
     for null_index, kind in enumerate(
         ("within_section_type_derangement", "different_spatial_block_reassignment")
     ):
@@ -427,6 +428,7 @@ def _synthetic_smoke(checkpoint_dir: Path, *, device: str) -> Mapping[str, objec
             donors,
             sections,
             labels,
+            pool_roles,
             blocks,
             identities,
             seed=20260720 + null_index * 1_000_003,
