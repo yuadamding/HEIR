@@ -73,12 +73,21 @@ class TopologyArrays:
 class DirectNpzReader:
     """Open only explicitly allowlisted NPY payloads from one NPZ archive."""
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        allowed_members: Sequence[str] = SOURCE_MEMBER_ALLOWLIST,
+    ):
+        allowed = tuple(str(value) for value in allowed_members)
+        if not allowed or len(set(allowed)) != len(allowed) or any(not value for value in allowed):
+            raise ValueError("source-member allowlist must contain unique nonempty names")
         self.path = path.expanduser().resolve()
+        self.allowed_members = allowed
         self.members_opened: list[str] = []
 
     def read(self, name: str) -> np.ndarray:
-        if name not in SOURCE_MEMBER_ALLOWLIST:
+        if name not in self.allowed_members:
             raise ValueError(f"source member {name!r} is outside the topology allowlist")
         member = f"{name}.npy"
         try:

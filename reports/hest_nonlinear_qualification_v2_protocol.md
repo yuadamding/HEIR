@@ -91,6 +91,11 @@ smoke covers nested fitting, checkpoint replay, and complete refits. Exact one-s
 Clopper-Pearson bounds use Bonferroni control across all 20 D1/D2 expectations. False-positive
 upper bounds must be below 0.05 and true-positive lower bounds above 0.80.
 
+The calibration generator creates synthetic coordinate truth and held-out predictions directly;
+it does not claim to rerun neural selection 2,000 times. Its exact arm error scales, aliases, and
+failure constructions are frozen in the protocol and consumed by the implementation. Calibration
+also reads and hashes ordered block IDs; no molecular or image payload is opened.
+
 Calibration failure blocks HEST molecular execution. A revision is allowed only while no HEST
 molecular member has been opened under v2. After a passing calibration receipt, a clean committed
 runner may open the target once, run all observed arms, registration sensitivity, and both final

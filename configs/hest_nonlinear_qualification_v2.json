@@ -270,21 +270,71 @@
     "molecular_targets": "synthetic_only_no_registered_HEST_molecular_member_opened",
     "trials_per_condition": 200,
     "generator": {
+      "mode": "synthetic_truth_and_heldout_prediction_decision_calibration",
       "row_topology": "all_real_registered_evaluation_rows_with_real_donor_section_type_block_and_registration_labels",
       "registered_molecular_or_image_features_read": false,
       "coordinate_rank": 4,
-      "nuisance_width": 158,
-      "image_view_width": 1536,
+      "molecular_width": 8,
       "random_generator": "numpy_PCG64_standard_normal",
       "trial_seed_rule": "2026072100_plus_10000_times_condition_index_plus_trial_index",
-      "latent_width": 8,
-      "signal_amplitude": 2.0,
-      "coordinate_noise_standard_deviation": 0.5,
-      "nonlinear_signal": "x0_times_x1_plus_0.5_times_x2_squared_minus_one_plus_sin_x3",
-      "linear_signal": "fixed_outcome_independent_orthonormal_projection_of_image_latent",
-      "donor_shortcut": "target_and_features_share_training_donor_code_with_independent_heldout_donor_code",
-      "variance_collapse": "candidate_predictions_scaled_to_0.1_of_target_standard_deviation",
-      "poor_registration_signal_mask": "registration_failed_rows_only",
+      "coordinate_truth": "independent_standard_normal_per_row_and_coordinate",
+      "reference_prediction": "deterministic_donor_type_offset_across_eight_synthetic_genes",
+      "molecular_reconstruction": "fixed_outcome_independent_orthonormal_8_by_4_basis",
+      "prediction_error": "row_normalized_Gaussian_direction_times_arm_error_scale",
+      "rare_state_thresholds": "fixed_standard_normal_deciles",
+      "synthetic_refitted_null_empirical_p": 0.009900990099009901,
+      "condition_parameters": {
+        "global_null": {
+          "arm_error_scales": {},
+          "prediction_aliases": {},
+          "special_construction": "none"
+        },
+        "nuisance_only": {
+          "arm_error_scales": {"N0": 0.4, "A_star": 0.4, "C_blank": 0.4},
+          "prediction_aliases": {"A_star": "N0", "C_blank": "N0"},
+          "special_construction": "none"
+        },
+        "linear_image": {
+          "arm_error_scales": {"B2": 0.35, "N1": 0.45, "A_star": 0.45},
+          "prediction_aliases": {},
+          "special_construction": "none"
+        },
+        "nonlinear_image": {
+          "arm_error_scales": {"B2": 0.8, "N1": 0.45, "A_star": 0.35},
+          "prediction_aliases": {},
+          "special_construction": "none"
+        },
+        "context_only": {
+          "arm_error_scales": {"N1": 0.35, "N3": 0.85, "N4": 0.85, "N5": 0.36, "A_star": 0.35},
+          "prediction_aliases": {},
+          "special_construction": "none"
+        },
+        "nucleus_only": {
+          "arm_error_scales": {"N1": 0.7, "N3": 0.35, "N4": 0.9, "N5": 0.9, "A_star": 0.35},
+          "prediction_aliases": {"A_star": "N3"},
+          "special_construction": "none"
+        },
+        "cell_only": {
+          "arm_error_scales": {"N1": 0.7, "N3": 0.9, "N4": 0.35, "N5": 0.9, "A_star": 0.35},
+          "prediction_aliases": {"A_star": "N4"},
+          "special_construction": "none"
+        },
+        "donor_shortcut": {
+          "arm_error_scales": {},
+          "prediction_aliases": {},
+          "special_construction": "donor_constant_predictions_for_A_star_N1_N3_N4"
+        },
+        "variance_collapse": {
+          "arm_error_scales": {"B2": 1.05, "N0": 1.05},
+          "prediction_aliases": {},
+          "special_construction": "A_star_and_N1_predictions_equal_0.1_times_truth"
+        },
+        "signal_confined_to_poor_registration": {
+          "arm_error_scales": {"B2": 0.9, "N0": 0.9, "N1": 0.9},
+          "prediction_aliases": {},
+          "special_construction": "A_star_and_N1_error_scale_1.15_on_Q3_and_zero_outside_Q3"
+        }
+      },
       "same_scoring_multiplicity_registration_and_decision_code_as_biological_run": true,
       "nested_training_and_refit_path_checked_by_separate_implementation_smoke": true
     },

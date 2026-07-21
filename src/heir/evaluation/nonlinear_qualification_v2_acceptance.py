@@ -16,7 +16,13 @@ from heir.evaluation.hierarchical_metrics import (
 )
 from heir.evaluation.nonlinear_qualification_v2_contract import (
     ANALYSIS_STATUS,
+    CALIBRATION_CONDITION_PARAMETERS,
+    CALIBRATION_COORDINATE_RANK,
     CALIBRATION_EXPECTATIONS,
+    CALIBRATION_MOLECULAR_WIDTH,
+    CALIBRATION_NULL_P,
+    CALIBRATION_RARE_DECILE,
+    CALIBRATION_SEED_BASE,
     evaluate_decisions,
     exact_sign_flip_max_test,
 )
@@ -503,9 +509,9 @@ def synthetic_trial_inputs(
     if np.any(best & ~quality):
         raise ValueError("synthetic best-registration rows must be nested in Q3")
     condition_index = tuple(CALIBRATION_EXPECTATIONS).index(condition)
-    seed = 2_026_072_100 + 10_000 * condition_index + trial_index
+    seed = CALIBRATION_SEED_BASE + 10_000 * condition_index + trial_index
     rng = np.random.default_rng(seed)
-    rank = 4
+    rank = CALIBRATION_COORDINATE_RANK
     truth = rng.normal(size=(rows, rank))
     ranks = np.full(rows, rank, dtype=np.int64)
     donor_names = sorted(set(donors.tolist()))
@@ -520,13 +526,13 @@ def synthetic_trial_inputs(
                 ]
             )
             * (gene + 1)
-            for gene in range(8)
+            for gene in range(CALIBRATION_MOLECULAR_WIDTH)
         ]
     )
     basis_rng = np.random.default_rng(2_026_072_101)
-    basis, _ = np.linalg.qr(basis_rng.normal(size=(8, rank)))
+    basis, _ = np.linalg.qr(basis_rng.normal(size=(CALIBRATION_MOLECULAR_WIDTH, rank)))
     molecular_truth = reference + truth @ basis.T
-    lower = np.full_like(truth, -1.2815515655446004)
+    lower = np.full_like(truth, -CALIBRATION_RARE_DECILE)
     upper = -lower
 
     scales = {
@@ -540,38 +546,33 @@ def synthetic_trial_inputs(
         "C_blank": 1.0,
         "C_blank_single": 1.0,
     }
-    aliases: dict[str, str] = {}
-    if condition == "nuisance_only":
-        scales.update(N0=0.40, A_star=0.40, C_blank=0.40)
-        aliases.update(A_star="N0", C_blank="N0")
-    elif condition == "linear_image":
-        scales.update(B2=0.35, A_star=0.45, N1=0.45)
-    elif condition == "nonlinear_image":
-        scales.update(A_star=0.35, N1=0.45, B2=0.80)
-    elif condition == "context_only":
-        scales.update(A_star=0.35, N1=0.35, N5=0.36, N3=0.85, N4=0.85)
-    elif condition == "nucleus_only":
-        scales.update(A_star=0.35, N3=0.35, N1=0.70, N5=0.90, N4=0.90)
-        aliases["A_star"] = "N3"
-    elif condition == "cell_only":
-        scales.update(A_star=0.35, N4=0.35, N1=0.70, N5=0.90, N3=0.90)
-        aliases["A_star"] = "N4"
-    elif condition == "variance_collapse":
-        scales.update(B2=1.05, N0=1.05, N1=0.0, N3=1.0, N4=1.0, N5=1.0, A_star=0.0)
-    elif condition == "signal_confined_to_poor_registration":
-        scales.update(B2=0.90, N0=0.90, N1=0.90, A_star=0.0)
+    parameters = CALIBRATION_CONDITION_PARAMETERS[condition]
+    scales.update(parameters["arm_error_scales"])
+    aliases = dict(parameters["prediction_aliases"])
+    special = parameters["special_construction"]
 
     predictions: dict[str, np.ndarray] = {}
     for arm, scale in scales.items():
         if arm in aliases:
             continue
-        if condition == "variance_collapse" and arm in {"A_star", "N1"}:
+        if special == "A_star_and_N1_predictions_equal_0.1_times_truth" and arm in {
+            "A_star",
+            "N1",
+        }:
             predictions[arm] = 0.1 * truth
-        elif condition == "signal_confined_to_poor_registration" and arm in {"A_star", "N1"}:
+        elif special == ("A_star_and_N1_error_scale_1.15_on_Q3_and_zero_outside_Q3") and arm in {
+            "A_star",
+            "N1",
+        }:
             values = _noise_prediction(truth, rng, 1.15)
             values[~quality] = truth[~quality]
             predictions[arm] = values
-        elif condition == "donor_shortcut" and arm in {"A_star", "N1", "N3", "N4"}:
+        elif special == "donor_constant_predictions_for_A_star_N1_N3_N4" and arm in {
+            "A_star",
+            "N1",
+            "N3",
+            "N4",
+        }:
             code = rng.normal(size=(len(donor_names), rank))
             predictions[arm] = np.asarray([code[donor_index[value]] for value in donors])
         else:
@@ -605,7 +606,6 @@ def synthetic_trial_inputs(
         )
         for comparison, (focal, comparator) in registration_pairs.items()
     }
-    empirical = 1.0 / 101.0
     return QualificationInputs(
         donor_ids=donors,
         section_ids=sections,
@@ -618,7 +618,7 @@ def synthetic_trial_inputs(
         all_rows_mask=np.ones(rows, dtype=bool),
         best_mask=best,
         included_donor_ids=tuple(included_donor_ids),
-        refitted_null_empirical_p={name: empirical for name in NULL_FAMILIES},
+        refitted_null_empirical_p={name: CALIBRATION_NULL_P for name in NULL_FAMILIES},
     )
 
 

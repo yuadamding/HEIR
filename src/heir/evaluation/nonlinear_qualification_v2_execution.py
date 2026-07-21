@@ -17,6 +17,7 @@ from heir.evaluation.blank_patch_receipt import (
 )
 from heir.evaluation.blank_patch_receipt import (
     SourceIdentity,
+    array_sha256,
     inspect_registered_source,
     load_supplement,
 )
@@ -57,6 +58,7 @@ EVALUATION_ROWS = 18_062
 FORMAL_Q3_ROWS = 3_991
 PRODUCTION_TRIALS = 200
 MOLECULAR_MEMBER = "nucleus_molecular_targets"
+CALIBRATION_SOURCE_MEMBER_ALLOWLIST = SOURCE_MEMBER_ALLOWLIST + ("block_ids",)
 
 
 def _json(path: Path) -> dict[str, object]:
@@ -304,9 +306,16 @@ def preflight(
 def load_calibration_topology(source: Path) -> tuple[TopologyArrays, Mapping[str, object]]:
     """Read exactly the seven outcome-blind members allowed during calibration."""
 
-    reader = DirectNpzReader(source)
+    reader = DirectNpzReader(source, allowed_members=CALIBRATION_SOURCE_MEMBER_ALLOWLIST)
     arrays = load_topology_arrays(reader, expected_rows=SOURCE_ROWS)
-    if reader.members_opened != list(SOURCE_MEMBER_ALLOWLIST):
+    block_ids = np.asarray(reader.read("block_ids"))
+    if (
+        block_ids.shape != (SOURCE_ROWS,)
+        or block_ids.dtype.kind not in {"S", "U"}
+        or np.any(np.char.str_len(block_ids.astype(str)) == 0)
+    ):
+        raise ValueError("calibration block IDs must be a complete row-aligned string vector")
+    if reader.members_opened != list(CALIBRATION_SOURCE_MEMBER_ALLOWLIST):
         raise RuntimeError("calibration source reader escaped its exact allowlist")
     evaluation = np.char.startswith(arrays.pool_roles, "evaluation")
     if int(evaluation.sum()) != EVALUATION_ROWS:
@@ -330,6 +339,7 @@ def load_calibration_topology(source: Path) -> tuple[TopologyArrays, Mapping[str
     )
     return local, {
         "source_members_opened": list(reader.members_opened),
+        "ordered_block_ids_sha256": array_sha256(block_ids.astype(str)),
         "evaluation_rows": EVALUATION_ROWS,
         "formal_Q3_rows": FORMAL_Q3_ROWS,
         "molecular_outcomes_read": False,
@@ -580,6 +590,7 @@ def calibrate(
 
 __all__ = [
     "CALIBRATION_SCHEMA",
+    "CALIBRATION_SOURCE_MEMBER_ALLOWLIST",
     "CHECKPOINT_SCHEMA",
     "EVALUATION_ROWS",
     "FORMAL_Q3_ROWS",

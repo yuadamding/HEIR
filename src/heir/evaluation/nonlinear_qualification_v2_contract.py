@@ -21,7 +21,7 @@ PROTOCOL_SCHEMA = "heir.hest_nonlinear_qualification_protocol.v2"
 MANIFEST_SCHEMA = "heir.hest_nonlinear_qualification_manifest.v2"
 REPORT_SCHEMA = "heir.hest_nonlinear_qualification_report.v2"
 BASE_PROTOCOL_SHA256 = "656419fcb75919fb938ba5a351014b7b72ba54b077da4c557103796f269d044f"
-V2_PROTOCOL_SHA256 = "6e27f6bd1ea6a36d52ad23e8a34d603e917fa5c4e92123cb8f77fa1d64d9cb50"
+V2_PROTOCOL_SHA256 = "468c90554042c061208d1f295ff310874195e24ca76404ebd2fa3186af71d5fa"
 SOURCE_SHA256 = "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636"
 BLANK_SUPPLEMENT_SHA256 = "a7495d795c6a73e9a8bfc172448d0d161a99402b0bc63cd1ae6966e1c3968219"
 BLANK_RECEIPT_SHA256 = "41917b39c0e50f27e252d76a4507e0a7599591e00c09b25074f49b9413bbd962"
@@ -55,6 +55,101 @@ CALIBRATION_EXPECTATIONS = {
     "donor_shortcut": {"D1": False, "D2": False},
     "variance_collapse": {"D1": False, "D2": False},
     "signal_confined_to_poor_registration": {"D1": False, "D2": False},
+}
+CALIBRATION_COORDINATE_RANK = 4
+CALIBRATION_MOLECULAR_WIDTH = 8
+CALIBRATION_SEED_BASE = 2_026_072_100
+CALIBRATION_RARE_DECILE = 1.2815515655446004
+CALIBRATION_NULL_P = 1.0 / 101.0
+CALIBRATION_CONDITION_PARAMETERS = {
+    "global_null": {
+        "arm_error_scales": {},
+        "prediction_aliases": {},
+        "special_construction": "none",
+    },
+    "nuisance_only": {
+        "arm_error_scales": {"N0": 0.4, "A_star": 0.4, "C_blank": 0.4},
+        "prediction_aliases": {"A_star": "N0", "C_blank": "N0"},
+        "special_construction": "none",
+    },
+    "linear_image": {
+        "arm_error_scales": {"B2": 0.35, "N1": 0.45, "A_star": 0.45},
+        "prediction_aliases": {},
+        "special_construction": "none",
+    },
+    "nonlinear_image": {
+        "arm_error_scales": {"B2": 0.8, "N1": 0.45, "A_star": 0.35},
+        "prediction_aliases": {},
+        "special_construction": "none",
+    },
+    "context_only": {
+        "arm_error_scales": {
+            "N1": 0.35,
+            "N3": 0.85,
+            "N4": 0.85,
+            "N5": 0.36,
+            "A_star": 0.35,
+        },
+        "prediction_aliases": {},
+        "special_construction": "none",
+    },
+    "nucleus_only": {
+        "arm_error_scales": {
+            "N1": 0.7,
+            "N3": 0.35,
+            "N4": 0.9,
+            "N5": 0.9,
+            "A_star": 0.35,
+        },
+        "prediction_aliases": {"A_star": "N3"},
+        "special_construction": "none",
+    },
+    "cell_only": {
+        "arm_error_scales": {
+            "N1": 0.7,
+            "N3": 0.9,
+            "N4": 0.35,
+            "N5": 0.9,
+            "A_star": 0.35,
+        },
+        "prediction_aliases": {"A_star": "N4"},
+        "special_construction": "none",
+    },
+    "donor_shortcut": {
+        "arm_error_scales": {},
+        "prediction_aliases": {},
+        "special_construction": "donor_constant_predictions_for_A_star_N1_N3_N4",
+    },
+    "variance_collapse": {
+        "arm_error_scales": {"B2": 1.05, "N0": 1.05},
+        "prediction_aliases": {},
+        "special_construction": "A_star_and_N1_predictions_equal_0.1_times_truth",
+    },
+    "signal_confined_to_poor_registration": {
+        "arm_error_scales": {"B2": 0.9, "N0": 0.9, "N1": 0.9},
+        "prediction_aliases": {},
+        "special_construction": ("A_star_and_N1_error_scale_1.15_on_Q3_and_zero_outside_Q3"),
+    },
+}
+CALIBRATION_GENERATOR_CONTRACT = {
+    "mode": "synthetic_truth_and_heldout_prediction_decision_calibration",
+    "row_topology": (
+        "all_real_registered_evaluation_rows_with_real_donor_section_type_block_and_registration_labels"
+    ),
+    "registered_molecular_or_image_features_read": False,
+    "coordinate_rank": CALIBRATION_COORDINATE_RANK,
+    "molecular_width": CALIBRATION_MOLECULAR_WIDTH,
+    "random_generator": "numpy_PCG64_standard_normal",
+    "trial_seed_rule": "2026072100_plus_10000_times_condition_index_plus_trial_index",
+    "coordinate_truth": "independent_standard_normal_per_row_and_coordinate",
+    "reference_prediction": "deterministic_donor_type_offset_across_eight_synthetic_genes",
+    "molecular_reconstruction": "fixed_outcome_independent_orthonormal_8_by_4_basis",
+    "prediction_error": "row_normalized_Gaussian_direction_times_arm_error_scale",
+    "rare_state_thresholds": "fixed_standard_normal_deciles",
+    "synthetic_refitted_null_empirical_p": CALIBRATION_NULL_P,
+    "condition_parameters": CALIBRATION_CONDITION_PARAMETERS,
+    "same_scoring_multiplicity_registration_and_decision_code_as_biological_run": True,
+    "nested_training_and_refit_path_checked_by_separate_implementation_smoke": True,
 }
 D1_THRESHOLDS = {
     "donor_type_macro_residual_coordinate_R2": (">=", 0.05),
@@ -319,7 +414,6 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
     ):
         raise ValueError("v2 D2 thresholds changed")
     calibration = _mapping(value.get("synthetic_calibration"), "synthetic_calibration")
-    generator = _mapping(calibration.get("generator"), "synthetic generator")
     if (
         calibration.get("trials_per_condition") != 200
         or calibration.get("conditions") != CALIBRATION_EXPECTATIONS
@@ -328,18 +422,7 @@ def validate_protocol(protocol: Mapping[str, Any], *, repository_root: Path) -> 
         or calibration.get("true_positive_lower_bound_must_exceed") != 0.8
         or calibration.get("HEST_molecular_execution_allowed_after_calibration_failure")
         is not False
-        or generator.get("registered_molecular_or_image_features_read") is not False
-        or generator.get("coordinate_rank") != 4
-        or generator.get("nuisance_width") != 158
-        or generator.get("image_view_width") != 1536
-        or generator.get("signal_amplitude") != 2.0
-        or generator.get("coordinate_noise_standard_deviation") != 0.5
-        or generator.get(
-            "same_scoring_multiplicity_registration_and_decision_code_as_biological_run"
-        )
-        is not True
-        or generator.get("nested_training_and_refit_path_checked_by_separate_implementation_smoke")
-        is not True
+        or calibration.get("generator") != CALIBRATION_GENERATOR_CONTRACT
     ):
         raise ValueError("v2 synthetic calibration contract changed")
     report = _mapping(value.get("report_contract"), "report_contract")
@@ -666,7 +749,14 @@ __all__: Sequence[str] = (
     "BLANK_FEATURE_SHA256",
     "BLANK_RECEIPT_SHA256",
     "BLANK_SUPPLEMENT_SHA256",
+    "CALIBRATION_CONDITION_PARAMETERS",
+    "CALIBRATION_COORDINATE_RANK",
     "CALIBRATION_EXPECTATIONS",
+    "CALIBRATION_GENERATOR_CONTRACT",
+    "CALIBRATION_MOLECULAR_WIDTH",
+    "CALIBRATION_NULL_P",
+    "CALIBRATION_RARE_DECILE",
+    "CALIBRATION_SEED_BASE",
     "D1_THRESHOLDS",
     "D2_THRESHOLDS",
     "MANIFEST_SCHEMA",

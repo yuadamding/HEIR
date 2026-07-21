@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 
 from heir.evaluation import nonlinear_qualification_v2_execution as execution
-from heir.evaluation.registration_topology import SOURCE_MEMBER_ALLOWLIST
 
 
 def _source(path: Path) -> tuple[Path, tuple[str, ...], int]:
@@ -20,6 +19,7 @@ def _source(path: Path) -> tuple[Path, tuple[str, ...], int]:
         path,
         observation_ids=np.asarray([f"cell-{index}" for index in range(rows)]),
         donor_ids=donor_ids,
+        block_ids=np.asarray([f"{donor}-B" for donor in donor_ids]),
         section_ids=np.asarray([f"{donor}-S" for donor in donor_ids]),
         type_labels=np.tile(np.repeat([0, 1], 20), len(donors)),
         pool_roles=np.full(rows, "evaluation", dtype="<U16"),
@@ -31,7 +31,7 @@ def _source(path: Path) -> tuple[Path, tuple[str, ...], int]:
     return path, donors, int(quality.sum())
 
 
-def test_calibration_topology_opens_only_the_seven_outcome_blind_members(
+def test_calibration_topology_opens_only_the_outcome_blind_members(
     tmp_path: Path, monkeypatch
 ) -> None:
     source, donors, formal_rows = _source(tmp_path / "source.npz")
@@ -50,9 +50,10 @@ def test_calibration_topology_opens_only_the_seven_outcome_blind_members(
     topology, receipt = execution.load_calibration_topology(source)
 
     assert topology.rows == 480
-    assert opened == [f"{name}.npy" for name in SOURCE_MEMBER_ALLOWLIST]
+    assert opened == [f"{name}.npy" for name in execution.CALIBRATION_SOURCE_MEMBER_ALLOWLIST]
     assert "nucleus_molecular_targets.npy" not in opened
-    assert receipt["source_members_opened"] == list(SOURCE_MEMBER_ALLOWLIST)
+    assert receipt["source_members_opened"] == list(execution.CALIBRATION_SOURCE_MEMBER_ALLOWLIST)
+    assert len(receipt["ordered_block_ids_sha256"]) == 64
     assert receipt["molecular_outcomes_read"] is False
     assert receipt["image_features_read"] is False
 

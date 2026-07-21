@@ -32,6 +32,10 @@ def _passing_d2() -> dict[str, float]:
 
 def test_registered_v2_protocol_validates_as_delta_over_v1() -> None:
     value = contract.validate_protocol(PROTOCOL, repository_root=ROOT)
+    assert (
+        contract.file_sha256(ROOT / "configs/hest_nonlinear_qualification_v2.json")
+        == contract.V2_PROTOCOL_SHA256
+    )
     assert value["registration_band_selection"]["selected_quality_band_id"] == "Q3"
     assert value["molecular_outcomes_read_during_v2_registration"] is False
     assert value["authorizes_h_cell"] is False
