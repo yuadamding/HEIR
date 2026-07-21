@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "HEIR receipt-bound HEST blank-patch supplement",
+  "title": "HEIR HEST H-optimus blank-patch supplement receipt",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -50,7 +50,8 @@
       "items": {"type": "string", "minLength": 1}
     },
     "batch_parity": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": [
         "batch_sizes", "batch_1_feature_sha256", "batch_32_features_sha256",
         "minimum_cosine", "mean_cosine", "maximum_absolute_error",
@@ -60,8 +61,8 @@
         "batch_sizes": {"const": [1, 32]},
         "batch_1_feature_sha256": {"$ref": "#/$defs/sha256"},
         "batch_32_features_sha256": {"$ref": "#/$defs/sha256"},
-        "minimum_cosine": {"type": "number", "minimum": 0.9999, "maximum": 1.000001},
-        "mean_cosine": {"type": "number", "minimum": 0.9999, "maximum": 1.000001},
+        "minimum_cosine": {"type": "number", "minimum": 0.9999, "maximum": 1.0000001},
+        "mean_cosine": {"type": "number", "minimum": 0.9999, "maximum": 1.0000001},
         "maximum_absolute_error": {"type": "number", "minimum": 0},
         "minimum_required_cosine": {"const": 0.9999},
         "all_finite": {"const": true},
@@ -70,39 +71,16 @@
       }
     },
     "implementation": {
-      "type": "object", "additionalProperties": false,
-      "required": [
-        "builder_sha256", "receipt_validator_sha256", "encoder_adapter_sha256",
-        "encoder_base_sha256"
-      ],
-      "properties": {
-        "builder_sha256": {"$ref": "#/$defs/sha256"},
-        "receipt_validator_sha256": {"$ref": "#/$defs/sha256"},
-        "encoder_adapter_sha256": {"$ref": "#/$defs/sha256"},
-        "encoder_base_sha256": {"$ref": "#/$defs/sha256"}
-      }
+      "type": "object", "minProperties": 4,
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
     },
     "runtime": {
-      "type": "object", "additionalProperties": false,
-      "required": [
-        "git_commit", "git_worktree_dirty_at_start", "python_version", "numpy_version",
-        "torch_version", "timm_version", "safetensors_version", "device",
-        "cuda_device_name", "cuda_autocast_enabled_by_encoder", "tf32_enabled",
-        "cublas_workspace_config"
-      ],
+      "type": "object",
+      "required": ["git_commit", "git_worktree_dirty_at_start", "device"],
       "properties": {
-        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "git_commit": {"$ref": "#/$defs/gitCommit"},
         "git_worktree_dirty_at_start": {"const": false},
-        "python_version": {"type": "string", "minLength": 1},
-        "numpy_version": {"type": "string", "minLength": 1},
-        "torch_version": {"type": "string", "minLength": 1},
-        "timm_version": {"type": "string", "minLength": 1},
-        "safetensors_version": {"type": "string", "minLength": 1},
-        "device": {"enum": ["cpu", "cuda", "cuda:0"]},
-        "cuda_device_name": {"type": ["string", "null"]},
-        "cuda_autocast_enabled_by_encoder": {"type": "boolean"},
-        "tf32_enabled": {"const": false},
-        "cublas_workspace_config": {"enum": [":4096:8", ":16:8"]}
+        "device": {"enum": ["cuda", "cuda:0"]}
       }
     },
     "molecular_outcomes_read": {"const": false},
@@ -110,6 +88,7 @@
     "biological_experiment_run": {"const": false}
   },
   "$defs": {
-    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}},
+    "gitCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
   }
 }
