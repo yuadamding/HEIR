@@ -128,6 +128,12 @@ def _ordered_observation_ids(value: object) -> np.ndarray:
     return np.asarray(text, dtype="S")
 
 
+def ordered_observation_ids_sha256(value: object) -> str:
+    """Hash validated observation IDs independently of their string storage dtype."""
+
+    return array_sha256(_ordered_observation_ids(value))
+
+
 def inspect_registered_source(
     path: Path,
     *,
@@ -152,7 +158,7 @@ def inspect_registered_source(
         sha256=actual_sha256,
         bytes=resolved.stat().st_size,
         rows=len(observation_ids),
-        observation_ids_sha256=array_sha256(observation_ids),
+        observation_ids_sha256=ordered_observation_ids_sha256(observation_ids),
     )
 
 

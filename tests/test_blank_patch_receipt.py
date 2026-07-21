@@ -77,6 +77,15 @@ def test_source_inspection_opens_only_ordered_observation_ids(tmp_path: Path) ->
         receipt.read_source_member(path, "image_features")
 
 
+def test_ordered_observation_hash_is_string_storage_invariant() -> None:
+    unicode_ids = np.asarray(["cell-2", "cell-1", "cell-3"], dtype="U")
+    byte_ids = np.asarray(["cell-2", "cell-1", "cell-3"], dtype="S")
+
+    assert receipt.ordered_observation_ids_sha256(
+        unicode_ids
+    ) == receipt.ordered_observation_ids_sha256(byte_ids)
+
+
 def test_compact_supplement_and_receipt_require_pixel_recomputation(tmp_path: Path) -> None:
     _, source = _source(tmp_path)
     one = _feature(1)

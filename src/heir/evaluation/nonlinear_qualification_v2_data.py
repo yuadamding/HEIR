@@ -9,7 +9,11 @@ from typing import Mapping
 
 import numpy as np
 
-from heir.evaluation.blank_patch_receipt import array_sha256, load_supplement
+from heir.evaluation.blank_patch_receipt import (
+    array_sha256,
+    load_supplement,
+    ordered_observation_ids_sha256,
+)
 from heir.evaluation.neural_control_models import deduplicate_named_feature_parts
 from heir.evaluation.nonlinear_qualification_contract import file_sha256
 from heir.evaluation.nonlinear_qualification_v2_contract import (
@@ -273,7 +277,8 @@ def load_hest_biological_data(
     if (
         supplement.sha256 != BLANK_SUPPLEMENT_SHA256
         or supplement.registered_source_sha256 != SOURCE_SHA256
-        or supplement.ordered_observation_ids_sha256 != array_sha256(observation_ids)
+        or supplement.ordered_observation_ids_sha256
+        != ordered_observation_ids_sha256(observation_ids)
         or supplement.source_rows != SOURCE_ROWS
         or supplement.broadcast_rows != SOURCE_ROWS
         or supplement.feature.shape != (1, IMAGE_WIDTH)

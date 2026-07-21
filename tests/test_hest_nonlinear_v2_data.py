@@ -89,7 +89,7 @@ def _authorization() -> dict[str, object]:
 def _small_contract(monkeypatch) -> None:
     feature = np.ones((1, 4), dtype=np.float32)
     feature_sha256 = data_module.array_sha256(feature)
-    observation_sha256 = data_module.array_sha256(
+    observation_sha256 = data_module.ordered_observation_ids_sha256(
         np.asarray([f"cell-{index}" for index in range(16)])
     )
     monkeypatch.setattr(data_module, "SOURCE_ROWS", 16)
