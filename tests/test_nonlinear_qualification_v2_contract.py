@@ -16,6 +16,8 @@ MANIFEST_PATH = ROOT / "manifests/studies/hest_nonlinear_qualification_v2.retros
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 RESULT_PATH = ROOT / "manifests/studies/hest_nonlinear_qualification_v2.result.json"
 RESULT = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
+EXPOSURE_PATH = ROOT / "reports/hest_nonlinear_qualification_v2_exposure_receipt.json"
+EXPOSURE = json.loads(EXPOSURE_PATH.read_text(encoding="utf-8"))
 
 
 def _passing_d1() -> dict[str, float]:
@@ -89,6 +91,69 @@ def test_v2_result_preserves_registration_and_fails_closed() -> None:
     assert RESULT["authorizes_h_intrinsic"] is False
     assert RESULT["authorizes_h_ref"] is False
     assert RESULT["authorizes_full_heir"] is False
+
+
+def test_v2_exposure_receipt_consumes_identity_without_a_scientific_decision() -> None:
+    required = {
+        "protocol_id": "hest_nonlinear_qualification_v2",
+        "molecular_target_opened": True,
+        "first_target_access_stage": "outer_fold_0_B0_selection",
+        "last_completed_stage": "B0_candidate_search_failed",
+        "heldout_predictions_produced": False,
+        "D1_computed": False,
+        "D2_computed": False,
+        "scientific_decision_available": False,
+        "prospective_rerun_allowed": False,
+        "permitted_future_use": "retrospective_debugging_only",
+    }
+    assert {name: EXPOSURE[name] for name in required} == required
+    assert EXPOSURE["first_target_access_stage_semantics"] == (
+        "first_target_dependent_analysis_stage_not_literal_array_read"
+    )
+    assert EXPOSURE["literal_first_target_read_stage"] == (
+        "load_hest_biological_data_before_outer_fold_0"
+    )
+    assert EXPOSURE["calibration_interpretation"] == {
+        "decision_rule_calibration_passed": True,
+        "synthetic_decision_trials": 2000,
+        "production_equivalent_B0_calibration_run": False,
+        "production_equivalent_B0_calibration_passed": None,
+        "supersedes_broader_production_calibration_wording": True,
+    }
+    assert EXPOSURE["bindings"]["frozen_protocol"]["sha256"] == contract.file_sha256(
+        ROOT / EXPOSURE["bindings"]["frozen_protocol"]["path"]
+    )
+    assert EXPOSURE["bindings"]["preregistration_manifest"][
+        "sha256"
+    ] == contract.file_sha256(ROOT / EXPOSURE["bindings"]["preregistration_manifest"]["path"])
+    assert EXPOSURE["bindings"]["result_manifest"]["sha256"] == contract.file_sha256(
+        ROOT / EXPOSURE["bindings"]["result_manifest"]["path"]
+    )
+    assert EXPOSURE["bindings"]["execution_report"]["sha256"] == contract.file_sha256(
+        ROOT / EXPOSURE["bindings"]["execution_report"]["path"]
+    )
+    assert EXPOSURE["bindings"]["external_failure_receipt"]["sha256"] == RESULT[
+        "execution_receipts"
+    ]["json_sha256"]
+    assert EXPOSURE["bindings"]["external_failure_markdown"]["sha256"] == RESULT[
+        "execution_receipts"
+    ]["markdown_sha256"]
+    assert EXPOSURE["diagnostic_hardening"]["retroactively_restores_v2_validity"] is False
+    assert (
+        EXPOSURE["diagnostic_hardening"]["persistent_per_candidate_fold_receipts_implemented"]
+        is False
+    )
+    assert EXPOSURE["diagnostic_hardening"]["authorizes_v2_rerun"] is False
+    assert EXPOSURE["scientific_boundary"]["HEST_v2_identity_consumed"] is True
+    assert all(
+        EXPOSURE["scientific_boundary"][name] is False
+        for name in (
+            "authorizes_h_cell",
+            "authorizes_h_intrinsic",
+            "authorizes_h_ref",
+            "authorizes_full_heir",
+        )
+    )
 
 
 @pytest.mark.parametrize(

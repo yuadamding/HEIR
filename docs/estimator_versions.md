@@ -10,7 +10,7 @@ earlier negative result.
 | `regional_fusion_v2` | Frozen, not supported | Existing regional matched-reference result; favorable mean-loss estimates failed molecular-variance preservation |
 | `nonlinear_qualification_v1` | Retrospective; core/smoke complete; biological run blocked | Engineering qualification only; may support registering a new prospective estimator protocol only after every registered arm and control can run |
 | `nonlinear_qualification_v2` | Retrospective; terminal procedural failure at B0 selection | No held-out effect estimate; D1/D2 not evaluable; no biological or representation-level conclusion |
-| `prospective_nonlinear_v1` | Not authorized | Requires a complete retrospective qualification pass before any pristine outcome is opened |
+| `<new_cohort>_nonlinear_morphology_v1` | Not registered | Requires metadata-frozen 10-development/5-locked donors, physical outcome isolation, and production-equivalent B0 plus decision calibration |
 
 ## Version rules
 
@@ -30,11 +30,13 @@ earlier negative result.
   target was opened once; no fold or effect estimate completed, and no post-exposure tuning or
   rerun was performed. The calibration did not exercise production B0 selection, and the rejected
   candidate registry was not persisted, so the failure is procedurally indeterminate. V2 is
-  terminal, but it is not evidence that the representation lacks nonlinear molecular signal.
+  terminal, but it is not evidence that the representation lacks nonlinear molecular signal. The
+  dedicated exposure record is `reports/hest_nonlinear_qualification_v2_exposure_receipt.json`.
 - A retrospective pass cannot authorize H-CELL, H-INTRINSIC, H-REF, or full HEIR.
-- `prospective_nonlinear_v1` does not exist until a complete retrospective pass and a separately
-  reviewed preregistration. Its protocol must be frozen before pristine molecular outcomes are
-  accessed.
+- A cohort-specific `<new_cohort>_nonlinear_morphology_v1` does not exist until metadata-only cohort
+  eligibility, physical isolation of five locked donors, development-only H-MEAS, and exact B0 plus
+  decision calibration pass. Its protocol must be frozen before locked molecular outcomes are
+  accessed; HEST v2 is not a prerequisite that can be repaired or rerun.
 - Encoder changes, RNA-target changes, reference expansion, and estimator changes require distinct
   version identities; they must not be combined silently.
 

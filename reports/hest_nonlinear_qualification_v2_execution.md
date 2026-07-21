@@ -10,11 +10,11 @@ Preflight, CUDA implementation smoke, and all 2,000 frozen calibration trials pa
 
 The first outer fold stopped during frozen B0 nested ridge selection because every registered
 candidate was ineligible. No outer fold, held-out prediction, effect estimate, registration
-sensitivity, or refitted-null permutation completed. This was not caused by outcome-blind sample
-support: the all-row topology has all 448 donor/type and all 570 donor/section/type strata at support
-20, and B0 used all 18,062 evaluation rows. The selector did not emit its rejected-candidate
-registry, so the failure cannot be separated into a basis-ceiling rejection, a variance rejection,
-or a caught fit/metric error without impermissibly reopening the target.
+sensitivity, or refitted-null permutation completed. Before that split, the loader materialized all
+18,062 evaluation rows and enforced source-level donor/section/type support. B0 candidate search
+then ran on the first 14-donor outer-training split. The selector did not emit its rejected-candidate
+registry, so the failure cannot be separated into a fold-local basis-ceiling rejection, variance
+rejection, or caught fit/metric error without impermissibly reopening the target.
 
 The 2,000-trial calibration covered the shared scoring, multiplicity, registration, and D1/D2 rules
 using directly generated held-out predictions. It did not execute production B0 selection. The

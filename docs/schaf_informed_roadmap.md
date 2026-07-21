@@ -10,21 +10,17 @@ because those components exist in another architecture.
 ```text
 Preserve frozen evidence
         |
-        +-- Exposed HEST nonlinear qualification
-        |       |
-        |       +-- interpretable fail: stop neural expansion; improve measurement/representation
-        |       |
-        |       +-- procedural failure: seal version; redesign on unexposed data
-        |       |
-        |       +-- pass: preregister prospective_nonlinear_v1
+        +-- Exposed HEST nonlinear qualification -> procedural failure -> seal version
         |
-        +-- Annotation provenance -> H-MEAS -> sequential calibration
+        +-- New unexposed cohort -> metadata eligibility -> 10-donor development H-MEAS
                                         |
-                                        +-- pristine H-CELL
+                                        +-- production-equivalent B0 + decision calibration
                                                 |
-                                                +-- H-REF v3
+                                                +-- one-shot 5-donor locked evaluation
                                                         |
-                                                        +-- H-END2END / H-COMP
+                                                        +-- if supported: pristine H-CELL
+                                                                |
+                                                                +-- H-REF v3 -> H-END2END / H-COMP
 ```
 
 ## Track A — estimator qualification on exposed data
