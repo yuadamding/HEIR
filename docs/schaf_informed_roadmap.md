@@ -27,27 +27,15 @@ Preserve frozen evidence
 
 ## Track A — estimator qualification on exposed data
 
-1. **WP-1: frozen nonlinear protocol — complete.** Register B0–B3 and N0–N7, the complete support rule,
-   architecture/training settings, permanent non-authorization, and the frozen predecessor hashes.
-   Execution remains blocked until a receipt-bound blank-patch supplement and an evaluable
-   preregistered registration sensitivity exist.
-2. **WP-2: deterministic nonlinear residual probe — core complete.** Add tiny/small MLPs, a fine-type FiLM
-   adapter, late fusion, nested donor selection, deterministic checkpoint receipts, and seed
-   stability tests.
-3. **WP-3: architecture-matched controls and refitted nulls — core complete.** Compare nonlinear image models with
-   nonlinear nuisance, blank-patch, and target-removed models. Repeat the complete fit for both null
-   families.
-4. **WP-4: exposed HEST runner — preflight/synthetic smoke complete; biological phase blocked.**
-   The source hash, schema, encoder, crop registry, type remapping, and registered blockers were
-   verified. The synthetic smoke exercised checkpoint replay and 20 complete refits per null
-   family under bounded resources. No HEST molecular row was fitted and no engineering decision
-   was issued because the blank-patch and registration-sensitivity requirements cannot run.
-5. **WP-5: conditional multiscale token pooling.** Begin only if global embeddings fail geometry or
-   mask-specific results point to localization/pooling as the limiting factor. This requires a new
-   visible positive-control protocol.
-6. **WP-6: development-only nonlinear RNA target.** Begin only if basis ceiling, reconstructed-gene
-   variance, or held-out reconstruction shows the linear molecular target is limiting. Report all
-   primary results in measured-gene space.
+1. **V1 retained.** Its missing blank input and unsupported registration subset permanently block
+   biological execution.
+2. **V2 gates passed.** The receipt-bound blank, Q3 registration estimand, complete runner, CUDA
+   smoke, and 2,000-trial calibration were completed before opening the target.
+3. **V2 stopped at B0.** The target opened once, but every registered B0 ridge candidate was
+   ineligible in the first outer fold. No held-out estimate or refitted null completed.
+4. **Stop decision.** D1 and D2 are unsupported. Do not tune on exposed HEST or proceed to token
+   pooling, nonlinear RNA targets, reference expansion, or a prospective nonlinear estimator from
+   this qualification.
 
 ## Track B — scientific authorization infrastructure
 

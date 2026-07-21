@@ -9,7 +9,8 @@ earlier negative result.
 | `ridge_v5` | Frozen | Existing H-CELL/H-INTRINSIC gate and its original negative or positive result |
 | `regional_fusion_v2` | Frozen, not supported | Existing regional matched-reference result; favorable mean-loss estimates failed molecular-variance preservation |
 | `nonlinear_qualification_v1` | Retrospective; core/smoke complete; biological run blocked | Engineering qualification only; may support registering a new prospective estimator protocol only after every registered arm and control can run |
-| `prospective_nonlinear_v1` | Not yet authorized | May be registered only after retrospective qualification passes and before any pristine outcome is opened |
+| `nonlinear_qualification_v2` | Retrospective; stopped at B0 selection | No held-out effect estimate; D1/D2 unsupported and expansion on this representation stopped |
+| `prospective_nonlinear_v1` | Not authorized | Requires a complete retrospective qualification pass before any pristine outcome is opened |
 
 ## Version rules
 
@@ -24,6 +25,10 @@ earlier negative result.
 - Its deterministic neural probe, architecture-matched control/null machinery, source preflight,
   and synthetic 20-permutation smoke are implemented. The full B0-B3/N0-N7 biological runner and
   decision remain unavailable under the blocked v1 inputs; the smoke is not scientific evidence.
+- V2 resolved the outcome-blind inputs and passed preflight, implementation smoke, and 2,000-trial
+  calibration. Its first biological fold stopped because B0 had no eligible ridge candidate. The
+  target was opened once; no fold or effect estimate completed, and no post-exposure tuning or
+  rerun was performed.
 - A retrospective pass cannot authorize H-CELL, H-INTRINSIC, H-REF, or full HEIR.
 - `prospective_nonlinear_v1` does not exist until a complete retrospective pass and a separately
   reviewed preregistration. Its protocol must be frozen before pristine molecular outcomes are

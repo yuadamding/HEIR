@@ -14,6 +14,8 @@ PROTOCOL = json.loads(
 )
 MANIFEST_PATH = ROOT / "manifests/studies/hest_nonlinear_qualification_v2.retrospective.json"
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+RESULT_PATH = ROOT / "manifests/studies/hest_nonlinear_qualification_v2.result.json"
+RESULT = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
 
 
 def _passing_d1() -> dict[str, float]:
@@ -50,6 +52,21 @@ def test_registered_v2_manifest_binds_exact_protocol_and_outcome_blind_inputs() 
     )
     assert value["molecular_outcomes_opened_under_v2"] is False
     assert value["execution"]["full_biological_execution_authorized_at_registration"] is False
+
+
+def test_v2_result_preserves_registration_and_fails_closed() -> None:
+    assert RESULT["protocol_binding"]["sha256"] == contract.V2_PROTOCOL_SHA256
+    assert RESULT["registration_manifest_binding"]["sha256"] == contract.file_sha256(
+        MANIFEST_PATH
+    )
+    assert RESULT["source_access"]["molecular_outcomes_opened_under_v2"] is True
+    assert RESULT["failure"]["completed_observed_outer_folds"] == 0
+    assert RESULT["decision"]["stop_nonlinear_expansion_on_this_representation"] is True
+    assert RESULT["decision"]["model_grid_or_threshold_changed_after_outcome_open"] is False
+    assert RESULT["authorizes_h_cell"] is False
+    assert RESULT["authorizes_h_intrinsic"] is False
+    assert RESULT["authorizes_h_ref"] is False
+    assert RESULT["authorizes_full_heir"] is False
 
 
 @pytest.mark.parametrize(
