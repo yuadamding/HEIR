@@ -1,0 +1,158 @@
+{
+  "schema": "heir.natcommun_matched_st_validation_protocol.v1",
+  "protocol_date": "2026-07-15",
+  "analysis_scope": "outcome_exposed_mechanistic_diagnostic_only",
+  "model_freeze": {
+    "architecture": "unchanged",
+    "image_encoder": "bioptimus/H-optimus-1",
+    "image_encoder_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "image_context_um": 112,
+    "gene_count": 256,
+    "latent_dimension": 20,
+    "epochs": 80,
+    "batch_size": 256,
+    "base_seed": 1729,
+    "fusion_rule": "unchanged_componentwise_reference_product_of_experts",
+    "loss": "unchanged_negative_binomial",
+    "iterative_refinement": "prohibited",
+    "UNI2_h": "prohibited_not_run"
+  },
+  "frozen_artifacts": {
+    "source_sha256": "ec37d5717a9b737dfac226ae9267258fb728ee024496a7655bb69a913aa3cf20",
+    "projected_source_sha256": "71479f891b5945762e20ec5b91d85bac097230b12ed9192aeacd965be119607f",
+    "gene_panel_sha256": "ce0b6b82440d7fccc69f24afccf0c68bb101b85f590e4a35a514309929fbb6ad",
+    "development_protocol_sha256": "2cb92b22b6870488a06e64b213e37ffbbdfe3044f1da8fc7442f506915e78197",
+    "development_runner_sha256": "cf27504e25dfd8cd7e8bfe2894efc8b4a8f79306b47bc492d0e61406d20668ce",
+    "generative_core_sha256": "55a63f1360e8cc76267e4b00ba8e2167f36259789e9bfdf2aa929c8cadd83b17",
+    "prepared_manifest_sha256": "d1b1353abb9ee80c3132fa08a9ebaea3aeeee607aaa11f2c90e7121be02addde",
+    "fit_predict_manifest_sha256": "cb7ebdf9e22090a046937204993a7b2aa3ac1ba2d4c434883e43ed45d1e826ca",
+    "development_report_sha256": "bf3144cf22405752488509dbb1a65b573967fe1b14110881020787187828cf29"
+  },
+  "directional_pairs": [
+    {
+      "direction_id": "B1_2__to__B1_4",
+      "donor": "B1",
+      "indication": "breast",
+      "reference_section": "B1_2",
+      "query_section": "B1_4"
+    },
+    {
+      "direction_id": "B1_4__to__B1_2",
+      "donor": "B1",
+      "indication": "breast",
+      "reference_section": "B1_4",
+      "query_section": "B1_2"
+    },
+    {
+      "direction_id": "L1_2__to__L1_4",
+      "donor": "L1",
+      "indication": "lung",
+      "reference_section": "L1_2",
+      "query_section": "L1_4"
+    },
+    {
+      "direction_id": "L1_4__to__L1_2",
+      "donor": "L1",
+      "indication": "lung",
+      "reference_section": "L1_4",
+      "query_section": "L1_2"
+    }
+  ],
+  "same_section_upper_bound": {
+    "status": "secondary_optimistic_sensitivity",
+    "eligible_sections": "all_15_primary_sections",
+    "split_input": "registered_Visium_array_grid_coordinates_only",
+    "physical_coordinate_definition_mm": {
+      "x": "array_col_times_0.05",
+      "y": "array_row_times_sqrt_3_times_0.05",
+      "adjacent_spot_center_spacing_mm": 0.1
+    },
+    "projection": "centered_physical_coordinate_PC1_with_deterministic_sign",
+    "split_center": "projection_median",
+    "reference_tail": "projection_at_or_below_median_minus_half_guard",
+    "query_tail": "projection_at_or_above_median_plus_half_guard",
+    "empty_guard_total_width_mm": [1.0, 2.0],
+    "minimum_reference_spots": 100,
+    "minimum_query_spots": 100,
+    "reference_and_query_spots_disjoint": true,
+    "same_assay_and_batch": true,
+    "measurement_floor_claim": false,
+    "independent_confirmation_claim": false,
+    "allowed_label": "optimistic_same_section_same_assay_same_batch_ST_upper_bound"
+  },
+  "arms": {
+    "S0": "frozen_baseline_H_and_E_only_M0",
+    "S1": "independent_adjacent_section_matched_ST_reference_only",
+    "S3": "H_and_E_plus_independent_adjacent_section_matched_ST_reference",
+    "S4": "within_query_section_composition_stratified_deranged_H_and_E_plus_matched_ST",
+    "S6": "H_and_E_plus_natural_same_indication_wrong_donor_training_ST_bank",
+    "S7": "H_and_E_plus_natural_query_donor_excluded_pooled_training_ST_bank",
+    "M1": "frozen_baseline_matched_suspension_reference_only",
+    "M3": "frozen_baseline_H_and_E_plus_matched_suspension_reference"
+  },
+  "spatial_reference_adapter": {
+    "type_vocabulary": "outer_training_suspension_Level1_only",
+    "type_proxy": "selected_gene_simplex_projection_against_outer_training_type_signatures",
+    "type_proxy_iterations": 80,
+    "component_method": "deterministic_type_weighted_soft_kmeans",
+    "components_per_supported_type": 3,
+    "component_iterations": 25,
+    "component_temperature": 1.0,
+    "component_variance_floor": 0.0001,
+    "minimum_type_proxy_mass": 3.0,
+    "minimum_type_proxy_effective_sample_size": 3.0,
+    "adapter_tuning_on_query_ST": false
+  },
+  "negative_control_boundary": {
+    "S6_same_indication": true,
+    "S6_and_S7_query_donor_excluded": true,
+    "S6_and_S7_rows_were_available_to_model_training": true,
+    "bank_effective_sample_size_fixed": false,
+    "coarse_type_support_fixed": false,
+    "specificity_claim_allowed": false,
+    "role": "feasible_conservative_natural_bank_mechanistic_controls_only"
+  },
+  "target_boundary": {
+    "prepare_is_the_only_stage_that_partitions_reference_and_query_ST": true,
+    "prepare_is_outcome_exposed_trusted_partitioning": true,
+    "fit_model_receives_no_heldout_donor_ST": true,
+    "fit_predict_manifest_contains_score_target_paths_or_hashes": false,
+    "score_only_target_manifest": true,
+    "score_target_manifest_open_stage": "after_selected_score_family_global_prediction_preflight",
+    "each_predict_invocation_receives_exactly_one_reference_section": true,
+    "one_process_may_predict_multiple_reciprocal_directions": false,
+    "query_ST_open_stage": "score_only",
+    "all_selected_score_family_prediction_artifacts_validated_before_any_selected_query_ST_is_scored": true
+  },
+  "scoring": {
+    "endpoint": "256_gene_training_dispersion_NB2_deviance",
+    "aggregation": "spots_within_direction_then_reciprocal_directions_within_donor_then_donors",
+    "primary_tests": ["S3_less_than_S1", "S3_less_than_S4"],
+    "descriptive_tests": [
+      "S3_less_than_S6",
+      "S3_less_than_S7",
+      "M3_minus_S3_cross_assay_penalty",
+      "M1_minus_S1_reference_only_cross_assay_penalty"
+    ],
+    "inference_units": 2,
+    "minimum_one_sided_exact_sign_flip_p_value": 0.25
+  },
+  "evidence_boundary": {
+    "section_relationship": "same_block_serial_adjacent_Visium_sections_on_distinct_slides",
+    "spot_registration_available": false,
+    "paired_technical_replicate_claim": false,
+    "measurement_floor_claim": false,
+    "independent_confirmation_claim": false,
+    "cell_level_claim": false,
+    "allowed_interpretation": "distributional_adjacent_section_matched_ST_mechanistic_diagnostic"
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_visible_GPUs": 1,
+    "maximum_GPU_memory_fraction": 0.6,
+    "donor_models_serial": true,
+    "prediction_directions_process_isolated": true,
+    "swap_permitted": false,
+    "out_of_memory_action": "fail_closed_no_identity_change"
+  }
+}

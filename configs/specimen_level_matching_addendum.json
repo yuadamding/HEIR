@@ -1,0 +1,259 @@
+{
+  "schema": "heir.specimen_level_matching_addendum.v1",
+  "registration_date": "2026-07-16",
+  "source_review": {
+    "name": "Strict specimen-level matching and revised public-cohort priority",
+    "sha256": "845ada0952c7a76efb4ee84e92538e33fed144faa8982257f135de21c4dea42b"
+  },
+  "relationship_to_frozen_protocols": {
+    "definitive_protocol": {
+      "path": "configs/independent_regional_confirmation_protocol.json",
+      "sha256": "6033a2d7db6cb5095d014f984c6f6519a4a7c073e41b627379a47525236b668a",
+      "bytes_may_change": false
+    },
+    "pilot_protocol": {
+      "path": "configs/independent_regional_pilot_protocol.json",
+      "sha256": "f483c0d40e8e29746cb7e4694ca8a3666e2d7196acc7ab2c02e3cc6c0c9b20e5",
+      "bytes_may_change": false
+    },
+    "registered_before_final_eligible_block_assignment_and_ST_expression_target_access": true,
+    "narrows_parent_primary_cohort_admission": true,
+    "changes_parent_model_estimand_primary_arms_gates_thresholds_or_decisions": false,
+    "adds_separate_nongating_T2_diagnostic": true,
+    "may_admit_a_cohort_rejected_by_a_parent_protocol": false,
+    "conflict_resolution": "apply_the_stricter_requirement"
+  },
+  "bound_evidence": {
+    "candidate_routing_inventory": {
+      "path": "manifests/spatialdlpfc_pilot_routing.tsv",
+      "sha256": "47e7830e1aa2263ddfecf0dff8bb10a5bd399638ae0ed3753be72fa87e1ca2a8"
+    },
+    "opaque_acquisition_receipt": {
+      "path": "manifests/spatialdlpfc_pilot_acquisition_receipt.json",
+      "sha256": "5988dff71dab6bcaf8dd0297ad8352e10ed1108ed60d05c6a753254008f0e698"
+    },
+    "metadata_identity_receipt": {
+      "path": "manifests/spatialdlpfc_metadata_identity_receipt.json",
+      "sha256": "22301d7a201a661ef0e7c4ba1b19961325e3ac7dec112b78e8346239fc0ded89"
+    },
+    "query_reference_assignment_manifest": {
+      "path": "manifests/spatialdlpfc_specimen_reference_assignments.tsv",
+      "sha256": "724759379a9442cc16bb1e5e4c10b447fa3ff85e5cb4585774cbfc9eef36fe1f"
+    },
+    "query_reference_assignment_schema": {
+      "path": "configs/schemas/specimen_reference_assignment.schema.json",
+      "sha256": "7927c9547d9586957c81bb1f791561619fa0462c6a7e98f669cb20670f3d6aa9"
+    },
+    "GSE243280_metadata_receipt": {
+      "path": "manifests/gse243280_metadata_receipt.json",
+      "sha256": "81ca9c108ac495f373f7117e52b823f061710204d3352f6dfab08239b8b1020f"
+    }
+  },
+  "biological_identity_hierarchy": [
+    "donor",
+    "procedure_and_lesion_or_anatomical_region",
+    "physical_specimen_core_or_block",
+    "aliquot_or_curl",
+    "section",
+    "assay_object"
+  ],
+  "match_tiers": {
+    "T0_exact_same_block_independent_aliquot": {
+      "relationship": "same_donor_and_same_canonical_parent_block_with_an_independent_reference_aliquot",
+      "primary_M3_eligible": true
+    },
+    "T0_adjacent_curl_same_parent_specimen": {
+      "relationship": "immediately_adjacent_reference_curl_or_aliquot_with_chain_of_custody_to_the_same_canonical_parent_specimen",
+      "primary_M3_eligible": true
+    },
+    "T1_same_lesion_procedure_separate_core": {
+      "relationship": "same_donor_lesion_procedure_and_time_but_different_physical_core",
+      "primary_M3_eligible": false,
+      "role": "secondary_close_match_transport_only"
+    },
+    "T2_same_donor_different_block": {
+      "relationship": "same_donor_but_different_anatomical_block",
+      "primary_M3_eligible": false,
+      "role": "same_donor_different_region_or_block_control"
+    },
+    "T3_wrong_donor_same_tissue_disease": {
+      "relationship": "different_donor_with_matched_tissue_disease_assay_and_support",
+      "primary_M3_eligible": false,
+      "role": "wrong_donor_control"
+    },
+    "T4_query_excluded_generic_atlas": {
+      "relationship": "query_excluded_generic_tissue_reference",
+      "primary_M3_eligible": false,
+      "role": "generic_reference_control"
+    },
+    "X_unverified_same_tissue_or_integrated": {
+      "relationship": "same_tissue_or_integrated_modalities_without_row_level_specimen_proof",
+      "primary_M3_eligible": false,
+      "role": "excluded_unverified"
+    }
+  },
+  "primary_assignment_invariants": {
+    "allowed_verified_match_tiers": [
+      "T0_exact_same_block_independent_aliquot",
+      "T0_adjacent_curl_same_parent_specimen"
+    ],
+    "query_and_reference_donor_ids_equal": true,
+    "query_H_and_E_ST_and_reference_canonical_parent_specimen_ids_equal": true,
+    "query_H_and_E_and_ST_block_ids_equal": true,
+    "reference_aliquot_or_source_material_is_independent_from_query_section_material": true,
+    "canonical_parent_specimen_id_must_be_evidence_verified": true,
+    "adjacent_curl_tier_requires_explicit_adjacency_verification": true,
+    "registered_query_cells_sections_or_source_material_may_occur_in_reference": false,
+    "reference_modality_and_assay_chemistry_independently_verified": true,
+    "row_level_metadata_and_payload_evidence_required": true,
+    "paper_level_pairing_statement_sufficient": false,
+    "missing_or_ambiguous_parent_specimen_id_action": "exclude_from_primary_M3",
+    "same_donor_different_block_action": "T2_control_never_primary",
+    "same_tissue_or_disease_without_specimen_identity_action": "X_exclude"
+  },
+  "spatialDLPFC_primary_selection": {
+    "candidate_rows": 19,
+    "candidate_donors": 10,
+    "currently_payload_verified_T0_rows": 0,
+    "currently_primary_eligible_donors": 0,
+    "one_primary_query_block_per_donor": true,
+    "multiple_blocks_or_sections_increase_independent_donor_count": false,
+    "minimum_unique_primary_donors": 8,
+    "maximum_unique_primary_donors": 10,
+    "target_free_candidate_pass_requirements": [
+      "canonical_donor_specimen_block_capture_and_independent_aliquot_identity",
+      "high_resolution_H_and_E_file_integrity_and_blinded_registration",
+      "raw_or_minimally_processed_ST_capture_and_coordinate_identity",
+      "snRNA_sample_modality_assay_and_source_material_identity",
+      "snRNA_reference_frozen_256_gene_detection",
+      "reference_type_state_support_and_effective_sample_size",
+      "no_unresolved_identity_conflict"
+    ],
+    "selection_algorithm": [
+      "maximize_unique_donors_with_payload_verified_T0_candidates",
+      "minimize_the_maximum_minus_minimum_selected_count_across_anterior_middle_and_posterior_blocks",
+      "break_remaining_global_assignment_ties_by_the_lexicographically_smallest_sorted_vector_of_selection_tiebreak_sha256_values"
+    ],
+    "ST_counts_expression_similarity_outcome_derived_annotations_predictions_or_loss_may_affect_selection": false,
+    "selected_assignment_receipt_must_be_hash_frozen_before_any_ST_count_access": true,
+    "post_target_QC_failure_action": "mark_selected_donor_nonevaluable_without_replacement",
+    "fewer_than_eight_evaluable_unique_donors_action": "pilot_ineligible_no_secondary_tier_top_up",
+    "unselected_same_donor_blocks_are_independent_replicates": false
+  },
+  "reference_specificity_diagnostic": {
+    "ordered_relationships": [
+      "T0_same_block",
+      "T2_same_donor_different_block",
+      "T3_wrong_donor_same_tissue_disease",
+      "T4_query_excluded_generic_atlas"
+    ],
+    "T0_existing_arm": "M3",
+    "T2_supplemental_label": "R_same_donor_wrong_block",
+    "T3_existing_arm": "M6",
+    "T4_existing_arm": "M7",
+    "T2_is_a_new_primary_arm": false,
+    "T2_may_enter_or_rescue_the_frozen_pilot_primary_decision": false,
+    "T2_may_be_silently_reinterpreted_as_M6": false,
+    "T2_run_order": "only_after_the_frozen_phase_1_decision_and_assignment_receipt",
+    "T2_query_contract": "keep_query_H_and_E_ST_rows_genes_decoder_exposure_and_preprocessing_fixed",
+    "T2_control_banks": "use_every_payload_qualified_alternate_same_donor_block_and_average_losses_within_donor",
+    "donors_without_an_eligible_alternate_bank": "exclude_from_T2_diagnostic_only_and_report_denominator",
+    "fixed_support_requirements": [
+      "cell_type_support",
+      "effective_sample_size",
+      "depth",
+      "quality",
+      "state_support",
+      "preprocessing"
+    ],
+    "same_block_reference_advantage_claim_requires": "L(M3_same_block)_less_than_L(R_same_donor_wrong_region_or_block)",
+    "spatialDLPFC_T2_identifiability": "alternate_ant_mid_post_banks_change_anatomical_region_and_block_together",
+    "permitted_spatialDLPFC_T2_claim": "same_donor_different_region_or_block_reference_penalty",
+    "pure_physical_block_specificity_claim": "unresolved_without_same_region_same_procedure_time_alternate_blocks",
+    "supplemental_inference": {
+      "donor_is_inference_unit": true,
+      "multiple_alternate_blocks_are_averaged_within_donor": true,
+      "minimum_favorable_donor_fraction": 0.7,
+      "paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "one_sided_exact_donor_sign_flip_p_max": 0.05,
+      "evidence_ceiling": "same_donor_different_region_or_block_reference_diagnostic"
+    }
+  },
+  "executable_compatibility_blocker": {
+    "query_specific_validator": {
+      "path": "src/heir/specimen_matching.py",
+      "sha256": "369cb5a2f617b1a05e8e5ad42e135a2d0cd660fa6613700c76fa9ea64b2c166b",
+      "status": "implemented_fail_closed"
+    },
+    "query_specific_validator_tests": {
+      "path": "tests/test_specimen_matching.py",
+      "sha256": "05602fa46c2dc36b80b9e564879bb1e4d87b8cc350559ff9390853d7aff96422",
+      "status": "covers_exact_and_adjacent_T0_all_nonprimary_tiers_identity_mismatches_overlap_unresolved_placeholders_assay_identity_adjacency_paper_only_target_selection_and_strict_TSV_loading"
+    },
+    "current_reference_specificity_utility": {
+      "path": "src/heir/evaluation/reference_specificity.py",
+      "sha256": "848060fbd0b984ff4c8d6a8b780e95279031eb82e21120b9f98bd8a7a8eaa77f",
+      "limitation": "matched_bank_selection_is_donor_level_and_not_query_parent_block_level"
+    },
+    "historical_reference_bank_schema": {
+      "path": "configs/schemas/reference_bank.schema.json",
+      "sha256": "d17c53d4da5c3bf88c8cb67f20d9cc2f5205c7349855b696632cd1c075c90dab",
+      "limitation": "no_query_specific_canonical_parent_block_or_independent_aliquot_identity"
+    },
+    "historical_donor_only_matcher_may_assign_primary_M3": false,
+    "required_before_execution": [
+      "versioned_payload_qualification_receipt",
+      "versioned_selected_assignment_receipt",
+      "wire_the_query_specific_validator_into_the_future_pilot_assignment_loader",
+      "verify_every_selected_assignment_against_the_hash_bound_validator",
+      "versioned_query_specific_T2_T3_T4_control_assignment_receipt"
+    ]
+  },
+  "cohort_roles_at_registration": {
+    "spatialDLPFC": {
+      "best_supported_tier": "T0_metadata_candidate",
+      "role": "priority_1_independent_regional_pilot",
+      "status": "zero_row_level_admitted_matches_pending_payload_and_aliquot_verification"
+    },
+    "HTAN_metastatic_breast_cancer": {
+      "best_supported_tier": "T1_same_lesion_procedure_separate_core",
+      "spatial_biopsies": 15,
+      "unique_evaluable_donors": "unverified_without_sample_level_manifest",
+      "role": "priority_2_secondary_close_match_transport",
+      "status": "no_local_sample_level_manifest_not_primary_eligible"
+    },
+    "GSE243280": {
+      "best_supported_tier": "T0_adjacent_curl_metadata_candidate",
+      "independent_deeply_profiled_blocks": 1,
+      "role": "priority_3_regional_and_later_cell_level_mechanism",
+      "status": "metadata_local_payloads_absent_not_population_inference_eligible_and_HEST_preservation_metadata_requires_resolution"
+    },
+    "NatCommun_E_MTAB_14560": {
+      "best_supported_tier": "T0_same_block",
+      "role": "development_calibration_failure_analysis_and_power_only",
+      "status": "outcome_exposed_not_independent"
+    },
+    "snPATHO": {
+      "best_supported_tier": "T0_or_close_match_candidate_structure",
+      "role": "runtime_cross_assay_and_reference_control_development_only",
+      "status": "three_opened_specimens_not_row_level_verified_for_confirmation"
+    },
+    "HESCAPE_and_HEST_lung": {
+      "best_supported_tier": "X_no_independent_same_specimen_dissociated_reference",
+      "role": "morphology_and_measurement_development_only",
+      "status": "excluded_from_matched_primary_arm"
+    }
+  },
+  "target_seal_and_authorization": {
+    "processed_Visium_object_checksum_bound_but_role_separated_or_ACL_sealed": false,
+    "current_exFAT_permissions_enforce_read_separation": false,
+    "future_target_requires_role_separated_ACL_capable_or_encrypted_storage_before_scoring": true,
+    "ST_target_access_authorized": false,
+    "biological_validation_authorized": false,
+    "target_free_metadata_H_and_E_and_reference_qualification_allowed": true,
+    "H_optimus_1_only": true,
+    "UNI2_h_prohibited": true,
+    "iterative_refinement_steps": 0,
+    "parent_model_or_primary_threshold_changes_from_this_addendum": "prohibited"
+  }
+}

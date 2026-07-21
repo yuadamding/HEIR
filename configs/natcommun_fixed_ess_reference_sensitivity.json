@@ -1,0 +1,120 @@
+{
+  "schema": "heir.natcommun_fixed_ess_reference_protocol.v3",
+  "analysis_scope": "validation_only_outcome_exposed_non_confirmatory",
+  "model_freeze": {
+    "architecture": "unchanged",
+    "image_encoder": "bioptimus/H-optimus-1",
+    "image_encoder_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "image_context_um": 112,
+    "gene_count": 256,
+    "latent_dimension": 20,
+    "epochs": 80,
+    "batch_size": 256,
+    "base_seed": 1729,
+    "loss": "unchanged_negative_binomial",
+    "fusion": "unchanged_componentwise_reference_product_of_experts",
+    "iterative_refinement": "prohibited",
+    "UNI2_h": "prohibited_not_run"
+  },
+  "reference_support": {
+    "coarse_type": "intersection_of_Level1_types_in_matched_and_every_same_indication_wrong_bank",
+    "global_type_coverage": "all_observed_matched_plus_wrong_Level1_type_union_is_reported_with_per_type_exclusion_reasons;_both_global_and_conditional_evaluable_fractions_are_reported",
+    "qc_thresholds": "pooled_within_type_medians_across_matched_and_all_wrong_banks",
+    "joint_strata": [
+      "total_UMI_below_or_above_within_type_median",
+      "n_features_RNA_below_or_above_within_type_median",
+      "percent_mt_below_or_above_within_type_median"
+    ],
+    "retained_strata": "intersection_present_in_matched_and_every_wrong_bank_within_type",
+    "type_mass": "uniform_across_evaluable_types_after_natural_support_contract_with_excluded_types_reported",
+    "within_type_stratum_mass": "QC_only_preparation_margin_then_joint_QC_state_geometric_barycenter_after_training_only_anchor_fit",
+    "single_bank_ESS": "derived_exactly_from_matched_component_masses_and_componentwise_ESS",
+    "generic_bank": "donor_equal_each_wrong_donor_component_contribution_has_single_component_ESS_divided_by_number_of_wrong_donors_then_contributions_are_pooled_within_training_anchor_into_one_model_component_so_model_richness_matches_single_banks",
+    "cell_weights": "strictly_positive_within_declared_common_support_row_order_and_cell_ID_invariant_anchor_proximity_tilt_with_exact_joint_QC_state_masses_and_componentwise_ESS",
+    "state_diversity": {
+      "representation": "frozen_training_only_fitted_20D_molecular_encoder",
+      "latent_capture": "read_only_sealed_five_call_encoder_hook_restored_before_scoring",
+      "anchor_fit": "query_excluded_other_donor_training_reference_cells_only_never_matched_heldout_donor_cells",
+      "anchor_initialization": "geometry_only_bank_equal_uniform_within_training_donor_type_row_order_and_cell_ID_invariant_canonical_weighted_kmeans",
+      "component_count": "largest_all_bank_estimable_K_among_three_then_two_with_each_candidate_anchor_fit_training_only;_matched_geometry_affects_eligibility_not_anchor_coordinates;_candidate_failures_reported;_fewer_than_two_is_unevaluable",
+      "natural_assignment": "hard_nearest_fixed_training_anchor_before_any_balancing;_distance_ties_fail_closed",
+      "no_manufactured_state": "every_retained_anchor_must_have_natural_support_in_matched_and_every_included_wrong_bank",
+      "natural_support": {
+        "minimum_cells_per_bank_type_component": 4,
+        "minimum_ESS_per_bank_type_component": 4.0,
+        "anchor_distance_quantile": 0.95,
+        "maximum_anchor_distance_ratio": 16.0,
+        "minimum_anchor_and_bank_component_separation_ratio": 0.05
+      },
+      "joint_QC_state_support": "intersection_of_QC_strata_present_in_every_bank_within_each_natural_type_component",
+      "minimum_joint_support_retention_fraction": 0.5,
+      "minimum_global_cell_coverage_fraction_per_bank": 0.5,
+      "minimum_global_evaluable_type_fraction_over_all_observed_types": 0.5,
+      "conditional_evaluable_type_fraction_over_QC_plan_types": "reported_without_replacing_global_coverage",
+      "component_mass": "within_type_geometric_barycenter_of_unweighted_natural_cell_count_state_fractions_within_declared_common_joint_support_not_forced_uniform;_type_mass_uniform_across_evaluable_types",
+      "joint_QC_mass": "geometric_barycenter_of_unweighted_natural_cell_count_QC_fractions_within_each_component_and_declared_common_support",
+      "componentwise_ESS": "largest_common_proximity_limited_feasible_ESS_for_matched_and_each_wrong_bank_and_donor_equal_generic_pool",
+      "generic_component_support": "each_wrong_donor_generic_contribution_retains_ESS_at_least_4_and_pooled_component_ESS_exactly_matches_single_banks",
+      "proximity_tilt": {
+        "score": "within_joint_QC_stratum_min_max_normalized_distance_to_fixed_training_anchor",
+        "maximum_tilt": 8.0,
+        "minimum_relative_positive_weight": 0.0001,
+        "maximum_weighted_mean_shift_ratio": 4.0,
+        "audited_without_additional_post_hoc_thresholds": [
+          "maximum_conditional_weight_share",
+          "effective_cell_fraction",
+          "weighted_to_maximum_entropy_variance_trace_ratio"
+        ]
+      },
+      "component_geometry": "donor_specific_means_and_variances_retained_only_after_common_natural_support_QC_mass_and_component_ESS_controls;_generic_donor_contributions_are_pooled_per_training_anchor_with_between_donor_variance_included",
+      "model_component_richness": "exactly_matched_per_evaluable_type_and_training_anchor_across_matched_each_wrong_and_pooled_generic",
+      "scope_boundary": "matches_naturally_supported_component_identity_richness_within_type_state_mass_QC_distribution_and_componentwise_ESS;_does_not_force_absent_states",
+      "maximum_components_per_type": 3,
+      "minimum_components_per_type": 2,
+      "hard_subsampling": false,
+      "support_restriction": "explicit_conditional_common_support_zero_weight_outside_support_with_counts_and_reasons_reported;_no_random_or_count_equalizing_subsampling",
+      "all_within_support_weights_positive": true
+    },
+    "mixture_fit": "hard_natural_training_anchor_components_with_positive_joint_QC_state_weights",
+    "adapter_call_audit": "exact_reconstruction_of_complete_input_and_retained_counts_unique_source_and_model_component_sets_cells_masses_ESS_minima_and_model_richness",
+    "hard_subsampling": false,
+    "support_restriction_used": true,
+    "natural_training_distribution_changed": false,
+    "age_and_DV200": "reported_but_not_balanced_because_donor_constant",
+    "percent_ribo": "reported_but_not_balanced_because_zero"
+  },
+  "target_boundary": {
+    "prepare_uses": "baseline_public_folds_and_raw_source_reference_QC_only",
+    "fit_predict_accepts_heldout_ST": false,
+    "global_prediction_validation_before_any_target": true,
+    "immediate_per_donor_revalidation": true,
+    "target_may_update_prediction_weight_or_threshold": false
+  },
+  "diagnostic_receipt_precision": {
+    "field": "gate3_supported_composition_mass",
+    "reason": "the_frozen_runner_derives_eligibility_in_float64_but_stores_mass_in_float32",
+    "storage": "exact_float64_recomputation_from_frozen_query_H_composition_and_type_support_mask",
+    "existing_eligibility_must_match_float64_threshold": true,
+    "eligibility_or_model_rate_changed": false,
+    "scientific_endpoint_used_by_this_sensitivity": false
+  },
+  "endpoint": {
+    "metric": "negative_binomial_deviance",
+    "aggregation": "spots_within_section_then_sections_within_donor_then_donors",
+    "comparisons": [
+      "fixed_M3_vs_equal_mean_wrong_M6",
+      "fixed_M3_vs_fixed_generic_M7"
+    ],
+    "positive_effect": "control_deviance_minus_fixed_M3_deviance",
+    "wrong_bank_aggregation": "equal_mean_across_same_indication_wrong_donor_losses",
+    "inference": "exact_one_sided_paired_donor_sign_flip"
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_visible_GPUs": 1,
+    "maximum_GPU_memory_fraction": 0.60,
+    "outer_folds_serial": true,
+    "swap_permitted": false,
+    "out_of_memory_action": "fail_closed_no_identity_change"
+  }
+}

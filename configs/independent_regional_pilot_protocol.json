@@ -1,0 +1,381 @@
+{
+  "schema": "heir.independent_regional_pilot_protocol.v1",
+  "protocol_date": "2026-07-15",
+  "source_review": {
+    "name": "Revised evidence hierarchy and external-replication pilot plan",
+    "sha256": "c8daafb697c40d49d10ac7df2059bbf9fa3553fdaf73e916e98129ebb701b378"
+  },
+  "definitive_protocol_relationship": {
+    "path": "configs/independent_regional_confirmation_protocol.json",
+    "sha256": "6033a2d7db6cb5095d014f984c6f6519a4a7c073e41b627379a47525236b668a",
+    "amends_definitive_protocol": false,
+    "definitive_18_to_24_donor_standard_unchanged": true,
+    "pilot_results_may_be_pooled_with_definitive_confirmation": false
+  },
+  "purpose": "prospectively_frozen_external_replication_pilot_of_reference_augmentation_and_spatial_H_and_E_attribution",
+  "evidence_ceiling": [
+    "independent_pilot_replication",
+    "not_definitive_population_confirmation",
+    "not_full_inequality_confirmation",
+    "not_pan_tissue_generalization",
+    "not_cell_level_validation"
+  ],
+  "execution": {
+    "status": "blocked_pending_spatialDLPFC_H_and_E_Visium_acquisition_and_exact_block_qualification",
+    "authorized": false,
+    "selected_cohort": null,
+    "score_target_open_authorized": false,
+    "candidate": "spatialDLPFC",
+    "minimum_exact_tri_modal_donors_before_authorization": 8,
+    "blockers": [
+      "high_resolution_H_and_E_payload_not_local",
+      "Visium_prediction_target_not_local_or_checksum_sealed",
+      "snRNA_archive_local_and_integrity_verified_but_reference_not_extracted_or_qualified",
+      "metadata_routing_requires_payload_crosscheck_and_two_Br2720_alignment_filename_typos_require_resolution",
+      "frozen_256_gene_coverage_and_reference_support_not_qualified"
+    ]
+  },
+  "frozen_model_identity": {
+    "source": "inherit_exactly_from_definitive_protocol",
+    "image_encoder": "bioptimus/H-optimus-1",
+    "image_encoder_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "gene_panel": "unchanged_frozen_256_gene_order",
+    "molecular_latent_dimension": 20,
+    "H_and_E_context_um": 112,
+    "decoder": "unchanged_frozen_training_donor_ST_decoder",
+    "fusion": "unchanged_one_step_componentwise_diagonal_Gaussian_product_of_experts",
+    "training_schedule": "unchanged",
+    "reference_bank_rules": "unchanged",
+    "decision_thresholds": "unchanged_for_shared_endpoints",
+    "iterative_refinement_steps": 0,
+    "fine_tuning": "prohibited",
+    "UNI2_h": "prohibited_not_run",
+    "candidate_outcomes_may_change_identity": false
+  },
+  "execution_identity": {
+    "kind": "frozen_leave_one_donor_out_training_and_scoring_procedure",
+    "fully_pretrained_hash_bound_HEIR_checkpoint_available": false,
+    "heldout_donor_ST_role": "score_only_after_fold_specific_seal",
+    "training_donor_ST_role": "fit_frozen_decoder_and_procedure_only",
+    "run_once_meaning": "one_registered_pipeline_execution_with_all_prespecified_LODO_folds_not_one_literal_model_fit"
+  },
+  "cohort_entry_contract": {
+    "one_tissue_or_indication": "human_DLPFC_neurotypical_control",
+    "independent_donors_minimum": 8,
+    "independent_donors_maximum": 12,
+    "registered_query_sections_per_donor_minimum": 1,
+    "multiple_query_sections_preferred": true,
+    "exact_same_block_or_same_specimen_H_and_E_ST_sc_or_snRNA": "required",
+    "reference_modality": "independently_verified_snRNA_for_spatialDLPFC",
+    "outcomes_unopened_by_HEIR_before_pilot_lock": true,
+    "frozen_256_gene_panel_adequately_measured": "required",
+    "minimum_qualified_reference_cells_per_retained_coarse_type": 50,
+    "fewer_than_eight_exact_triples_action": "pilot_ineligible_stop_without_target_access",
+    "different_anterior_middle_or_posterior_blocks_are_interchangeable": false,
+    "different_blocks_are_measurement_replicates": false
+  },
+  "pre_outcome_qualification": {
+    "sample_identity": [
+      "donor",
+      "anatomical_block",
+      "lesion_or_region",
+      "collection_time",
+      "assay_modality",
+      "section_order",
+      "specimen_relationship",
+      "cross_donor_and_cross_block_error_check"
+    ],
+    "reference_identity": [
+      "whole_cell_or_nucleus",
+      "assay_chemistry",
+      "cells_or_nuclei_per_donor_and_type",
+      "gene_detection",
+      "library_depth",
+      "quality",
+      "mitochondrial_fraction",
+      "missing_types",
+      "state_diversity",
+      "effective_sample_size"
+    ],
+    "registration": [
+      "spot_coordinate_transform",
+      "blinded_visual_review",
+      "tissue_mask_overlap",
+      "orientation_check",
+      "scale_check",
+      "physical_distance_calibration"
+    ],
+    "ST_reliability": [
+      "count_depth",
+      "gene_detection",
+      "split_half_reliability",
+      "program_reliability",
+      "replicate_consistency_when_available"
+    ],
+    "unsupported_type_substitution": "prohibited"
+  },
+  "evidence_hierarchy": {
+    "pilot_primary_external_replication": [
+      "C1_M3_less_than_M0",
+      "C2_M3_paired_less_than_M4_shuffled_or_offset"
+    ],
+    "full_core_regional_hypothesis": [
+      "C3_valid_ST_floor_less_than_M3",
+      "C1_M3_less_than_M0",
+      "C2_spatial_attribution"
+    ],
+    "pilot_may_authorize_full_core_regional_hypothesis": false,
+    "strong_multimodal_synergy": "C6_M3_less_than_M1",
+    "continuous_state_inference": "C5_M3_supported_less_than_M2_supported",
+    "personalized_matched_reference_value": [
+      "M3_matched_less_than_M6_wrong",
+      "M3_matched_less_than_M7_generic"
+    ],
+    "high_fidelity_state_reconstruction": [
+      "reliability_adjusted_variance",
+      "calibration",
+      "covariance_preservation",
+      "rare_state_recall",
+      "dynamic_range",
+      "continuous_state_advantage"
+    ],
+    "stronger_tier_failure_may_erase_lower_tier_pass": false
+  },
+  "primary_estimand": {
+    "phase_1_contrast": "L(M0)-L(M3)",
+    "phase_2_contrast": "L(M4)-L(M3)",
+    "loss": "donor_and_section_balanced_heldout_negative_binomial_deviance",
+    "aggregation": "equal_sections_within_donor_then_equal_donors",
+    "same_target_rows_genes_normalization_decoder_exposure_and_aggregation": true
+  },
+  "donor_level_power_planning": {
+    "purpose": "justify_but_not_amend_the_sealed_definitive_18_to_24_donor_range",
+    "development_source": {
+      "report_path": "/mnt/seagate/HEIR_runs/natcommun_generative_development/report.json",
+      "report_sha256": "bf3144cf22405752488509dbb1a65b573967fe1b14110881020787187828cf29",
+      "fit_predict_manifest_path": "/mnt/seagate/HEIR_runs/natcommun_generative_development/fit_predict_manifest.json",
+      "fit_predict_manifest_sha256": "cb7ebdf9e22090a046937204993a7b2aa3ac1ba2d4c434883e43ed45d1e826ca",
+      "outcome_exposed_development_only": true,
+      "donors": 13,
+      "donor_balanced_M0_loss": 2.5280939211,
+      "mean_absolute_M0_minus_M3": 0.2050183904,
+      "aggregate_relative_reduction": 0.081096034,
+      "paired_absolute_contrast_SD": 0.2236079978,
+      "paired_absolute_contrast_SD_90_percent_upper_bound": 0.3085154
+    },
+    "planning_alternative": {
+      "relative_reduction": 0.05,
+      "absolute_M0_minus_M3": 0.1264046961,
+      "reason": "smallest_effect_that_can_satisfy_the_frozen_5_percent_materiality_gate_and_38.3_percent_below_the_exposed_8.11_percent_estimate"
+    },
+    "working_model": "paired_t_normal_theory_sensitivity_not_full_joint_gate_power",
+    "power_by_analyzable_donors": [
+      {
+        "donors": 18,
+        "one_sided_alpha_0.05_observed_SD": 0.744,
+        "positive_95_percent_interval_observed_SD": 0.619,
+        "one_sided_alpha_0.05_conservative_SD": 0.51,
+        "positive_95_percent_interval_conservative_SD": 0.375
+      },
+      {
+        "donors": 21,
+        "one_sided_alpha_0.05_observed_SD": 0.804,
+        "positive_95_percent_interval_observed_SD": 0.693,
+        "one_sided_alpha_0.05_conservative_SD": 0.567,
+        "positive_95_percent_interval_conservative_SD": 0.432
+      },
+      {
+        "donors": 24,
+        "one_sided_alpha_0.05_observed_SD": 0.851,
+        "positive_95_percent_interval_observed_SD": 0.756,
+        "one_sided_alpha_0.05_conservative_SD": 0.619,
+        "positive_95_percent_interval_conservative_SD": 0.485
+      }
+    ],
+    "pilot_positive_95_percent_interval_power_observed_SD": {
+      "8_donors": 0.282,
+      "10_donors": 0.359,
+      "12_donors": 0.431
+    },
+    "interpretation": [
+      "18_to_24_has_a_nominal_directional_power_rationale_but_is_not_conservatively_80_percent_powered_for_full_Gate_A",
+      "at_a_true_5_percent_effect_the_observed_effect_exceeds_the_5_percent_gate_only_about_half_the_time",
+      "paired_test_power_is_an_upper_bound_on_full_Gate_A_power_because_direction_fraction_sign_flip_and_stratum_rules_are_additional",
+      "24_analyzable_donors_is_preferred_within_the_unchanged_definitive_range",
+      "12_analyzable_donors_is_preferred_within_the_nondefinitive_pilot_range"
+    ],
+    "limitations": [
+      "13_donor_outcome_exposed_source",
+      "pooled_indications_not_one_tissue",
+      "influential_L1_donor_and_skew",
+      "uncertain_transport_of_M0_loss_scale_and_variance_to_DLPFC",
+      "normal_theory_working_model",
+      "mean_and_SD_do_not_identify_exact_sign_flip_or_full_joint_gate_power"
+    ]
+  },
+  "arms": {
+    "M0": "paired_H_and_E_only",
+    "M1": "matched_snRNA_reference_only_diagnostic",
+    "M2": "H_and_E_type_or_composition_routing_plus_matched_type_means_diagnostic",
+    "M3": "paired_H_and_E_plus_matched_multistate_snRNA_reference",
+    "M4": "within_donor_section_and_composition_stratum_shuffled_H_and_E_plus_matched_reference",
+    "M6": "paired_H_and_E_plus_fixed_support_wrong_donor_reference_diagnostic",
+    "M7": "paired_H_and_E_plus_query_excluded_generic_reference_diagnostic",
+    "F_ST": "valid_independent_spatial_replicate_or_validated_count_split_floor_when_available",
+    "S1": "matched_independent_ST_reference_only_mechanism_diagnostic_not_floor",
+    "S3": "paired_H_and_E_plus_matched_independent_ST_reference",
+    "S4": "shuffled_H_and_E_plus_matched_independent_ST_reference"
+  },
+  "ordered_execution": {
+    "phase_0": "qualify_and_freeze_exact_same_block_subset_before_ST_target_access",
+    "phase_1": "run_M0_and_M3_once",
+    "phase_1_pass": {
+      "minimum_relative_reduction": 0.05,
+      "minimum_favorable_donor_fraction": 0.70,
+      "paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "one_sided_exact_donor_sign_flip_p_max": 0.05,
+      "minimum_prespecified_stratum_relative_reduction": -0.02
+    },
+    "phase_1_failure_action": "report_external_core_effect_not_replicated_stop_claim_progression",
+    "phase_2_requires_phase_1_decision": true,
+    "phase_2_requires_phase_1_pass": false,
+    "phase_2": "run_M4_and_physical_offset_spatial_attribution",
+    "phase_2_pass": {
+      "minimum_favorable_donor_fraction": 0.70,
+      "paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "one_sided_exact_donor_sign_flip_p_max": 0.05,
+      "offset_um": [
+        0,
+        55,
+        110,
+        220,
+        440
+      ],
+      "offset_loss_order": "strictly_increasing_donor_balanced_loss",
+      "residual_alignment_positive_donor_fraction_minimum": 0.70
+    },
+    "phase_3": "evaluate_valid_ST_floor_on_same_target_if_available_otherwise_mark_unresolved",
+    "phase_4": "report_M3_vs_M1_strong_synergy_diagnostic",
+    "phase_5": "report_M3_supported_vs_M2_supported_continuous_state_diagnostic",
+    "phase_6": "report_fixed_support_M3_matched_vs_M6_wrong_and_M7_generic_personalization_diagnostics",
+    "matched_ST_mechanism": "run_S1_S3_S4_only_where_an_independent_spatial_reference_is_valid"
+  },
+  "ST_floor": {
+    "preference_order": [
+      "registered_technical_replicate",
+      "independently_registered_serial_spatial_section",
+      "validated_negative_binomial_count_split_oracle"
+    ],
+    "same_target_as_M3": true,
+    "technical_replicate_mapping": "identical_registered_spatial_units_required_for_exact_row_comparison",
+    "serial_section_mapping": "target_blind_prespecified_common_regions_or_units_frozen_before_expression_access",
+    "serial_section_claims_identical_spot_observations": false,
+    "target_expression_similarity_may_define_registration": false,
+    "unavailable_conclusion": "left_hand_inequality_unresolved_not_failed",
+    "S1_is_floor": false
+  },
+  "molecular_quality_reporting": {
+    "mean_loss_and_state_reconstruction_reported_separately": true,
+    "definitive_high_fidelity_thresholds_are_diagnostics_not_pilot_primary_gates": true,
+    "high_fidelity_threshold_source": "definitive_protocol_Gate_F",
+    "mean_loss_pass_with_high_fidelity_failure_conclusion": "conditional_mean_prediction_only_not_heterogeneity_recovery",
+    "high_fidelity_failure_may_negate_C1_or_C2_pilot_result": false,
+    "minimal_catastrophe_criteria_status": "claim_limiting_diagnostics_not_pilot_primary_pass_gates_no_new_thresholds_invented"
+  },
+  "spatialDLPFC_acquisition": {
+    "local_root": "/mnt/seagate/HnE/spatialDLPFC",
+    "local_support_inventory": {
+      "files": 227,
+      "bytes": 386759455,
+      "high_resolution_TIFFs": 0,
+      "molecular_expression_objects": 0
+    },
+    "metadata_routing_evidence": {
+      "rna_seq_csv": {
+        "path": "/mnt/seagate/HnE/spatialDLPFC/processed-data/synapse_upload/04-nda/rna_seq.csv",
+        "bytes": 108880,
+        "sha256": "902a788af3fe35ed2d0e602dcced4a15d3853c1234f3e8047dfcbcb13ad8558c"
+      },
+      "imaging_sample_info_csv": {
+        "path": "/mnt/seagate/HnE/spatialDLPFC/processed-data/synapse_upload/04-nda/imaging_sample_info.csv",
+        "bytes": 47610,
+        "sha256": "69f90e4d3365979a3211e1935f77e758731b918a3d8d6bb5a7b51b102abd6a86"
+      },
+      "candidate_routing_manifest": {
+        "path": "manifests/spatialdlpfc_pilot_routing.tsv",
+        "sha256": "47e7830e1aa2263ddfecf0dff8bb10a5bd399638ae0ed3753be72fa87e1ca2a8"
+      },
+      "same_block_candidate_rows": 19,
+      "candidate_donors": 10,
+      "Br2720_alignment_filename_typo_rows": 2
+    },
+    "required_payloads": [
+      "high_resolution_H_and_E",
+      "raw_or_minimally_processed_Visium_counts",
+      "snRNA_counts_and_cell_metadata"
+    ],
+    "official_processed_payloads": {
+      "Visium_SpatialExperiment": {
+        "url": "https://www.dropbox.com/s/y2ifv5v8g68papf/spe_filtered_final_with_clusters_and_deconvolution_results.rds?dl=1",
+        "expected_bytes": 1458409716,
+        "local_path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/opaque/spe_filtered_final_with_clusters_and_deconvolution_results.rds",
+        "status_at_registration": "not_downloaded"
+      },
+      "snRNA_SingleCellExperiment": {
+        "url": "https://www.dropbox.com/s/5919zt00vm1ht8e/sce_DLPFC_annotated.zip?dl=1",
+        "expected_bytes": 4035795545,
+        "local_path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/opaque/sce_DLPFC_annotated.zip",
+        "status_at_registration": "downloaded_opaque_integrity_verified_not_extracted",
+        "actual_bytes": 4035795545,
+        "sha256": "15176538edd4d632fb19376229fd83b9446b90cfbc7cf0de7fbc599443a49c75",
+        "archive_members_verified": [
+          "sce_DLPFC_annotated/se.rds",
+          "sce_DLPFC_annotated/assays.h5"
+        ]
+      }
+    },
+    "raw_payload_access": {
+      "provider": "Globus_or_NIMH_Data_Archive_Study_2619",
+      "spatial_collection_UUID": "6cd81564-ed47-11ec-8358-cd84b862b754",
+      "snRNA_collection_UUID": "6f9322c4-5eaf-11ed-b0b5-bfe7e7197080",
+      "local_transfer_status": "blocked_no_Globus_authentication_and_destination_configuration",
+      "high_resolution_H_and_E_must_not_be_replaced_by_support_thumbnails": true
+    },
+    "downloaded_payloads_may_be_loaded_before_subset_freeze": false,
+    "opaque_downloads_must_be_checksum_bound": true,
+    "post_registration_acquisition_receipt": "manifests/spatialdlpfc_pilot_acquisition_receipt.json",
+    "routing_manifest_status": "metadata_frozen_candidate_payload_and_visual_qualification_pending",
+    "target_seal_status": "not_created"
+  },
+  "target_boundary": {
+    "stage_1_before_any_ST_count_access": [
+      "metadata_only_donor_and_block_routing",
+      "opaque_payload_checksum_sealing",
+      "H_and_E_registration",
+      "reference_qualification",
+      "freeze_exact_donor_section_subset"
+    ],
+    "stage_2_after_full_protocol_lock_QC_only_ST_access": [
+      "count_depth",
+      "gene_detection",
+      "split_half_reliability",
+      "program_reliability",
+      "write_restricted_QC_receipt",
+      "no_model_gene_state_threshold_or_sample_selection"
+    ],
+    "routing_uses_metadata_only": true,
+    "heldout_donor_ST_counts_are_score_only_after_fold_seal": true,
+    "training_donor_ST_counts_may_fit_frozen_LODO_procedure": true,
+    "heldout_ST_may_select_donors_blocks_genes_states_or_thresholds": false,
+    "one_registered_execution_of_frozen_M0_and_M3_LODO_pipeline": true,
+    "pilot_failure_may_trigger_model_revision_for_same_targets": false
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_visible_GPUs": 1,
+    "maximum_GPU_memory_fraction": 0.60,
+    "outer_folds_serial": true,
+    "swap_permitted": false,
+    "out_of_memory_action": "fail_closed_without_identity_change"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "heir.gse243280_metadata_receipt.v1",
+  "receipt_date": "2026-07-16",
+  "scope": "target_free_public_metadata_only",
+  "expression_or_spatial_target_downloaded_or_opened": false,
+  "GEO_family_metadata": {
+    "soft": {
+      "path": "/mnt/seagate/HnE/GSE243280/metadata/GSE243280_family.soft.gz",
+      "bytes": 3495,
+      "sha256": "ca00d588e684b9519902488bd955b2da440fedf5773bedd7c48e4fb71049bff3"
+    },
+    "MINiML": {
+      "path": "/mnt/seagate/HnE/GSE243280/metadata/GSE243280_family.xml.tgz",
+      "bytes": 3992,
+      "sha256": "bc89bc3de7ec89b1f201d698c337fbdae1a13c29bd5c7479466b000a516f8037"
+    }
+  },
+  "paper_evidence": {
+    "citation": "Janesick et al., Nature Communications 14, 8353 (2023)",
+    "doi": "10.1038/s41467-023-43458-x",
+    "url": "https://www.nature.com/articles/s41467-023-43458-x",
+    "method_locator": "Methods: Tissue handling and preparation; Sample 1 FFPE curls and serial Visium/Xenium sections",
+    "locally_checksum_bound": false,
+    "paper_level_evidence_alone_can_admit_T0": false
+  },
+  "exact_mechanism_candidate": {
+    "physical_sample": "Sample_1_single_FFPE_breast_cancer_block",
+    "reference": {
+      "GEO_sample": "GSM7782698",
+      "modality": "Chromium_Single_Cell_Gene_Expression_Flex_scFFPE_seq",
+      "source_material": "two_25_um_curls_pooled_as_one_replicate",
+      "BioSample": "SAMN37400435",
+      "SRA_experiment": "SRX21781540"
+    },
+    "regional_truth": {
+      "GEO_sample": "GSM7782699",
+      "modality": "Visium_CytAssist",
+      "source_material": "5_um_serial_section_from_Sample_1",
+      "BioSample": "SAMN37400434",
+      "SRA_experiment": "SRX21781541"
+    },
+    "cell_resolved_truth": {
+      "GEO_samples": [
+        "GSM7780153",
+        "GSM7780154"
+      ],
+      "modality": "Xenium_replicate_sections_from_Sample_1"
+    },
+    "claimed_match_tier": "T0_adjacent_curl_same_parent_specimen",
+    "verification_status": "claimed_T0_metadata_candidate_payload_and_adjacency_unverified",
+    "population_inference_eligible": false,
+    "role": "regional_mechanism_and_later_cell_level_mechanism_only"
+  },
+  "metadata_conflict": {
+    "HEST_sample_id": "NCBI776",
+    "HEST_preservation_value": "Fresh_Frozen",
+    "GEO_and_paper_description": "FFPE_block_with_adjacent_scFFPE_curls_and_Visium_Xenium_sections",
+    "action": "do_not_route_HEST_NCBI776_as_verified_T0_until_identity_and_preservation_conflict_is_resolved"
+  },
+  "current_status": {
+    "local_H_and_E_or_spatial_payload": false,
+    "local_scFFPE_reference_payload": false,
+    "row_level_payload_identity_verified": false,
+    "biological_execution_authorized": false,
+    "next_safe_step": "acquire_and_checksum_only_H_and_E_and_sample_metadata_then_freeze_file_level_assignment_before_any_expression_target"
+  }
+}

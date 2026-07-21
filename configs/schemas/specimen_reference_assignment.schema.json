@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heir.local/schemas/specimen_reference_assignment.schema.json",
+  "title": "HEIR query-specific specimen reference assignment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assignment_id",
+    "query_id",
+    "query_donor_id",
+    "query_specimen_id",
+    "query_block_id",
+    "query_he_section_id",
+    "query_st_section_id",
+    "reference_sample_id",
+    "reference_donor_id",
+    "reference_specimen_id",
+    "reference_block_id",
+    "reference_aliquot_or_curl_id",
+    "reference_modality",
+    "claimed_match_tier",
+    "verified_match_tier",
+    "primary_eligible",
+    "primary_selected",
+    "payload_identity_verified",
+    "registration_verified",
+    "verification_status",
+    "target_access_state"
+  ],
+  "properties": {
+    "assignment_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_donor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_procedure_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_region": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_specimen_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_block_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_he_section_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_st_section_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_capture_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_donor_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_specimen_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_block_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_aliquot_or_curl_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_modality": {
+      "enum": [
+        "scRNA-seq",
+        "snRNA-seq",
+        "scFFPE-seq"
+      ]
+    },
+    "claimed_match_tier": {
+      "$ref": "#/$defs/matchTier"
+    },
+    "verified_match_tier": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/matchTier"
+        },
+        {
+          "const": "unresolved"
+        }
+      ]
+    },
+    "primary_eligible": {
+      "type": "boolean"
+    },
+    "primary_selected": {
+      "type": "boolean"
+    },
+    "payload_identity_verified": {
+      "type": "boolean"
+    },
+    "registration_verified": {
+      "type": "boolean"
+    },
+    "chain_of_custody_verified": {
+      "type": "boolean"
+    },
+    "canonical_parent_specimen_id_verified": {
+      "type": "boolean"
+    },
+    "reference_modality_verified": {
+      "type": "boolean"
+    },
+    "reference_assay_chemistry": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference_assay_chemistry_verified": {
+      "type": "boolean"
+    },
+    "independent_reference_material": {
+      "type": "boolean"
+    },
+    "adjacency_verified": {
+      "type": "boolean"
+    },
+    "contains_registered_query_material": {
+      "type": "boolean"
+    },
+    "selection_uses_query_truth": {
+      "type": "boolean"
+    },
+    "paper_level_evidence_only": {
+      "type": "boolean"
+    },
+    "metadata_evidence_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "metadata_evidence_sha256": {
+      "type": "string",
+      "minLength": 64
+    },
+    "metadata_row_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verification_status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_access_state": {
+      "type": "string",
+      "minLength": 1
+    },
+    "selection_tiebreak_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "same_donor_wrong_block_reference_candidates": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exclusion_reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "matchTier": {
+      "enum": [
+        "T0_exact_same_block_independent_aliquot",
+        "T0_adjacent_curl_same_parent_specimen",
+        "T1_same_lesion_procedure_separate_core",
+        "T2_same_donor_different_block",
+        "T3_wrong_donor_same_tissue_disease",
+        "T4_query_excluded_generic_atlas",
+        "X_unverified_same_tissue_or_integrated"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "primary_eligible": {
+            "const": true
+          }
+        },
+        "required": [
+          "primary_eligible"
+        ]
+      },
+      "then": {
+        "required": [
+          "chain_of_custody_verified",
+          "canonical_parent_specimen_id_verified",
+          "reference_modality_verified",
+          "reference_assay_chemistry",
+          "reference_assay_chemistry_verified",
+          "independent_reference_material",
+          "contains_registered_query_material",
+          "selection_uses_query_truth",
+          "paper_level_evidence_only"
+        ],
+        "properties": {
+          "verified_match_tier": {
+            "enum": [
+              "T0_exact_same_block_independent_aliquot",
+              "T0_adjacent_curl_same_parent_specimen"
+            ]
+          },
+          "payload_identity_verified": {
+            "const": true
+          },
+          "registration_verified": {
+            "const": true
+          },
+          "chain_of_custody_verified": {
+            "const": true
+          },
+          "canonical_parent_specimen_id_verified": {
+            "const": true
+          },
+          "reference_modality_verified": {
+            "const": true
+          },
+          "reference_assay_chemistry_verified": {
+            "const": true
+          },
+          "independent_reference_material": {
+            "const": true
+          },
+          "contains_registered_query_material": {
+            "const": false
+          },
+          "selection_uses_query_truth": {
+            "const": false
+          },
+          "paper_level_evidence_only": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "primary_selected": {
+            "const": true
+          }
+        },
+        "required": [
+          "primary_selected"
+        ]
+      },
+      "then": {
+        "properties": {
+          "primary_eligible": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "primary_eligible": {
+            "const": true
+          },
+          "verified_match_tier": {
+            "const": "T0_adjacent_curl_same_parent_specimen"
+          }
+        },
+        "required": [
+          "primary_eligible",
+          "verified_match_tier"
+        ]
+      },
+      "then": {
+        "required": [
+          "adjacency_verified"
+        ],
+        "properties": {
+          "adjacency_verified": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "x-heir-invariants": [
+    "primary assignments require equal query and reference donor IDs",
+    "primary assignments require equal canonical parent specimen and block IDs",
+    "reference aliquot or curl must be independent of and nonoverlapping with query H&E/ST material",
+    "paper-level pairing alone cannot verify a row",
+    "assignment is query-specific and cannot be inferred from a bank-wide role scalar"
+  ],
+  "x-heir-tsv-note": "TSV boolean strings must be explicitly coerced to JSON booleans before schema validation; unresolved or missing flags fail the executable validator"
+}

@@ -1,0 +1,54 @@
+{
+  "schema": "heir.spatialdlpfc_metadata_identity_receipt.v1",
+  "receipt_date": "2026-07-16",
+  "scope": "target_free_metadata_identity_resolution_only",
+  "prediction_target_opened": false,
+  "expression_payload_opened": false,
+  "source_metadata": {
+    "imaging_sample_info": {
+      "path": "/mnt/seagate/HnE/spatialDLPFC/processed-data/synapse_upload/04-nda/imaging_sample_info.csv",
+      "sha256": "69f90e4d3365979a3211e1935f77e758731b918a3d8d6bb5a7b51b102abd6a86"
+    },
+    "rna_seq": {
+      "path": "/mnt/seagate/HnE/spatialDLPFC/processed-data/synapse_upload/04-nda/rna_seq.csv",
+      "sha256": "902a788af3fe35ed2d0e602dcced4a15d3853c1234f3e8047dfcbcb13ad8558c"
+    },
+    "genomics_subject": {
+      "path": "/mnt/seagate/HnE/spatialDLPFC/processed-data/synapse_upload/04-nda/genomics_subject.csv",
+      "sha256": "1e243b20aabcfbe92a7ec1a9dd3f87e7888978ec103001c8b7c5f10708898430",
+      "metadata_row_number": 3,
+      "subject_key": "NDAR_INVGP756DP1",
+      "subject_id": "Br2720"
+    }
+  },
+  "alignment_files": [
+    {
+      "path": "/mnt/seagate/HnE/spatialDLPFC/raw-data/images_raw_align_json/round2/V10U24-091-B1_Br2770_mid.json",
+      "sha256": "a7ff4bea7b3c708e3d2924f5e16d2b77c619f2aaeb1232cc12ecf85e2179dfca",
+      "embedded_serialNumber": "V10U24-091",
+      "embedded_area": "B1",
+      "embedded_checksum": "d2a1979208ebf77da848ba1ea7dd6829",
+      "expected_capture_id": "V10U24-091_B1"
+    },
+    {
+      "path": "/mnt/seagate/HnE/spatialDLPFC/raw-data/images_raw_align_json/round2/V10U24-091-C1_Br2770_post.json",
+      "sha256": "c8611373285177d47a1e47741c9c09bc435e024cbd2db062b3be0d301281e443",
+      "embedded_serialNumber": "V10U24-091",
+      "embedded_area": "C1",
+      "embedded_checksum": "86ecf5a508a547f3c1873e60153580d8",
+      "expected_capture_id": "V10U24-091_C1"
+    }
+  ],
+  "conclusion": {
+    "Br2770_filename_token": "documented_filename_typo_consistent_with_Br2720_capture_serial_area_and_subject_metadata",
+    "metadata_identity_conflict_resolved": true,
+    "payload_level_exact_specimen_match_verified": false,
+    "primary_arm_eligible": false,
+    "remaining_requirements": [
+      "high_resolution_H_and_E_payload_identity_and_registration",
+      "raw_or_minimally_processed_Space_Ranger_payload_identity",
+      "snRNA_reference_sample_and_independent_aliquot_provenance",
+      "frozen_gene_panel_and_reference_support_qualification"
+    ]
+  }
+}

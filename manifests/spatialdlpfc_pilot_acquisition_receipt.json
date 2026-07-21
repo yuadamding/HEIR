@@ -1,0 +1,66 @@
+{
+  "schema": "heir.spatialdlpfc_pilot_acquisition_receipt.v1",
+  "receipt_date": "2026-07-15",
+  "pilot_protocol": {
+    "path": "configs/independent_regional_pilot_protocol.json",
+    "sha256": "f483c0d40e8e29746cb7e4694ca8a3666e2d7196acc7ab2c02e3cc6c0c9b20e5",
+    "frozen_before_Visium_download": true
+  },
+  "source_review_sha256": "c8daafb697c40d49d10ac7df2059bbf9fa3553fdaf73e916e98129ebb701b378",
+  "operations_performed": [
+    "download_opaque_payload",
+    "verify_exact_byte_count",
+    "compute_SHA256",
+    "test_snRNA_ZIP_container_integrity"
+  ],
+  "operations_not_performed": [
+    "load_or_extract_Visium_RDS",
+    "inspect_ST_counts_or_outcome_derived_metadata",
+    "extract_or_load_snRNA_expression",
+    "select_donors_blocks_sections_genes_or_states_from_prediction_outcomes",
+    "fit_or_score_any_model"
+  ],
+  "payloads": {
+    "processed_Visium_SpatialExperiment": {
+      "url": "https://www.dropbox.com/s/y2ifv5v8g68papf/spe_filtered_final_with_clusters_and_deconvolution_results.rds?dl=1",
+      "path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/opaque/spe_filtered_final_with_clusters_and_deconvolution_results.rds",
+      "expected_bytes": 1458409716,
+      "actual_bytes": 1458409716,
+      "sha256": "24c98ddcbc47083591a68957f8b8dd3934160e0dde9649d2349c5908e42fe77e",
+      "container_integrity_test": "not_applicable_RDS_must_remain_unopened",
+      "access_state": "opaque_checksum_sealed_not_loaded",
+      "satisfies_raw_or_minimally_processed_Visium_requirement": false
+    },
+    "processed_snRNA_SingleCellExperiment": {
+      "url": "https://www.dropbox.com/s/5919zt00vm1ht8e/sce_DLPFC_annotated.zip?dl=1",
+      "path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/opaque/sce_DLPFC_annotated.zip",
+      "expected_bytes": 4035795545,
+      "actual_bytes": 4035795545,
+      "sha256": "15176538edd4d632fb19376229fd83b9446b90cfbc7cf0de7fbc599443a49c75",
+      "archive_members_verified": [
+        "sce_DLPFC_annotated/se.rds",
+        "sce_DLPFC_annotated/assays.h5"
+      ],
+      "container_integrity_test": "unzip_test_passed_no_errors",
+      "access_state": "opaque_integrity_verified_not_extracted_or_loaded"
+    }
+  },
+  "controlled_raw_acquisition": {
+    "provider": "Globus_or_NIMH_Data_Archive_Study_2619",
+    "spatial_collection_UUID": "6cd81564-ed47-11ec-8358-cd84b862b754",
+    "snRNA_collection_UUID": "6f9322c4-5eaf-11ed-b0b5-bfe7e7197080",
+    "high_resolution_H_and_E": "not_acquired",
+    "raw_or_minimally_processed_Space_Ranger_outputs": "not_acquired",
+    "blocker": "Globus_authentication_and_destination_configuration_not_available_on_host"
+  },
+  "eligibility": {
+    "metadata_candidate_exact_same_block_rows": 19,
+    "metadata_candidate_donors": 10,
+    "payload_qualified_exact_same_block_donors": 0,
+    "minimum_required_exact_same_block_donors": 8,
+    "pilot_authorized": false,
+    "prediction_target_access_authorized": false,
+    "model_execution_authorized": false,
+    "reason": "high_resolution_H_and_E_and_raw_Space_Ranger_payloads_missing_and_exact_block_visual_reference_and_gene_coverage_qualification_not_complete"
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "schema": "heir.natcommun_frozen_validation_protocol.v1",
+  "protocol_date": "2026-07-15",
+  "analysis_scope": "validation_only_outcome_exposed_non_confirmatory",
+  "model_freeze": {
+    "architecture": "unchanged",
+    "image_encoder": "bioptimus/H-optimus-1",
+    "image_encoder_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "image_context_um": 112,
+    "gene_count": 256,
+    "latent_dimension": 20,
+    "epochs": 80,
+    "batch_size": 256,
+    "base_seed": 1729,
+    "fusion_rule": "unchanged_componentwise_reference_product_of_experts",
+    "loss": "unchanged_negative_binomial",
+    "decision_thresholds": "unchanged",
+    "iterative_refinement": "prohibited",
+    "UNI2_h": "prohibited_not_run"
+  },
+  "frozen_artifacts": {
+    "source_sha256": "ec37d5717a9b737dfac226ae9267258fb728ee024496a7655bb69a913aa3cf20",
+    "projected_source_sha256": "71479f891b5945762e20ec5b91d85bac097230b12ed9192aeacd965be119607f",
+    "gene_panel_sha256": "ce0b6b82440d7fccc69f24afccf0c68bb101b85f590e4a35a514309929fbb6ad",
+    "development_protocol_sha256": "2cb92b22b6870488a06e64b213e37ffbbdfe3044f1da8fc7442f506915e78197",
+    "development_runner_sha256": "cf27504e25dfd8cd7e8bfe2894efc8b4a8f79306b47bc492d0e61406d20668ce",
+    "generative_core_sha256": "55a63f1360e8cc76267e4b00ba8e2167f36259789e9bfdf2aa929c8cadd83b17",
+    "prepared_manifest_sha256": "d1b1353abb9ee80c3132fa08a9ebaea3aeeee607aaa11f2c90e7121be02addde",
+    "fit_predict_manifest_sha256": "cb7ebdf9e22090a046937204993a7b2aa3ac1ba2d4c434883e43ed45d1e826ca",
+    "development_report_sha256": "bf3144cf22405752488509dbb1a65b573967fe1b14110881020787187828cf29",
+    "frozen_prediction_validator_sha256": "9988e465acfdc69b8a1a6c4d2dfbece289f6e1fed84541edde4ced80afcb5485"
+  },
+  "target_boundary": {
+    "global_prediction_validation_before_any_target": true,
+    "all_subgroup_masks_hash_frozen_before_any_target": true,
+    "immediate_per_donor_revalidation": true,
+    "target_may_update_prediction_or_threshold": false
+  },
+  "composition_state_audit": {
+    "comparison": "M3_supported_minus_M2_supported_on_identical_supported_composition_and_spots",
+    "effect": "M2_supported_NB_deviance_minus_M3_supported_NB_deviance",
+    "strata": [
+      "breast",
+      "dlbcl",
+      "lung",
+      "reference_coverage_below_0.90",
+      "reference_coverage_at_least_0.90",
+      "soft_H_and_E_predicted_supported_type_enrichment"
+    ],
+    "observed_spot_type_truth_available": false,
+    "type_stratum_claim": "composition_proxy_only_not_cell_level",
+    "minimum_effective_spots_per_section": 3,
+    "minimum_H_and_E_type_composition_mass_per_section": 3.0,
+    "minimum_positive_donor_fraction": 0.70,
+    "minimum_reliability_adjusted_M3_to_M0_variance_ratio": 0.80,
+    "type_family_adjustment": "Holm",
+    "coverage_family_adjustment": "Holm"
+  },
+  "image_correction_audit": {
+    "correction": "M3_minus_M1",
+    "residual": "heldout_ST_minus_M1",
+    "primary_scale": "raw_counts_inverse_M1_predictive_variance_weighted",
+    "primary_statistics": [
+      "weighted_inner_product",
+      "weighted_cosine",
+      "centered_correlation",
+      "optimal_correction_scale",
+      "correction_RMS_to_predictive_SD",
+      "correction_RMS_to_latent_SD"
+    ],
+    "pairing_control": "M4_minus_M1",
+    "program_scale": "log1p_10000_normalized",
+    "program_family_adjustment": "Holm",
+    "prediction_rescaling_or_rescoring": false
+  },
+  "molecular_distribution_audit": {
+    "arms": ["M0", "M1", "M2", "M3"],
+    "reliability_variance": "split_half_covariance_training_reliable_genes",
+    "gene_dynamic_range": "within_section_log1p_10000_P95_minus_P05",
+    "gene_covariance": "full_target_and_noise_aware_split_cross_covariance",
+    "program_covariance": "frozen_eight_program_membership",
+    "predictive_intervals": "exploratory_moment_normal_50_80_95",
+    "composition_uncertainty_propagated": false
+  },
+  "matched_ST_reference_diagnostic": {
+    "status": "planned_mechanistic_only",
+    "cross_section_donors": ["B1", "L1"],
+    "directional_pairs": [
+      ["B1_2", "B1_4"],
+      ["B1_4", "B1_2"],
+      ["L1_2", "L1_4"],
+      ["L1_4", "L1_2"]
+    ],
+    "inference_unit": "donor_after_averaging_reciprocal_directions",
+    "spot_registration_claim": false,
+    "measurement_floor_claim": false,
+    "same_section_upper_bound": {
+      "split": "coordinate_only_PC1_tail_split",
+      "primary_empty_guard_mm": 1.0,
+      "sensitivity_empty_guard_mm": 2.0,
+      "scope": "optimistic_same_section_same_assay_same_batch_upper_bound"
+    }
+  },
+  "fold_local_panel_sensitivity": {
+    "status": "planned",
+    "panel_receipts": "/mnt/seagate/HEIR_runs/natcommun_generative_development/gene_panel_external_and_lodo_receipts.json",
+    "architecture_or_hyperparameter_change": false,
+    "primary_conclusions": ["M3_less_than_M0", "M3_less_than_M1"]
+  },
+  "fixed_support_reference_sensitivity": {
+    "status": "planned",
+    "preferred_method": "positive_component_weighting",
+    "fixed_fields": [
+      "effective_sample_size",
+      "coarse_type_support",
+      "depth_distribution",
+      "quality_distribution"
+    ],
+    "hard_subsampling": "avoid_unless_weighting_is_not_identifiable"
+  },
+  "unavailable_validations": {
+    "independent_regional_tri_modal": "blocked_no_eligible_untouched_local_cohort",
+    "definitive_cell_level_tri_modal": "blocked_no_eligible_matched_cell_resolved_reference_cohort",
+    "measurement_floor": "blocked_no_registered_independent_molecular_replicate"
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_visible_GPUs": 1,
+    "maximum_GPU_memory_fraction": 0.60,
+    "outer_folds_serial": true,
+    "swap_permitted": false,
+    "out_of_memory_action": "fail_closed_no_identity_change"
+  }
+}

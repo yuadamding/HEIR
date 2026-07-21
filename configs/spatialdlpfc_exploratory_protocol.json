@@ -1,0 +1,196 @@
+{
+  "schema": "heir.spatialdlpfc_exploratory_protocol.v1",
+  "protocol_date": "2026-07-16",
+  "analysis_id": "spatialDLPFC_H_optimus_1_post_protocol_mechanism_run",
+  "analysis_status": "exploratory_protocol_deviating_nonconfirmatory",
+  "registered_decision": "not_admissible",
+  "purpose": "Descriptively test whether a candidate same-donor same-region snRNA reference improves a mesoscopic H&E-to-Visium predictor and whether spatially deranging the H&E proxy removes that improvement.",
+  "evidence_ceiling": {
+    "reason": [
+      "all_candidate specimen links remain unverified at T0",
+      "the processed spatial target was opened before this protocol was frozen",
+      "only embedded downsampled Space Ranger hires images are available",
+      "the original raw Space Ranger/H&E package and independent molecular replicate are unavailable"
+    ],
+    "permitted": "post_protocol_mechanism_evidence_at_mesoscopic_regional_scale",
+    "prohibited": [
+      "registered_pass_or_fail",
+      "confirmatory_inference",
+      "cell_level_annotation_claim",
+      "qualified_0.5_um_per_pixel_H_optimus_claim",
+      "physical_offset_or_registration_claim",
+      "ST_floor_or_measurement_noise_claim",
+      "independent_specimen_specificity_claim"
+    ]
+  },
+  "immutable_inputs": {
+    "spatial_experiment": {
+      "path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/opaque/spe_filtered_final_with_clusters_and_deconvolution_results.rds",
+      "sha256": "24c98ddcbc47083591a68957f8b8dd3934160e0dde9649d2349c5908e42fe77e",
+      "expected_spots": 113927,
+      "expected_genes": 28916,
+      "expected_sections": 30,
+      "expected_donors": 10,
+      "permitted_fields": [
+        "counts",
+        "sample_id",
+        "subject",
+        "position",
+        "key",
+        "sum_umi",
+        "array_row",
+        "array_col",
+        "pxl_col_in_fullres",
+        "pxl_row_in_fullres",
+        "imgData.hires",
+        "scaleFactor.hires"
+      ],
+      "prohibited_fields": [
+        "logcounts",
+        "clusters",
+        "cortical_layers",
+        "deconvolution_results",
+        "outcome_derived_annotations"
+      ]
+    },
+    "single_nucleus_experiment": {
+      "metadata_path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/reference_qualification/sce_DLPFC_annotated/se.rds",
+      "metadata_sha256": "7b3d9bd4a799e34225f2c9d879cbcafe700ce6ee5b7c5bcd6aac980ae9b04ef9",
+      "assay_path": "/mnt/seagate/HnE/spatialDLPFC/pilot_acquisition/reference_qualification/sce_DLPFC_annotated/assays.h5",
+      "assay_sha256": "76817099df0e9246ae0f8c047d9bc43113abd638d6f08d4d7f24c4a6a4032fc5",
+      "archive_sha256": "15176538edd4d632fb19376229fd83b9446b90cfbc7cf0de7fbc599443a49c75",
+      "expected_cells": 77604,
+      "expected_genes": 36601,
+      "permitted_fields": [
+        "counts",
+        "Sample",
+        "BrNum",
+        "pos",
+        "cellType_broad_k",
+        "sum"
+      ],
+      "excluded_cell_type": "drop"
+    },
+    "candidate_assignment_manifest": {
+      "path": "manifests/spatialdlpfc_specimen_reference_assignments.tsv",
+      "sha256": "724759379a9442cc16bb1e5e4c10b447fa3ff85e5cb4585774cbfc9eef36fe1f",
+      "verified_T0_rows": 0
+    },
+    "frozen_gene_panel": {
+      "path": "configs/natcommun_generative_gene_panel.json",
+      "sha256": "ce0b6b82440d7fccc69f24afccf0c68bb101b85f590e4a35a514309929fbb6ad",
+      "identity_sha256": "12c075a0b7639b64a6a0c521e855cd10f44852212865924279b05d40b38083cf",
+      "size": 256,
+      "selection": "external_and_frozen_before_DLPFC_model_scoring",
+      "missing_or_ambiguous_mapping_action": "fail_closed"
+    },
+    "parent_protocol_hashes": {
+      "definitive_confirmation": "6033a2d7db6cb5095d014f984c6f6519a4a7c073e41b627379a47525236b668a",
+      "pilot": "f483c0d40e8e29746cb7e4694ca8a3666e2d7196acc7ab2c02e3cc6c0c9b20e5",
+      "strict_match_addendum": "f0a252602b8d0927a3ca259fb24385c5afae4bca7952261e96d0f47b8ddca97f",
+      "latest_user_strict_match_comment": "845ada0952c7a76efb4ee84e92538e33fed144faa8982257f135de21c4dea42b"
+    }
+  },
+  "encoder": {
+    "name": "H-optimus-1",
+    "repository": "bioptimus/H-optimus-1",
+    "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "manifest": "manifests/encoders/hoptimus1.json",
+    "manifest_sha256": "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa09bdf77747043ac8fd9",
+    "checkpoint": "/mnt/seagate/HnE/pretrained/H-optimus-1/model.safetensors",
+    "checkpoint_sha256": "c4f1e5b457ddf00679626053b0bf2899be6a19c3a04ad191c87ad1cdfd1abfe1",
+    "fine_tuning": false,
+    "input_pixels": 224,
+    "model_microns_per_pixel": 0.5,
+    "feature_width": 1536,
+    "UNI2_h": "forbidden_not_run"
+  },
+  "image_proxy": {
+    "source": "embedded_Space_Ranger_hires",
+    "crop_pixels": 224,
+    "grid_stride_pixels": 112,
+    "spot_assignment": "nearest_grid_center_within_section",
+    "padding": "white",
+    "scale_qualified": false,
+    "interpretation": "millimetre_scale_mesoscopic_regional_proxy_only",
+    "required_receipt_fields": [
+      "native_image_dimensions",
+      "scale_factor",
+      "estimated_microns_per_pixel",
+      "native_pixels_per_nominal_112_um_field",
+      "upsampling_ratio",
+      "image_sha256",
+      "checkpoint_sha256"
+    ]
+  },
+  "selected_queries": [
+    {"donor": "Br2720", "position": "post", "section": "V10U24-091_C1", "reference_sample": "snRNA_Br2720_post", "assignment": "SDLPFC_A02"},
+    {"donor": "Br2743", "position": "mid", "section": "V19B23-074_A1", "reference_sample": "snRNA_Br2743_mid", "assignment": "SDLPFC_A04"},
+    {"donor": "Br3942", "position": "mid", "section": "V19B23-074_B1", "reference_sample": "snRNA_Br3942_mid", "assignment": "SDLPFC_A06"},
+    {"donor": "Br6423", "position": "post", "section": "V19B23-073_C1", "reference_sample": "snRNA_Br6423_post", "assignment": "SDLPFC_A08"},
+    {"donor": "Br6432", "position": "ant", "section": "V10B01-002_B1", "reference_sample": "snRNA_Br6432_ant", "assignment": "SDLPFC_A09"},
+    {"donor": "Br6471", "position": "mid", "section": "V10B01-052_A1", "reference_sample": "snRNA_Br6471_mid", "assignment": "SDLPFC_A11"},
+    {"donor": "Br6522", "position": "post", "section": "V10B01-053_B1", "reference_sample": "snRNA_Br6522_post", "assignment": "SDLPFC_A13"},
+    {"donor": "Br8325", "position": "ant", "section": "V10U24-094_C1", "reference_sample": "snRNA_Br8325_ant", "assignment": "SDLPFC_A14"},
+    {"donor": "Br8492", "position": "post", "section": "V19B23-073_D1", "reference_sample": "snRNA_Br8492_post", "assignment": "SDLPFC_A17"},
+    {"donor": "Br8667", "position": "ant", "section": "V10U24-094_D1", "reference_sample": "snRNA_Br8667_ant", "assignment": "SDLPFC_A18"}
+  ],
+  "analyses": {
+    "clean_main": {
+      "donors": 9,
+      "excluded_from_scoring_and_reference_training": ["Br2720"],
+      "Br2720_ST_H_and_E_training_rule": "allowed_only_when_Br2720_is_not_the_heldout_donor"
+    },
+    "Br2720_inclusion_sensitivity": {
+      "donors": 10,
+      "role": "metadata_typo_resolved_but_payload_unverified_sensitivity_only"
+    }
+  },
+  "outer_validation": {
+    "split": "serial_leave_one_biological_donor_out",
+    "training_sections": "all_source_sections_not_belonging_to_the_heldout_donor",
+    "query_sections": "exactly_one_frozen_selected_section_for_the_heldout_donor",
+    "heldout_ST_use": "sealed_endpoint_scoring_only",
+    "heldout_reference_use": "M3_and_M4_candidate_matched_bank_only_never_training",
+    "spot_cap_per_section": 2048,
+    "reference_cell_cap_per_sample_and_broad_type": 512,
+    "cap_selection": "ascending_SHA256_of_observation_identifier",
+    "base_seed": 20260716,
+    "epochs": 80,
+    "maximum_epochs": 80,
+    "batch_size": 256,
+    "latent_dimensions": 20,
+    "hyperparameter_search": "none"
+  },
+  "model_arms": {
+    "M0": "mesoscopic_H_and_E_only_composition_and_state_query_through_the_shared_ST_decoder",
+    "M3": "same_M0_H_and_E_query_and_ST_decoder_fused_once_with_the_candidate_matched_multistate_reference",
+    "M4": "same_candidate_reference_with_fixed_point_free_within_section_composition_stratum_derangement_of_H_and_E",
+    "capacity_rule": "M0_M3_and_M4_share_gene_order_exposure_decoder_and_query_rows",
+    "not_run": ["UNI2_h", "M8", "ST_floor", "manufactured_count_half_oracle"]
+  },
+  "endpoint": {
+    "primary_descriptive_metric": "heldout_raw_count_NB2_deviance_over_the_frozen_256_gene_panel",
+    "dispersion": "fit_on_outer_training_ST_only",
+    "aggregation": "spots_within_section_then_sections_within_donor_then_donors_equally",
+    "contrasts": [
+      "L_M0_minus_L_M3",
+      "L_M4_minus_L_M3"
+    ],
+    "uncertainty": "descriptive_exact_donor_sign_flip_and_all_donor_effects",
+    "multiplicity": "none_because_no_confirmatory_decision_is_permitted"
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_source_export_RSS_GiB": 24,
+    "maximum_feature_export_RSS_GiB": 16,
+    "CUDA_visible_devices": 1,
+    "maximum_GPU_memory_fraction": 0.6,
+    "feature_batch_size": 1,
+    "outer_folds": "serial",
+    "writes": "atomic_and_resumable",
+    "contention_rule": "do_not_start_GPU_stage_while_an_unrelated_job_occupies_the_GPU",
+    "out_of_memory_action": "stop_and_report_without_automatic_protocol_change"
+  },
+  "output_root": "/mnt/seagate/HEIR_runs/spatialdlpfc_exploratory"
+}

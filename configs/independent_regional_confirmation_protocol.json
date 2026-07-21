@@ -1,0 +1,456 @@
+{
+  "schema": "heir.independent_regional_confirmation_protocol.v1",
+  "protocol_date": "2026-07-15",
+  "source_action_plan": {
+    "name": "Full validation action plan",
+    "sha256": "03698fc0e5fd7301e8c71a5cc2c552ba35b5804053aa3d9323570b42e10121a4"
+  },
+  "execution": {
+    "status": "blocked_no_eligible_independent_cohort",
+    "authorized": false,
+    "selected_cohort": null,
+    "score_target_open_authorized": false,
+    "blockers": [
+      "no_downloaded_single_tissue_cohort_has_18_to_24_independent_donors_with_registered_H_and_E_ST_and_matched_independent_sc_or_snRNA",
+      "no_downloaded_eligible_cohort_has_an_independent_spatial_replicate_or_validated_count_based_floor",
+      "no_downloaded_cohort_is_both_structurally_eligible_and_unexposed"
+    ]
+  },
+  "action_sequence_status": {
+    "1_lock_NatCommun_development_only": "complete",
+    "2_select_independent_single_tissue_cohort": "blocked_no_eligible_downloaded_cohort",
+    "3_freeze_model_identity": "complete",
+    "4_precompute_target_free_inputs": "not_started_requires_selected_eligible_cohort",
+    "5_run_Gate_A": "not_started_not_authorized",
+    "6_run_Gate_B_only_after_A_pass": "not_started_not_authorized",
+    "7_to_10_run_Gates_C_D_E_F": "not_started_not_authorized",
+    "11_make_regional_decision": "untested",
+    "12_cell_level_extension": "deferred_until_core_regional_pass",
+    "13_iterative_refinement": "prohibited"
+  },
+  "development_lock": {
+    "cohort": "NatCommun_2025_s41467_025_59005_9_E-MTAB-14560",
+    "analysis_status": "exposed_development_only_non_confirmatory",
+    "new_outcome_exposed_fits": "prohibited",
+    "new_tuning_or_threshold_selection": "prohibited",
+    "confirmatory_reuse": "prohibited",
+    "allowed_future_use": "audit_and_reporting_of_already_materialized_results_only",
+    "bindings": {
+      "source": {
+        "path": "/mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz",
+        "bytes": 1276640605,
+        "sha256": "ec37d5717a9b737dfac226ae9267258fb728ee024496a7655bb69a913aa3cf20"
+      },
+      "projected_source": {
+        "path": "/mnt/seagate/HEIR_runs/natcommun_generative_development/panel_256_projected_counts.npz",
+        "bytes": 135134364,
+        "sha256": "71479f891b5945762e20ec5b91d85bac097230b12ed9192aeacd965be119607f"
+      },
+      "gene_panel": {
+        "path": "configs/natcommun_generative_gene_panel.json",
+        "sha256": "ce0b6b82440d7fccc69f24afccf0c68bb101b85f590e4a35a514309929fbb6ad"
+      },
+      "development_protocol": {
+        "path": "configs/natcommun_generative_development_protocol.json",
+        "sha256": "2cb92b22b6870488a06e64b213e37ffbbdfe3044f1da8fc7442f506915e78197"
+      },
+      "development_runner": {
+        "path": "scripts/benchmark_natcommun_generative_development.py",
+        "sha256": "cf27504e25dfd8cd7e8bfe2894efc8b4a8f79306b47bc492d0e61406d20668ce"
+      },
+      "generative_core": {
+        "path": "src/heir/evaluation/generative_fusion.py",
+        "sha256": "55a63f1360e8cc76267e4b00ba8e2167f36259789e9bfdf2aa929c8cadd83b17"
+      },
+      "frozen_result": {
+        "path": "reports/natcommun_next_validation_results.md",
+        "sha256": "4ef1e2875c325f5f3a5f8b30b05646a0508277fd3c737bf3b6b8310dabae8344"
+      }
+    }
+  },
+  "primary_estimand": {
+    "ordering": "L_ST < L(M3_H_and_E_plus_matched_sc_or_snRNA) < L(M0_H_and_E)",
+    "spatial_attribution": "L(M3_paired_H_and_E_plus_R) < L(M4_shuffled_or_offset_H_and_E_plus_R)",
+    "loss": "donor_and_section_balanced_heldout_negative_binomial_deviance",
+    "aggregation": "equal_sections_within_donor_then_equal_donors",
+    "common_comparison_contract": [
+      "target_observations",
+      "gene_order",
+      "normalization",
+      "decoder",
+      "library_size_exposure",
+      "donor_aggregation"
+    ],
+    "primary_gene_panel_size": 256,
+    "secondary_latent_dimension": 20,
+    "secondary_programs": 8
+  },
+  "claims": {
+    "C1": "L(M3) < L(M0)",
+    "C2": "L(M3_paired) < L(M4_shuffled_or_offset)",
+    "C3": "L(F_ST) < L(M3)",
+    "C4": [
+      "L(M3_matched) < L(M6_wrong)",
+      "L(M3_matched) < L(M7_generic)"
+    ],
+    "C5": "L(M3_supported_state) < L(M2_supported_type_or_composition)",
+    "C6_optional": "L(M3) < L(M1)"
+  },
+  "cohort_entry_contract": {
+    "one_tissue_or_indication": true,
+    "independent_donors_minimum": 18,
+    "independent_donors_maximum": 24,
+    "preferred_query_sections_per_donor": 2,
+    "registered_H_and_E_and_ST_query": "required",
+    "matched_reference": "independent_scRNA_or_snRNA_aliquot_from_same_specimen_or_adjacent_tissue_required",
+    "reference_modality_independently_verified": true,
+    "independent_ST_replicate_or_validated_count_floor": "required_for_core_C3",
+    "matching_fields": [
+      "donor",
+      "anatomical_region",
+      "lesion",
+      "tissue_block",
+      "collection_time",
+      "disease_and_treatment_state",
+      "preservation_method",
+      "scRNA_or_snRNA_assay_identity"
+    ],
+    "outcomes_unopened_before_lock": true,
+    "minimum_qualified_reference_cells_per_retained_coarse_type": 50,
+    "pre_outcome_reference_checks": [
+      "primary_gene_panel_detection",
+      "matched_and_comparator_type_coverage",
+      "library_depth",
+      "quality",
+      "mitochondrial_fraction",
+      "unsupported_state_policy"
+    ],
+    "unsupported_type_substitution": "prohibited"
+  },
+  "frozen_model_identity": {
+    "image_encoder": "bioptimus/H-optimus-1",
+    "image_encoder_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "encoder_manifest": {
+      "path": "manifests/encoders/hoptimus1.json",
+      "sha256": "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa09bdf77747043ac8fd9"
+    },
+    "encoder_checkpoint_sha256": "c4f1e5b457ddf00679626053b0bf2899be6a19c3a04ad191c87ad1cdfd1abfe1",
+    "UNI2_h": "prohibited_not_run",
+    "H_and_E_context_um": 112,
+    "gene_panel": "NatCommun_frozen_256_gene_order",
+    "molecular_latent_dimension": 20,
+    "count_family": "negative_binomial_NB2",
+    "decoder": "frozen_training_donor_ST_decoder",
+    "fusion": "one_step_componentwise_diagonal_Gaussian_product_of_experts",
+    "fusion_magnitude_and_state_variance_calibration": "frozen_from_development_no_confirmation_recalibration",
+    "same_architecture_and_training_schedule_in_every_arm": true,
+    "molecular_epochs": 80,
+    "batch_size": 256,
+    "learning_rate": 0.001,
+    "base_seed": 1729,
+    "reference_state_components_per_type": 3,
+    "Sobol_samples_per_component": 32,
+    "iterative_refinement_steps": 0,
+    "confirmation_outcomes_may_change_identity": false
+  },
+  "arms": {
+    "M0": "paired_H_and_E_only",
+    "M1": "matched_sc_or_snRNA_reference_only",
+    "M2": "H_and_E_type_or_composition_routing_plus_matched_type_means",
+    "M3": "paired_H_and_E_plus_matched_multistate_reference",
+    "M4": "within_donor_section_and_composition_stratum_shuffled_H_and_E_plus_matched_reference",
+    "M5a": "blank_H_and_E_plus_matched_reference",
+    "M5b": "coordinates_plus_matched_reference",
+    "M6": "paired_H_and_E_plus_hard_wrong_donor_reference",
+    "M7": "paired_H_and_E_plus_query_excluded_generic_reference",
+    "F_ST": "independent_molecular_replicate_or_validated_count_compatible_oracle",
+    "S1": "independent_matched_ST_reference_only_not_a_measurement_floor",
+    "S3": "paired_H_and_E_plus_independent_matched_ST_reference",
+    "S4": "shuffled_H_and_E_plus_independent_matched_ST_reference"
+  },
+  "gate_order": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F"
+  ],
+  "gates": {
+    "A": {
+      "claim": "C1",
+      "contrast": "L(M0)-L(M3)",
+      "minimum_relative_reduction": 0.05,
+      "minimum_favorable_donor_fraction": 0.70,
+      "paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "one_sided_exact_sign_flip_or_paired_randomization_p_max": 0.05,
+      "severe_prespecified_stratum_reversal_permitted": false,
+      "minimum_prespecified_stratum_relative_reduction": -0.02,
+      "failure_action": "stop_core_hypothesis_for_tested_model_and_cohort"
+    },
+    "B": {
+      "requires_gate_pass": [
+        "A"
+      ],
+      "claim": "C2",
+      "requirements": [
+        "M3_beats_M4",
+        "paired_beats_every_nonzero_physical_offset",
+        "monotonic_deterioration_with_offset",
+        "positive_residual_alignment_in_at_least_0.70_of_donors",
+        "residual_alignment_exceeds_shuffled_image_alignment",
+        "primary_gene_endpoint_and_at_least_one_reliable_program_improve_hotspot_or_spatial_pattern_recovery"
+      ],
+      "offset_spot_diameters": [
+        0,
+        1,
+        2,
+        4,
+        8
+      ],
+      "visium_offset_um_when_applicable": [
+        0,
+        55,
+        110,
+        220,
+        440
+      ],
+      "hotspot_thresholds": "frozen_from_training_donors_only",
+      "hotspot_high_residual_quantile": 0.90,
+      "minimum_reliable_program_training_split_half_correlation": 0.05,
+      "M3_vs_M4_minimum_favorable_donor_fraction": 0.70,
+      "M3_vs_M4_paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "M3_vs_M4_one_sided_exact_sign_flip_p_max": 0.05,
+      "paired_minus_shuffled_residual_alignment_interval_lower_bound": "greater_than_zero",
+      "paired_minus_shuffled_residual_alignment_one_sided_sign_flip_p_max": 0.05,
+      "offset_monotonicity": "strictly_increasing_donor_balanced_loss_at_0_1_2_4_8_diameters",
+      "program_and_spatial_endpoint_multiplicity": "Holm_within_prespecified_family",
+      "spatial_endpoints": [
+        "residual_alignment",
+        "hotspot_AUPRC",
+        "top_decile_recall",
+        "hotspot_spatial_overlap",
+        "Morans_I",
+        "semivariogram",
+        "neighborhood_concordance",
+        "spatial_correlation_length",
+        "boundary_localization"
+      ]
+    },
+    "C": {
+      "requires_gate_decision": [
+        "A"
+      ],
+      "claim": "C3",
+      "valid_floor": "independent_spatial_molecular_replicate_preferred_or_count_compatible_split_floor_with_preregistered_full_depth_conversion_validated_in_simulation_or_technical_replicates",
+      "replicate_registration": "frozen_anatomical_landmarks_or_regions_without_target_expression_similarity",
+      "count_floor_contract": [
+        "split_unique_molecules_within_each_spatial_unit_into_independent_halves_A_and_B",
+        "train_count_compatible_denoiser_on_training_donors_only",
+        "predict_B_from_A_and_A_from_B",
+        "use_negative_binomial_or_other_count_compatible_likelihood",
+        "apply_preregistered_half_to_full_depth_risk_conversion",
+        "validate_conversion_in_simulation_or_technical_replicates"
+      ],
+      "same_target_as_M0_and_M3": true,
+      "S1_is_measurement_floor": false,
+      "minimum_favorable_donor_fraction": 0.70,
+      "paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "one_sided_donor_test_p_max": 0.05
+    },
+    "D": {
+      "requires_gate_decision": [
+        "A"
+      ],
+      "role": "mechanism_diagnostic_not_core_pass_condition",
+      "requirements": [
+        "L(S3)<L(S1)",
+        "L(S3)<L(S4)"
+      ],
+      "minimum_favorable_donor_fraction": 0.70,
+      "paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "one_sided_exact_sign_flip_p_max": 0.05,
+      "multiplicity": "Holm_over_S3_vs_S1_and_S3_vs_S4",
+      "report": [
+        "L(M3)-L(S3)",
+        "L(M1)-L(S1)"
+      ]
+    },
+    "E": {
+      "requires_gate_decision": [
+        "A"
+      ],
+      "claim": "C4",
+      "bank_matching": [
+        "effective_sample_size",
+        "coarse_type_support",
+        "depth_distribution",
+        "quality_distribution",
+        "state_component_support",
+        "reference_preprocessing"
+      ],
+      "preferred_equalization": "weighting_instead_of_severe_hard_subsampling_where_identifiable",
+      "comparisons": [
+        "M3_matched_beats_M6_wrong",
+        "M3_matched_beats_M7_generic"
+      ],
+      "Holm_adjusted_p_max": 0.05,
+      "minimum_favorable_donor_fraction": 0.70,
+      "donor_or_tissue_group_domination_permitted": false,
+      "maximum_single_donor_or_prespecified_group_fraction_of_positive_effect": 0.50,
+      "must_persist_after_state_support_matching": true
+    },
+    "F": {
+      "requires_gate_decision": [
+        "A"
+      ],
+      "claims": [
+        "molecular_state_preservation",
+        "C5"
+      ],
+      "report_arms": [
+        "M0",
+        "M1",
+        "M2",
+        "M3"
+      ],
+      "endpoints": [
+        "reliability_adjusted_variance",
+        "calibration_slope",
+        "gene_covariance",
+        "program_covariance",
+        "rare_state_recall",
+        "dynamic_range",
+        "posterior_interval_coverage",
+        "reference_state_coverage",
+        "out_of_support_rate"
+      ],
+      "minimum_M3_to_M0_reliability_adjusted_variance_ratio": 0.80,
+      "maximum_M0_minus_M3_rare_state_recall": 0.05,
+      "program_covariance_material_worsening_permitted": false,
+      "maximum_M3_to_M0_program_covariance_error_ratio": 1.10,
+      "predictive_intervals_acceptably_calibrated": true,
+      "maximum_absolute_predictive_interval_coverage_error": {
+        "50": 0.10,
+        "80": 0.08,
+        "95": 0.04
+      },
+      "calibration_slope_interval": [
+        0.80,
+        1.20
+      ],
+      "severe_dynamic_range_compression_permitted": false,
+      "minimum_M3_to_M0_median_gene_dynamic_range_ratio": 0.80,
+      "minimum_reference_state_coverage": 0.90,
+      "maximum_out_of_support_rate": 0.20,
+      "state_contrast": "L(M2_supported)-L(M3_supported)",
+      "minimum_state_favorable_donor_fraction": 0.70,
+      "state_paired_95_percent_interval_lower_bound": "greater_than_zero",
+      "state_one_sided_exact_sign_flip_p_max": 0.05,
+      "state_indication_reversal_permitted": false,
+      "adequate_reference_support_required": true,
+      "state_variance_criteria_required": true
+    }
+  },
+  "decision": {
+    "core_regional_requires": [
+      "A_pass",
+      "B_pass",
+      "C_pass",
+      "F_no_unacceptable_molecular_collapse"
+    ],
+    "personalized_reference_claim_requires": "E_pass",
+    "strong_multimodal_synergy_requires": "C6_pass",
+    "regional_failure_may_not_be_rescued_by_tuning": true,
+    "cell_level_validation_before_core_regional_pass": "prohibited",
+    "iteration_reconsideration_requires": [
+      "A_pass",
+      "B_pass",
+      "C5_pass",
+      "F_state_preservation_pass"
+    ]
+  },
+  "stopping_conclusions": {
+    "A_fail": "right_hand_inequality_not_replicated_stop",
+    "A_pass_B_fail": "reference_helps_but_H_and_E_spatial_contribution_unproven",
+    "paired_signal_without_A": "H_and_E_contains_spatial_signal_but_does_not_improve_target_loss",
+    "C_fail": "do_not_claim_left_hand_inequality",
+    "mean_loss_pass_F_fail": "denoised_conditional_mean_only_not_molecular_heterogeneity",
+    "E_fail": "no_sample_specific_reference_value_generic_reference_may_suffice",
+    "A_and_B_pass_C5_fail": "composition_or_type_routing_not_continuous_state",
+    "regional_pass_cell_fail": "regional_inference_only",
+    "regional_and_cell_pass": "key_hypothesis_supported_within_frozen_scope"
+  },
+  "target_boundary": {
+    "freeze_before_score_target_open": [
+      "cohort_and_specimen_routing",
+      "model_identity",
+      "H_and_E_embeddings",
+      "matched_wrong_and_generic_reference_bank_rules",
+      "shuffle_and_offset_assignments",
+      "independent_ST_reference_registration",
+      "score_row_and_gene_identity",
+      "losses_tests_thresholds_and_stopping_rules"
+    ],
+    "confirmation_target_may_select_or_change": [],
+    "target_expression_similarity_may_define_ST_registration": false,
+    "Gate_A_runs_first": true,
+    "Gate_B_may_run_after_Gate_A_failure": false,
+    "Gates_C_D_E_F_may_run_after_Gate_A_failure": true,
+    "post_A_failure_gates_are_diagnostic_and_cannot_rescue_the_core_hypothesis": true,
+    "genes_crop_fusion_floor_states_iterations_or_thresholds_may_be_tuned": false
+  },
+  "cell_level_extension": {
+    "status": "deferred_until_core_regional_pass",
+    "requires_separate_independent_cohort": true,
+    "independent_donors_minimum": 18,
+    "independent_donors_maximum": 24,
+    "required_modalities": [
+      "registered_H_and_E",
+      "cell_resolved_ST",
+      "independent_matched_scRNA_or_snRNA",
+      "native_cell_and_nucleus_boundaries",
+      "molecular_replicate_or_transcript_split_floor"
+    ],
+    "endpoints": {
+      "total_expression": "L_total=L(Y_i_ST,predicted_Y_i)",
+      "within_fine_type_residual_target": "r_i=Y_i_ST-mu_R_d_t",
+      "fine_type_source": "independently_defined_fine_type_t",
+      "within_type_state_loss": "L_state=L(r_i,predicted_r_i)"
+    },
+    "required_state_comparisons": [
+      "L_state(M3)<L_state(M0)",
+      "L_state(M3_paired)<L_state(M4_shuffled)",
+      "L_ST_state<L_state(M3)",
+      "L_state(M3)<L_state(M2)_for_continuous_state_claim"
+    ],
+    "localization_controls": [
+      "natural_local_context",
+      "cell_mask_only",
+      "nucleus_mask_only",
+      "target_cell_removed_context",
+      "physically_offset_target_cell"
+    ],
+    "localization_interpretation": {
+      "only_context_passes": "regional_or_microenvironmental_information",
+      "cell_mask_passes_beyond_context": "cell_morphology_contributes",
+      "nucleus_mask_passes_beyond_context": "nuclear_morphology_contributes",
+      "full_image_passes_but_masks_fail": "mixed_target_plus_context_signal",
+      "shuffled_or_offset_equals_paired": "no_cell_specific_H_and_E_information"
+    },
+    "failure_claim_boundary": "regional_only"
+  },
+  "replication_scope": {
+    "one_independent_regional_cohort": "regional_inequality_only",
+    "separate_independent_cell_resolved_cohort": "required_for_cell_level_HEIR_claim",
+    "multi_tissue_or_pan_cancer_claim": "repeat_validation_in_each_claimed_tissue_class"
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_visible_GPUs": 1,
+    "maximum_GPU_memory_fraction": 0.60,
+    "outer_folds_serial": true,
+    "swap_permitted": false,
+    "out_of_memory_action": "fail_closed_without_identity_change"
+  }
+}

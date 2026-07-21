@@ -1,0 +1,504 @@
+{
+  "schema": "heir.hest_nonlinear_qualification_protocol.v1",
+  "protocol_id": "hest_nonlinear_qualification_v1",
+  "protocol_date": "2026-07-20",
+  "analysis_status": "retrospective_exposed_non_authorizing",
+  "study_role": "retrospective_estimator_qualification_only",
+  "outcome_exposure": "all_hest_outcomes_previously_exposed",
+  "purpose": "Test whether a small nonlinear type-conditioned multiview translator exposes within-type molecular residual signal missed by the frozen ridge model class, without changing HEIR's target, donor-safe evaluation, controls, or claim boundaries.",
+  "scientific_hypothesis": "The registered H&E representation may contain molecular-state information that the contemporaneous full-feature linear baselines do not expose, but that a bounded nonlinear shared translator can expose.",
+  "supports_new_prospective_estimator_protocol": false,
+  "authorizes_h_cell": false,
+  "authorizes_h_intrinsic": false,
+  "authorizes_h_ref": false,
+  "authorizes_full_heir": false,
+  "dataset": {
+    "repository": "MahmoodLab/hest",
+    "revision": "7e8d5a0b0aace41d8c8ec0f6ecea80e4ad2a61ec",
+    "source_study": "GSE250346",
+    "tissue": "human_lung",
+    "biological_donors": 15,
+    "sections": 20,
+    "registered_cells": 36121,
+    "all_rows_and_outcomes_exposed": true,
+    "prospective_lock_eligible": false,
+    "label_provenance_limitation": "final_CT and final_lineage are RNA-derived and do not satisfy the independent-label requirement for H-CELL authorization"
+  },
+  "registered_source": {
+    "path": "/mnt/seagate/HEIR_runs/hest_hoptimus1_qualification/source.npz",
+    "sha256": "f7e7d4e97727cc17e71a81a252ab35fd2ca1c0e70054cba3ed38c2f7b7f65636",
+    "schema": "heir.registered_observations_retrospective.v1",
+    "feature_tensor": "image_features_by_crop_and_encoder",
+    "feature_dimensions": 1536,
+    "crop_roles": [
+      "crop_112um",
+      "cell_mask_only",
+      "nucleus_mask_only",
+      "target_cell_removed_112um"
+    ],
+    "same_cells_reference_evaluation_split_target_panel_and_controls_as_frozen_retrospective": true
+  },
+  "encoder_scope": {
+    "primary": "bioptimus/H-optimus-1",
+    "revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "checkpoint_sha256": "c4f1e5b457ddf00679626053b0bf2899be6a19c3a04ad191c87ad1cdfd1abfe1",
+    "frozen_no_fine_tuning": true,
+    "UNI2_h": "historical_frozen_evidence_only_not_executed_in_this_protocol",
+    "historical_96d_projection_rule": "historical_form_only_rerun_the_frozen_outcome_independent_Rademacher_projection_construction_on_registered_H_optimus_1_features",
+    "historical_exactness_boundary": "B1_is_not_the_exact_historical_baseline_which_used_UNI2_h_a_pooled_ridge_and_direct_260_gene_residual_prediction",
+    "prior_H_optimus_geometry_gate": "failed_and_unchanged_this_is_a_distinct_exposed_estimator_qualification_not_a_reinterpretation_or_relaxation"
+  },
+  "frozen_predecessor_evidence": {
+    "scripts/benchmark_hest_retrospective.py": "853a2801e94e3c727631d4e3eb8e0a0ba766bd3768b3302b4219ce14a61c9878",
+    "scripts/benchmark_morphology_state_gate.py": "5975f2cc0ff586a89f39f78bbf989f1ecd1e03347ea9fba9b74673b316385919",
+    "src/heir/evaluation/morphology_gate.py": "4c92b3c853203cf9e580db311536cf428283e41fd473436b8a6f3d4be80b3cad",
+    "src/heir/evaluation/reference_fusion_v2.py": "894ad3de42cc3d253aee400cb17cd7ff2257c2aca016601d7eb0f2bc2136bf3a",
+    "reports/hest_retrospective.md": "1e833867cef32504f1f0f2d4d52471e9ff17ee992cfd8c4e914e347495a95027",
+    "reports/hest_scientific_reanalysis.md": "2c571cc3e611466dd0c0f957cb738aa9ffa319a93562c4519bdfe02b412c733d",
+    "reports/natcommun_hoptimus_primary_results_v2.md": "b4771b6d10dfbbe22cc4ecf873435cf370fb117a608ab9e6982634bde7374af7"
+  },
+  "archived_historical_anchor": {
+    "report": "reports/hest_retrospective.md",
+    "report_sha256": "1e833867cef32504f1f0f2d4d52471e9ff17ee992cfd8c4e914e347495a95027",
+    "encoder": "MahmoodLab/UNI2-h",
+    "representation": "outcome_independent_1536_to_96_Rademacher_projection",
+    "estimator": "pooled_multi_type_ridge",
+    "target": "direct_260_gene_residual_prediction",
+    "relationship_to_B1": "frozen_noncomparable_anchor_not_reexecuted_B1_is_a_contemporaneous_H_optimus_historical_form_baseline"
+  },
+  "experiment_matrix": [
+    {
+      "id": "B0",
+      "image_representation": "none",
+      "estimator": "best_existing_non_image_ridge",
+      "question": "What is the strongest frozen nuisance baseline?"
+    },
+    {
+      "id": "B1",
+      "image_representation": "historical_form_96d_H_optimus_projection",
+      "estimator": "per_type_ridge",
+      "question": "What does the historical-form projection and linear model class recover on the registered H-optimus-1 features?"
+    },
+    {
+      "id": "B2",
+      "image_representation": "full_1536d_feature",
+      "estimator": "per_type_ridge",
+      "question": "Did the historical dimensionality reduction remove usable signal?"
+    },
+    {
+      "id": "B3",
+      "image_representation": "full_1536d_feature",
+      "estimator": "shared_linear_type_adapter",
+      "question": "Does cross-type parameter sharing help without nonlinearity?"
+    },
+    {
+      "id": "N0",
+      "image_representation": "combined_nuisance_features",
+      "estimator": "small_mlp",
+      "question": "How much gain comes from nonlinear capacity without image information?"
+    },
+    {
+      "id": "N1",
+      "image_representation": "natural_112um_crop",
+      "estimator": "small_mlp",
+      "question": "Does nonlinearity recover global image signal?"
+    },
+    {
+      "id": "N2",
+      "image_representation": "natural_112um_crop",
+      "estimator": "small_mlp_fine_type_adapter",
+      "question": "Does type conditioning help without fitting unrelated per-type networks?"
+    },
+    {
+      "id": "N3",
+      "image_representation": "nucleus_mask_crop",
+      "estimator": "same_selected_mlp_family",
+      "question": "Is there nucleus-local signal under the same capacity and selection rules?"
+    },
+    {
+      "id": "N4",
+      "image_representation": "cell_mask_crop",
+      "estimator": "same_selected_mlp_family",
+      "question": "Is there cell-local signal under the same capacity and selection rules?"
+    },
+    {
+      "id": "N5",
+      "image_representation": "target_cell_removed_crop",
+      "estimator": "same_selected_mlp_family",
+      "question": "How much performance remains after removing the target cell?"
+    },
+    {
+      "id": "N6",
+      "image_representation": "full_nucleus_cell_views",
+      "estimator": "late_fusion_mlp",
+      "question": "Does prespecified multiview late fusion add image-specific information?"
+    },
+    {
+      "id": "N7",
+      "image_representation": "combined_nuisance_plus_n6_views",
+      "estimator": "late_fusion_mlp",
+      "question": "Does multiview image information add value beyond nonlinear nuisance modeling?"
+    }
+  ],
+  "molecular_target": {
+    "ordered_steps": [
+      "same_section_spatially_independent_donor_section_type_reference_mean",
+      "development_fold_only_technical_correction",
+      "development_fold_only_type_specific_low_rank_molecular_basis",
+      "predict_residual_coordinates",
+      "reconstruct_measured_target_genes"
+    ],
+    "raw_whole_transcriptome_primary_target": false,
+    "reference_evaluation_pool_identity": "reuse_frozen_primary_spatially_separated_pool_split",
+    "technical_covariates": "reuse_frozen_retrospective_covariates_without_outcome_driven_additions",
+    "basis_and_standardization_scope": "outer_training_donors_only",
+    "coordinate_standardization": "donor_type_weighted_inner_or_outer_training_mean_and_variance_then_inverse_transform_before_scoring",
+    "rank_candidates": [
+      2,
+      4,
+      6
+    ],
+    "minimum_basis_ceiling_r2": 0.3,
+    "inner_selection_target_fit_scope": "each_inner_training_donor_subset_only_never_inner_validation_or_outer_heldout_rows",
+    "outer_refit_target_scope": "all_outer_training_donors_after_inner_rank_selection",
+    "measured_gene_space_reporting_required": true
+  },
+  "validation_design": {
+    "outer_split": "leave_one_biological_donor_out",
+    "outer_donors": 15,
+    "inner_split": "leave_one_training_donor_out",
+    "spatial_blocks_kept_intact_when_rows_share_a_local_field": true,
+    "selection_metric": "donor_section_type_macro_residual_coordinate_r2_then_donor_type_macro_residual_coordinate_r2",
+    "outer_donor_may_affect_training_or_selection": false,
+    "primary_minimum_donor_section_type_support": 20,
+    "row_level_random_split": "prohibited",
+    "same_folds_for_focal_and_control_models": true,
+    "registration_sensitivity": "best_registration_subset_must_be_noninferior_to_all_rows_within_0.01_r2",
+    "best_registration_observed_rows": 391,
+    "best_registration_primary_minimum_support": 20,
+    "best_registration_supported_donor_type_strata_at_primary_support": 0,
+    "best_registration_current_evaluability": "unavailable_fail_closed",
+    "best_registration_unavailable_action": "engineering_support_false_no_post_outcome_band_or_support_substitution_under_v1"
+  },
+  "estimator_scope": {
+    "allowed_now": [
+      "per_type_ridge",
+      "shared_linear_type_adapter",
+      "small_shared_mlp",
+      "fine_type_FiLM_adapter",
+      "late_fusion_mlp"
+    ],
+    "deferred": [
+      "encoder_fine_tuning",
+      "RNA_autoencoder",
+      "reference_expansion",
+      "adversarial_alignment",
+      "optimal_transport",
+      "graph_learning",
+      "iterative_refinement"
+    ],
+    "reference_bank_complexity_change": "prohibited"
+  },
+  "linear_baselines": {
+    "B0_feature_candidates": [
+      "technical",
+      "spatial",
+      "stain_qc",
+      "morphometry_density",
+      "combined_nonimage"
+    ],
+    "B1_projection": {
+      "input_dimensions": 1536,
+      "output_dimensions": 96,
+      "distribution": "Rademacher_plus_or_minus_one_over_sqrt_96",
+      "seed": 20260720,
+      "outcome_independent_and_shared_across_outer_folds": true
+    },
+    "ridge_alpha_candidates": [
+      0.0001,
+      0.01,
+      1.0,
+      100.0
+    ],
+    "selection": "inner_leave_one_training_donor_out_using_the_same_rank_grid_and_hierarchical_tie_breaking"
+  },
+  "architectures": {
+    "input_width_policy": "use_the_registered_arm_width_image_1536_nuisance_158_or_concatenated_width",
+    "shared_linear_type_adapter": {
+      "shared_component": "Linear(input_width,rank)",
+      "type_specific_component": "rank_8_low_rank_linear_adapter",
+      "separate_network_per_type": false
+    },
+    "mlp_tiny": {
+      "layers": [
+        "LayerNorm(input_width)",
+        "Linear(input_width,64)",
+        "GELU",
+        "Dropout(0.0)",
+        "Linear(64,rank)"
+      ],
+      "batch_normalization": false
+    },
+    "mlp_small": {
+      "layers": [
+        "LayerNorm(input_width)",
+        "Linear(input_width,256)",
+        "GELU",
+        "Dropout(0.2)",
+        "Linear(256,64)",
+        "GELU",
+        "Linear(64,rank)"
+      ],
+      "batch_normalization": false
+    },
+    "fine_type_adapter": {
+      "embedding_width": 16,
+      "adapter_rank": 8,
+      "conditioning": "FiLM_scale_and_shift_on_first_hidden_layer",
+      "separate_network_per_type": false
+    },
+    "late_fusion": {
+      "per_view": [
+        "LayerNorm(view_width)",
+        "Linear(view_width,64)",
+        "GELU"
+      ],
+      "fusion": [
+        "concatenate_projected_views",
+        "Linear(number_of_views_times_64,64)",
+        "GELU",
+        "Linear(64,rank)"
+      ],
+      "N6_input_views": [
+        "crop_112um",
+        "nucleus_mask_only",
+        "cell_mask_only"
+      ],
+      "N6_input_dimensions": [
+        1536,
+        1536,
+        1536
+      ],
+      "N7_input_views": [
+        "deduplicated_all_controls_158d",
+        "crop_112um",
+        "nucleus_mask_only",
+        "cell_mask_only"
+      ],
+      "N7_input_dimensions": [
+        158,
+        1536,
+        1536,
+        1536
+      ],
+      "target_cell_removed_is_focal_input": false
+    }
+  },
+  "training_and_selection": {
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay_candidates": [
+      0.0001,
+      0.01
+    ],
+    "maximum_epochs": 100,
+    "batch_size": 256,
+    "inner_fold_early_stopping_patience": 10,
+    "fixed_seeds": [
+      17,
+      29,
+      41
+    ],
+    "gradient_clipping_norm": 1.0,
+    "loss": "donor_type_weighted_latent_coordinate_MSE",
+    "selection_metric": "donor_balanced_validation_R2_not_cell_weighted_validation_loss",
+    "inner_procedure": "leave_one_outer_training_donor_out_fit_normalization_and_target_on_inner_training_then_select_checkpoint_and_configuration_on_the_inner_validation_donor_never_the_outer_donor",
+    "outer_refit_epochs": "median_selected_epoch_count_across_successful_inner_folds",
+    "outer_refit_scope": "all_outer_training_donors_only",
+    "seed_aggregation": "average_three_seed_predictions",
+    "per_seed_reporting": true,
+    "configuration_failure_action": "reject_if_any_inner_donor_fold_fails"
+  },
+  "prediction_diagnostics": {
+    "molecular_error_reduction": "donor_type_macro_relative_RMSE_reduction_over_reference_mean",
+    "molecular_variance_ratio": "median_gene_wise_predicted_over_truth_standard_deviation_within_supported_donor_type_strata_then_equal_type_and_donor_macro_average",
+    "coverage_policy": "dense_prediction_no_post_hoc_OOD_abstention_v1",
+    "median_type_coverage": "one_for_every_supported_heldout_type_when_all_registered_rows_receive_finite_predictions",
+    "abstention_rate": "zero_when_all_registered_rows_receive_finite_predictions_otherwise_fail",
+    "rare_state_definition": "outer_training_only_per_type_per_coordinate_lower_and_upper_deciles",
+    "rare_state_recall": "heldout_fraction_predicted_into_the_correct_training_defined_tail_macro_averaged_over_evaluable_donor_type_coordinate_tails",
+    "rare_state_recall_drop": "B2_recall_minus_candidate_recall",
+    "maximum_single_donor_gain_fraction": "largest_positive_donor_gain_divided_by_sum_of_positive_donor_gains_fail_if_no_positive_gain"
+  },
+  "model_selection_tie_breaking": [
+    "reject_configurations_that_fail_any_inner_donor_fold",
+    "reject_configurations_with_minimum_inner_fold_basis_ceiling_below_0.3",
+    "reject_configurations_with_median_variance_ratio_below_0.5",
+    "maximize_donor_section_type_macro_R2",
+    "then_maximize_donor_type_macro_R2",
+    "then_choose_fewer_parameters",
+    "then_choose_larger_weight_decay",
+    "then_choose_lexicographically_smaller_model_id"
+  ],
+  "engineering_support_rule": {
+    "donor_type_macro_residual_coordinate_r2": {
+      "operator": ">=",
+      "threshold": 0.05
+    },
+    "donor_section_type_macro_residual_coordinate_r2": {
+      "operator": ">=",
+      "threshold": 0.05
+    },
+    "improvement_over_b2_r2": {
+      "operator": ">=",
+      "threshold": 0.01
+    },
+    "improvement_over_n0_r2": {
+      "operator": ">=",
+      "threshold": 0.03
+    },
+    "molecular_error_reduction_over_reference_mean": {
+      "operator": ">=",
+      "threshold": 0.05
+    },
+    "positive_supported_donor_type_strata_fraction": {
+      "operator": ">=",
+      "threshold": 0.8
+    },
+    "positive_donors_versus_n0_fraction": {
+      "operator": ">=",
+      "threshold": 0.8
+    },
+    "maximum_single_donor_gain_fraction": {
+      "operator": "<",
+      "threshold": 0.5
+    },
+    "molecular_variance_ratio": {
+      "operator": ">=",
+      "threshold": 0.5
+    },
+    "median_type_coverage": {
+      "operator": ">=",
+      "threshold": 0.5
+    },
+    "abstention_rate": {
+      "operator": "<=",
+      "threshold": 0.5
+    },
+    "rare_state_recall_drop": {
+      "operator": "<=",
+      "threshold": 0.2
+    },
+    "within_section_type_refitted_null_empirical_p": {
+      "operator": "<=",
+      "threshold": 0.01
+    },
+    "different_spatial_block_refitted_null_empirical_p": {
+      "operator": "<=",
+      "threshold": 0.01
+    },
+    "intrinsic_increment_over_target_removed_r2": {
+      "operator": ">=",
+      "threshold": 0.01
+    },
+    "best_registration_minus_all_rows_r2": {
+      "operator": ">=",
+      "threshold": -0.01
+    }
+  },
+  "intrinsic_increment_definition": {
+    "focal_arms": [
+      "N1",
+      "N3",
+      "N4"
+    ],
+    "counterfactual_arm": "N5",
+    "registered_statistic": "minimum_of_N1_N3_N4_paired_donor_type_macro_r2_increments_over_N5",
+    "interpretation": "engineering localization diagnostic_only_never_H_INTRINSIC_authorization"
+  },
+  "architecture_matched_controls": {
+    "required_families": [
+      "neural_reference_mean_only",
+      "neural_combined_nuisance_only",
+      "neural_image_only",
+      "neural_combined_nuisance_plus_image",
+      "neural_blank_patch",
+      "neural_target_removed"
+    ],
+    "combined_nuisance_representation": {
+      "source_key": "all_controls",
+      "dimensions": 158,
+      "definition": "frozen_deduplicated_existing_combined_nonimage_controls",
+      "full_nuisance_covariates_31d_is_not_a_substitute": true
+    },
+    "blank_patch_input": {
+      "status": "blocked_missing_feature_supplement",
+      "source_availability": "unavailable_in_registered_source",
+      "required_action": "fail_closed_until_receipt_bound_blank_embedding_supplement_is_frozen_before_execution",
+      "may_synthesize_or_reuse_zero_vector": false
+    },
+    "same_search_space_and_donor_folds": true,
+    "implementation_work_package": "WP_3_core_implemented_and_synthetic_smoke_complete"
+  },
+  "refitted_nulls": {
+    "families": [
+      "within_section_type_image_derangement",
+      "different_spatial_block_reassignment"
+    ],
+    "smoke_permutations_per_family": 20,
+    "final_permutations_per_family": 100,
+    "complete_refit_required": true,
+    "refit_steps": [
+      "preprocessing",
+      "target_fitting",
+      "hyperparameter_selection",
+      "training",
+      "checkpoint_selection",
+      "prediction",
+      "scoring"
+    ],
+    "feature_only_post_fit_shuffle": "prohibited",
+    "only_fully_frozen_selected_model_family_receives_final_null_run": true
+  },
+  "decision_outcomes": {
+    "B2_beats_B1_neural_not_B2": "retain_full_feature_ridge_historical_projection_was_harmful",
+    "neural_beats_B2_not_N0": "nonlinearity_not_image_specific_stop_claim_progression",
+    "focal_equals_target_removed": "context_or_technical_structure_not_target_cell_information",
+    "intrinsic_only_in_poor_registration": "do_not_pursue_intrinsic_claim",
+    "N6_or_N7_complete_rule_pass": "supports_designing_a_new_prospective_estimator_protocol_only",
+    "all_neural_arms_fail": "stop_neural_expansion_prioritize_measurement_crop_representation_or_new_encoder_protocol",
+    "r2_improves_variance_fails": "consider_separate_RNA_target_work_package_do_not_proceed_to_reference_fusion"
+  },
+  "execution_state": {
+    "WP_1_protocol_registered": true,
+    "execution_authorized": false,
+    "blockers": [
+      "registered_source_has_no_blank_patch_embedding",
+      "best_registration_subset_has_zero_supported_donor_type_strata_at_primary_support_20"
+    ],
+    "neural_probe_implemented": true,
+    "architecture_matched_controls_and_nulls_implemented": true,
+    "preflight_and_synthetic_smoke_runner_implemented": true,
+    "full_biological_runner_implemented": false,
+    "synthetic_smoke_complete": true,
+    "biological_experiment_run": false,
+    "engineering_decision_available": false
+  },
+  "resource_limits": {
+    "maximum_CPU_threads": 4,
+    "maximum_visible_GPUs": 1,
+    "maximum_GPU_memory_fraction": 0.6,
+    "outer_folds_serial": true,
+    "swap_permitted": false,
+    "out_of_memory_action": "fail_closed_without_protocol_or_batch_identity_change"
+  },
+  "claim_boundaries": {
+    "may_relabel_existing_negative_results": false,
+    "may_relax_failed_H_optimus_positive_control_gate": false,
+    "may_use_result_as_H_CELL_evidence": false,
+    "may_use_result_as_H_INTRINSIC_evidence": false,
+    "may_use_result_as_H_REF_evidence": false,
+    "may_use_result_as_full_HEIR_evidence": false,
+    "maximum_positive_action": "register_a_new_prospective_estimator_protocol_before_opening_pristine_outcomes"
+  }
+}

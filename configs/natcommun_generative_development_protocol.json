@@ -1,0 +1,277 @@
+{
+  "schema": "heir.natcommun_generative_development_protocol.v2",
+  "protocol_date": "2026-07-14",
+  "cohort_id": "NatCommun_2025_s41467_025_59005_9_E-MTAB-14560",
+  "analysis_status": "exposed_development_only_non_confirmatory",
+  "development_revision": "v2_scale_normalized_every_minibatch_cross_assay_alignment",
+  "revision_trigger": "the_complete_v1_development_run_was_audited_as_under_aligned_before_claim_progression",
+  "prior_exposed_run": {
+    "artifact_directory": "/mnt/seagate/HEIR_runs/natcommun_generative_development/revisions/underaligned_v1",
+    "status": "retained_as_under_aligned_development_baseline_not_valid_shared_latent_evidence",
+    "outcomes_used_to_modify_architecture": true,
+    "independent_confirmation_status": "none"
+  },
+  "purpose": "Falsify whether matched registered suspension expression profiles with donor/type labels add donor-held-out molecular information to an H&E base predictor under a count-generative model; the source does not verify a single-nucleus assay.",
+  "observation_level": "Visium_v2_regional_spot_not_cell",
+  "gene_panel_size": 256,
+  "latent_dimensions": 20,
+  "immutable_inputs": {
+    "source_path": "/mnt/seagate/HEIR_runs/natcommun_regional_source/source.npz",
+    "source_sha256": "ec37d5717a9b737dfac226ae9267258fb728ee024496a7655bb69a913aa3cf20",
+    "source_schema": "heir.natcommun_regional_source.v2",
+    "primary_encoder_repository": "bioptimus/H-optimus-1",
+    "primary_encoder_revision": "3592cb220dec7a150c5d7813fb56e68bd57473b9",
+    "primary_encoder_manifest": "manifests/encoders/hoptimus1.json",
+    "primary_encoder_manifest_sha256": "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa09bdf77747043ac8fd9",
+    "primary_encoder_checkpoint_sha256": "c4f1e5b457ddf00679626053b0bf2899be6a19c3a04ad191c87ad1cdfd1abfe1",
+    "completed_predecessor_report_sha256": "81f8c0e703e54fa1010c096ae4d001e01c9623af5ffa5f0e4e5668acabcb08b4"
+  },
+  "encoders": {
+    "H_optimus_1": "required_frozen_primary_no_fine_tuning",
+    "UNI2_h": "forbidden_not_run"
+  },
+  "image_inputs": {
+    "primary": "natural_registered_112um_H_optimus_1",
+    "secondary": "unavailable_not_run_registered_source_lacks_55um_H_optimus_1_embeddings",
+    "secondary_status": "required_sensitivity_unavailable_not_run",
+    "secondary_may_rescue_primary_failure": false,
+    "held_out_ST_may_route_image_query": false
+  },
+  "gene_panel": {
+    "external_frozen_artifact": "configs/natcommun_generative_gene_panel.json",
+    "external_frozen_artifact_sha256": "ce0b6b82440d7fccc69f24afccf0c68bb101b85f590e4a35a514309929fbb6ad",
+    "external_frozen_identity_sha256": "12c075a0b7639b64a6a0c521e855cd10f44852212865924279b05d40b38083cf",
+    "projected_counts_artifact": "/mnt/seagate/HEIR_runs/natcommun_generative_development/panel_256_projected_counts.npz",
+    "projected_counts_artifact_sha256": "71479f891b5945762e20ec5b91d85bac097230b12ed9192aeacd965be119607f",
+    "projected_counts_artifact_bytes": 135134364,
+    "external_and_lodo_receipts_artifact": "/mnt/seagate/HEIR_runs/natcommun_generative_development/gene_panel_external_and_lodo_receipts.json",
+    "external_and_lodo_receipts_sha256": "7dcd5bbd6fe6f1a18625afd1fddd36bbd1a9ccad284612cab5248cd21a09f982",
+    "external_and_lodo_receipts_identity_sha256": "3faa42ff97906e2f3040de6a3b74e0a0942e85ac8bf98fec151a6ae5398406ff",
+    "external_frozen_artifact_status": "materialized_before_model_fitting",
+    "preparation_script": "scripts/freeze_natcommun_generative_panel.py",
+    "external_selection": "all_exposed_NatCommun_development_donors_before_any_future_independent_validation",
+    "lodo_selection": "outer_training_donors_only_for_NatCommun_leakage_safe_sensitivity",
+    "lodo_panel_receipts_status": "materialized_panel_membership_receipts_only",
+    "lodo_model_sensitivity_status": "not_run_required_sensitivity",
+    "technical_prefixes_excluded": [
+      "MT-",
+      "RPL",
+      "RPS",
+      "HBA",
+      "HBB"
+    ],
+    "prespecified_program_genes": "retain_when_they_pass_shared_ST_and_registered_suspension_detection_and_minimum_0.05_split_reliability",
+    "minimum_ST_split_reliability": 0.05,
+    "ranking": "donor_demeaned_ST_signal_variance_plus_ST_split_reliability_plus_within_donor_type_registered_suspension_variance",
+    "panel_reselection_after_result_exposure": "prohibited"
+  },
+  "outer_validation": {
+    "split": "leave_one_donor_out_over_13_primary_donors",
+    "held_out_donor_ST_use": "endpoint_scoring_only_never_selection_routing_dispersion_or_training",
+    "held_out_donor_registered_suspension_use": "matched_reference_distribution_only_never_decoder_training_or_panel_selection",
+    "hyperparameters": "fixed_pre_score_engineering_defaults_no_inner_fold_search_was_run",
+    "base_seed": 1729,
+    "epochs": 80,
+    "maximum_epochs": 80,
+    "batch_size": 256,
+    "primary_endpoint": "donor_balanced_held_out_negative_binomial_deviance_over_frozen_256_gene_panel",
+    "minimum_primary_improvement_fraction": 0.05,
+    "minimum_improved_donor_fraction": 0.7,
+    "uncertainty": "donor_level_paired_sign_flip_or_donor_bootstrap_confidence_interval_as_prespecified_by_metric",
+    "indication_reversal_guard": "no_severe_indication_specific_direction_reversal"
+  },
+  "generative_model": {
+    "count_family": "negative_binomial_NB2_with_training_donor_only_dispersion",
+    "shared_latent": "20D_modality_aware_variational_state",
+    "reference_source": "registered_suspension_expression_profiles_labeled_cell_with_donor_and_type_not_verified_snRNA",
+    "molecular_decoders": "separate_registered_suspension_and_ST_decoders",
+    "cross_assay_alignment_weight": 1.0,
+    "cross_assay_alignment_loss": "matched_donor_pseudobulk_MSE_divided_by_detached_off_diagonal_mismatched_donor_MSE",
+    "cross_assay_alignment_frequency": "every_molecular_minibatch",
+    "cross_assay_alignment_comparator": "same_seed_same_schedule_lambda_zero_training_only_model",
+    "cross_assay_alignment_support_criterion": "post_matched_to_mismatched_ratio_less_than_one_less_than_pre_and_less_than_lambda_zero_post_ratio_in_every_outer_fold",
+    "cross_assay_alignment_scope": "coarse_training_donor_pseudobulk_fit_adequacy_guard_not_within_type_state_calibration_evidence",
+    "donor_type_proxy_alignment_diagnostic": "training_only_composition_weighted_ST_donor_by_type_means_vs_registered_suspension_donor_by_type_means_compared_with_same_seed_lambda_zero_model",
+    "donor_type_proxy_alignment_role": "required_for_gate3_evaluability_not_cell_level_or_observed_type_truth",
+    "matched_reference": "deterministic_multicomponent_diagonal_Gaussian_distribution_by_donor_and_type_not_one_centroid",
+    "fusion": "one_step_diagonal_Gaussian_product_of_experts_or_capacity_matched_cross_attention",
+    "nonlinear_decoder_expectation": "componentwise_deterministic_Sobol_then_exact_mixture_moments",
+    "Sobol_samples_per_component": 32,
+    "state_variance": "training_residual_likelihood_calibrated_per_type_then_frozen",
+    "H_and_E_role": "base_predictor_for_composition_type_routing_and_continuous_state_query",
+    "M0_M3_capacity_rule": "same_H_and_E_query_encoder_and_same_ST_decoder",
+    "reference_composition_primary": "natural_matched_bank",
+    "reference_mixture_clustering_identity": "same_base_seed_and_registered_cell_ID_initialization_for_matched_wrong_and_generic_banks",
+    "reference_composition_secondary": "soft_weighted_composition_sensitivity_not_run",
+    "soft_weighted_composition_sensitivity_status": "not_run_required_sensitivity",
+    "normalized_Mahalanobis_support_threshold": 4.0,
+    "minimum_supported_composition_mass": 0.9,
+    "gate3_minimum_eligible_spots_per_section": 3,
+    "iterative_updates": 0
+  },
+  "model_arms": {
+    "M0": "H_and_E_only_composition_and_state_query_through_shared_ST_decoder",
+    "M1": "matched_reference_distribution_only",
+    "M2": "full_target_descriptive_H_and_E_composition_plus_matched_type_means_with_H_and_E_state_fallback_for_reference_missing_types_not_valid_for_gate3",
+    "M2_supported": "gate3_only_H_and_E_composition_renormalized_over_types_with_at_least_two_matched_reference_components_plus_matched_type_means",
+    "M3": "full_H_and_E_composition_and_continuous_state_query_fused_once_with_matched_reference_distribution",
+    "M3_supported": "gate3_only_same_supported_and_renormalized_composition_as_M2_supported_plus_matched_reference_PoE_state",
+    "M4": "within_section_and_composition_stratum_deranged_H_and_E_plus_matched_reference",
+    "M5": "blank_H_and_E_or_coordinates_control_plus_matched_reference",
+    "M6": "H_and_E_plus_natural_same_indication_wrong_donor_reference_banks_diagnostic_only_without_fixed_ESS_matching",
+    "M7": "H_and_E_plus_generic_same_indication_query_excluded_reference",
+    "M8": "training_dispersion_negative_binomial_compatible_count_split_empirical_molecular_oracle_not_a_hard_floor"
+  },
+  "retrieval_baseline": {
+    "family": "BLEEP_style_contrastive",
+    "training": "paired_H_and_E_and_ST_joint_embedding_on_outer_training_donors_only",
+    "query": "held_out_H_and_E_retrieves_or_attends_held_out_matched_registered_suspension_latents_without_held_out_ST",
+    "decoder": "same_frozen_ST_count_decoder_and_gene_panel",
+    "temperature": 0.07,
+    "hard_negative_weight": 0.5,
+    "hard_negative_rule": "prioritize_same_indication_same_dominant_composition_different_donor_then_same_indication_then_global_emergency_fallback_max_fixed_latent_projection_difference",
+    "hard_negative_fallback_reporting": "count_and_fraction_saved_per_fold",
+    "role": "required_simpler_reference_retrieval_baseline_not_a_replacement_for_M0"
+  },
+  "ordered_gates": [
+    {
+      "id": "gate_1_core_increment",
+      "tests": [
+        "M3_negative_binomial_deviance_less_than_M0",
+        "relative_gain_at_least_0.05",
+        "gain_in_at_least_0.70_of_donors",
+        "paired_confidence_interval_excludes_zero_in_favorable_direction",
+        "exact_one_sided_donor_sign_flip_p_value_at_most_0.05",
+        "no_indication_relative_gain_below_minus_0.02"
+      ],
+      "failure_action": "scientific_hypothesis_unsupported_stop_claim_progression"
+    },
+    {
+      "id": "gate_2_image_and_pairing",
+      "tests": [
+        "M3_less_than_M1",
+        "M3_less_than_M4"
+      ],
+      "multiplicity": "Holm_over_two_tests"
+    },
+    {
+      "id": "gate_3_state_beyond_composition",
+      "tests": [
+        "training_only_donor_type_proxy_alignment_ratio_less_than_one_and_less_than_same_seed_lambda_zero_ratio",
+        "M3_supported_less_than_M2_supported_on_spots_with_at_least_0.90_H_composition_mass_over_matched_supported_types"
+      ],
+      "multiplicity": "single_prespecified_test",
+      "minimum_eligible_spots_per_section": 3,
+      "failure_action": "not_evaluable_if_any_outer_donor_section_fails_prespecified_support"
+    },
+    {
+      "id": "gate_4_natural_reference_bank_separation",
+      "tests": [
+        "M3_less_than_M6",
+        "M3_less_than_M7"
+      ],
+      "multiplicity": "Holm_over_two_tests",
+      "role": "diagnostic_only_not_personalization_attribution_without_fixed_ESS_wrong_bank_sensitivity"
+    },
+    {
+      "id": "gate_5_measurement_headroom",
+      "tests": [
+        "M8_less_than_M3_in_the_same_split_target_space"
+      ],
+      "role": "secondary_empirical_oracle_headroom_diagnostic_not_hard_ST_floor"
+    }
+  ],
+  "metrics": {
+    "primary": [
+      "donor_balanced_negative_binomial_deviance"
+    ],
+    "secondary": [
+      "plug_in_held_out_negative_binomial_log_likelihood",
+      "20D_latent_MSE",
+      "gene_and_program_correlation",
+      "calibration_slope",
+      "reliability_adjusted_variance",
+      "program_covariance",
+      "rare_state_recall",
+      "predictive_interval_coverage_50_80_95",
+      "reference_coverage",
+      "abstention_rate",
+      "retrieval_entropy"
+    ],
+    "exploratory_nonblocking_approximations": [
+      "eight_point_Gauss_Hermite_moment_matched_lognormal_posterior_predictive_NB_log_score",
+      "moment_normal_predictive_interval_coverage_50_80_95",
+      "H_composition_weighted_Mahalanobis_reference_state_coverage",
+      "out_of_support_flag_rate_called_abstention_rate_predictions_not_withheld"
+    ],
+    "prohibited_primary_substitute": "raw_variance_ratio_alone"
+  },
+  "development_quality_margins": {
+    "status": "provisional_simulation_calibration_targets_to_freeze_before_external_ST_opening",
+    "minimum_indication_relative_gain": -0.02,
+    "minimum_M3_to_M0_reliability_adjusted_variance_ratio": 0.8,
+    "maximum_M3_to_M0_program_covariance_error_ratio": 1.1,
+    "maximum_rare_state_recall_drop": 0.05,
+    "maximum_absolute_interval_coverage_error": {
+      "50": 0.1,
+      "80": 0.08,
+      "95": 0.04
+    },
+    "interval_coverage_margin_role": "exploratory_nonblocking_because_intervals_are_moment_normal_not_predictive_quantiles",
+    "minimum_H_composition_weighted_state_coverage": 0.9,
+    "reference_state_coverage_margin_role": "exploratory_nonblocking_not_inner_training_donor_calibrated",
+    "maximum_abstention_rate": 0.2,
+    "abstention_rate_margin_role": "exploratory_nonblocking_not_inner_training_donor_calibrated_and_predictions_not_withheld",
+    "external_outcomes_may_select_or_change_these_margins": false
+  },
+  "zero_depth_policy": {
+    "full_library_zero_spots": "exclude_from_every_model_fit_and_primary_endpoint_with_count_report",
+    "split_half_zero_spots": "exclude_only_from_M8_split_target_metric_when_that_half_has_zero_depth",
+    "gene_zero_counts": "retain_as_valid_negative_binomial_observations"
+  },
+  "M8_split_policy": {
+    "existing_binomial_molecule_halves": "may_inform_development_gene_reliability_only",
+    "oracle_split": "negative_binomial_compatible_beta_binomial_or_Dirichlet_multinomial_split_using_training_only_dispersion",
+    "Poisson_split_assumption": "prohibited_under_overdispersion",
+    "comparison_space": "M8_and_depth_scaled_M3_predict_the_same_held_out_split_half",
+    "interpretation": "empirical_molecular_oracle_and_headroom_diagnostic_not_a_mathematical_ST_floor",
+    "full_depth_measurement_noise_risk": "not_estimated_no_registered_independent_full_depth_replicate"
+  },
+  "unrun_required_sensitivities": {
+    "registered_55um_H_optimus_1": "unavailable_not_run_source_has_no_registered_55um_embeddings",
+    "fold_local_LODO_panel_model_reruns": "not_run",
+    "soft_weighted_reference_composition": "not_run",
+    "fixed_ESS_wrong_reference_banks": "not_run",
+    "full_depth_measurement_noise": "not_estimable_from_registered_source"
+  },
+  "resource_limits": {
+    "device": "CUDA_primary_CPU_fallback_for_tests_only",
+    "CUDA_visible_devices": "one_GPU",
+    "maximum_CPU_threads": 4,
+    "maximum_panel_preparation_RSS_GiB": 6,
+    "maximum_projected_counts_GiB": 1,
+    "outer_folds": "serial",
+    "checkpoints": "atomic_one_fold_at_a_time",
+    "mixed_precision": "allowed_with_float32_likelihood_accumulation",
+    "out_of_memory_action": "fail_closed_no_batch_change_under_current_identity_any_reduced_batch_run_requires_new_protocol_and_checkpoint_identity"
+  },
+  "claim_boundaries": {
+    "NatCommun_result": "architecture_development_and_falsification_only",
+    "regional_confirmation": "requires_independent_cohort",
+    "cell_level_claims": "prohibited",
+    "cell_level_requirement": "separate_matched_cell_resolved_H_and_E_spatial_expression_and_snRNA_cohort",
+    "iterative_refinement": "prohibited",
+    "iteration_reconsideration": "only_after_an_independent_one_step_result_passes_gates_1_through_3",
+    "software_product_claims": "out_of_scope"
+  },
+  "current_external_validation_status": {
+    "confirmatory_cohort_available_locally": false,
+    "NatCommun_may_confirm_the_hypothesis": false,
+    "HESCAPE_or_HEST_alone_can_authorize_cell_level_claims": false,
+    "central_development_experiment_can_complete": true,
+    "under_aligned_v1_development_run_complete": true,
+    "scale_normalized_alignment_v2_run_status": "pending_full_13_fold_rerun",
+    "full_protocol_implementation_complete": false,
+    "full_protocol_incompletion_reason": "required_55um_LODO_panel_soft_composition_and_fixed_ESS_wrong_bank_sensitivities_are_unavailable_or_not_run"
+  }
+}
