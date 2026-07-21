@@ -285,7 +285,8 @@
       "donor_shortcut": "target_and_features_share_training_donor_code_with_independent_heldout_donor_code",
       "variance_collapse": "candidate_predictions_scaled_to_0.1_of_target_standard_deviation",
       "poor_registration_signal_mask": "registration_failed_rows_only",
-      "same_full_nested_selection_and_decision_code_as_biological_run": true
+      "same_scoring_multiplicity_registration_and_decision_code_as_biological_run": true,
+      "nested_training_and_refit_path_checked_by_separate_implementation_smoke": true
     },
     "conditions": {
       "global_null": {"D1": false, "D2": false},

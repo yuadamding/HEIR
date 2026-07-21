@@ -84,11 +84,12 @@ Neither decision authorizes a biological HEIR hypothesis.
 
 ## Calibration and stopping
 
-Before opening `nucleus_molecular_targets`, the same nested selection and decision code must run
-200 synthetic trials for each of ten frozen conditions on the real donor/section/type/block/
-registration topology. Exact one-sided Clopper-Pearson bounds use Bonferroni control across all
-20 D1/D2 expectations. False-positive upper bounds must be below 0.05 and true-positive lower
-bounds above 0.80.
+Before opening `nucleus_molecular_targets`, the exact scoring, multiplicity, registration, and
+D1/D2 code must run on synthetic held-out predictions for 200 trials in each of ten frozen
+conditions on the real donor/section/type/block/registration topology. The separate implementation
+smoke covers nested fitting, checkpoint replay, and complete refits. Exact one-sided
+Clopper-Pearson bounds use Bonferroni control across all 20 D1/D2 expectations. False-positive
+upper bounds must be below 0.05 and true-positive lower bounds above 0.80.
 
 Calibration failure blocks HEST molecular execution. A revision is allowed only while no HEST
 molecular member has been opened under v2. After a passing calibration receipt, a clean committed
