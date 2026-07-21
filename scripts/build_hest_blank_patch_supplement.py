@@ -17,11 +17,11 @@ import numpy as np
 
 from heir.evaluation.blank_patch_receipt import (
     batch_parity_receipt,
-    blank_pixels,
+    blank_rgb,
+    build_receipt,
+    inspect_registered_source,
     load_supplement,
-    make_receipt,
-    source_identity,
-    supplement_arrays,
+    supplement_payload,
     validate_encoder_contract,
     validate_receipt,
 )
@@ -169,8 +169,8 @@ def _atomic_npz(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
 
 
 def _encode_blank_batches(encoder: HOptimus1Encoder) -> tuple[np.ndarray, np.ndarray]:
-    single = np.asarray(encoder.encode(blank_pixels(1)), dtype=np.float32)
-    repeated = np.asarray(encoder.encode(blank_pixels(32)), dtype=np.float32)
+    single = np.asarray(encoder.encode(blank_rgb(1)), dtype=np.float32)
+    repeated = np.asarray(encoder.encode(blank_rgb(32)), dtype=np.float32)
     return single, repeated
 
 
@@ -184,7 +184,7 @@ def _load_inputs(
     contract = _protocol_contract(protocol_path)
     manifest = load_encoder_manifest(manifest_path)
     validate_encoder_contract(manifest, model_dir)
-    source = source_identity(
+    source = inspect_registered_source(
         source_path,
         expected_sha256=str(contract["sha256"]),
         expected_rows=int(contract["rows"]),
@@ -204,16 +204,17 @@ def build(args: argparse.Namespace) -> Mapping[str, object]:
     encoder = HOptimus1Encoder(args.model_dir, manifest, device=args.device)
     single, repeated = _encode_blank_batches(encoder)
     parity = batch_parity_receipt(single, repeated)
-    arrays = supplement_arrays(single, source=source, manifest=manifest)
+    arrays = supplement_payload(source, manifest, single)
     _atomic_npz(args.output, arrays)
     supplement = load_supplement(args.output)
-    receipt = make_receipt(
+    implementation = _implementation_identity()
+    receipt = build_receipt(
         source=source,
         supplement=supplement,
         manifest=manifest,
         protocol_sha256=str(contract["protocol_sha256"]),
         parity=parity,
-        implementation=_implementation_identity(),
+        implementation=implementation,
         runtime=_runtime_identity(args.device, torch, git),
     )
     validate_receipt(
@@ -222,7 +223,9 @@ def build(args: argparse.Namespace) -> Mapping[str, object]:
         supplement=supplement,
         manifest=manifest,
         protocol_sha256=str(contract["protocol_sha256"]),
-        expected_implementation=_implementation_identity(),
+        expected_implementation=implementation,
+        recomputed_batch_one=single,
+        recomputed_batch_32=repeated,
     )
     _atomic_json(args.receipt, receipt)
     return receipt
@@ -240,18 +243,27 @@ def validate(args: argparse.Namespace) -> Mapping[str, object]:
     receipt = _json(args.receipt)
     encoder = HOptimus1Encoder(args.model_dir, manifest, device=args.device)
     single, repeated = _encode_blank_batches(encoder)
-    result = validate_receipt(
+    implementation = _implementation_identity()
+    validate_receipt(
         receipt,
         source=source,
         supplement=supplement,
         manifest=manifest,
         protocol_sha256=str(contract["protocol_sha256"]),
-        expected_implementation=_implementation_identity(),
-        recomputed_single=single,
-        recomputed_repeated=repeated,
+        expected_implementation=implementation,
+        recomputed_batch_one=single,
+        recomputed_batch_32=repeated,
     )
     return {
-        **result,
+        "schema": "heir.hest_blank_patch_supplement_validation.v1",
+        "status": "passed",
+        "source_sha256": source.sha256,
+        "supplement_sha256": supplement.sha256,
+        "feature_sha256": supplement.feature_sha256,
+        "blank_patch_embedding_available": True,
+        "feature_recomputed_from_registered_pixels": True,
+        "molecular_outcomes_read": False,
+        "predictions_read": False,
         "validator_runtime": {
             "python_version": sys.version.split()[0],
             "numpy_version": np.__version__,

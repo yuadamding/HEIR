@@ -4,67 +4,68 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "status", "scope", "control_id", "source_protocol_sha256",
-    "registered_source_sha256", "ordered_observation_ids_sha256", "source_rows",
-    "source_member_allowlist", "source_members_read",
+    "schema", "status", "scope", "control_id", "protocol_sha256",
+    "registered_source_sha256", "registered_source_bytes",
+    "ordered_observation_ids_sha256", "source_rows", "source_members_opened",
     "source_bytes_hashed_without_deserialization", "encoder_repository",
     "encoder_revision", "encoder_manifest_sha256", "config_sha256",
-    "checkpoint_sha256", "encoder_path", "input_dtype", "input_layout",
-    "input_shape", "input_rgb_value", "input_sha256", "feature_dtype",
-    "feature_shape", "feature_sha256", "broadcast_rows", "broadcast_rule",
-    "supplement_schema", "supplement_sha256", "supplement_members", "batch_parity",
-    "implementation", "runtime", "molecular_outcomes_read", "predictions_read",
-    "query_outcomes_used", "biological_experiment_run",
-    "engineering_decision_available", "authorizes_h_cell", "authorizes_h_intrinsic",
-    "authorizes_h_ref", "authorizes_full_heir"
+    "checkpoint_sha256", "input_shape", "input_dtype", "input_layout",
+    "input_rgb_value", "input_sha256", "feature_shape", "feature_dtype",
+    "feature_sha256", "broadcast_rows", "broadcast_rule", "supplement_schema",
+    "supplement_sha256", "supplement_members", "batch_parity", "implementation",
+    "runtime", "molecular_outcomes_read", "predictions_read",
+    "biological_experiment_run"
   ],
   "properties": {
     "schema": {"const": "heir.hest_blank_patch_supplement.v1"},
     "status": {"const": "passed"},
-    "scope": {"const": "blank_control_only_no_molecular_outcomes"},
+    "scope": {"const": "outcome_blind_blank_image_control_only"},
     "control_id": {"const": "blank_white_negative_control"},
-    "source_protocol_sha256": {"$ref": "#/$defs/sha256"},
+    "protocol_sha256": {"$ref": "#/$defs/sha256"},
     "registered_source_sha256": {"$ref": "#/$defs/sha256"},
+    "registered_source_bytes": {"type": "integer", "minimum": 1},
     "ordered_observation_ids_sha256": {"$ref": "#/$defs/sha256"},
     "source_rows": {"const": 36121},
-    "source_member_allowlist": {"const": ["observation_ids"]},
-    "source_members_read": {"const": ["observation_ids"]},
+    "source_members_opened": {"const": ["observation_ids"]},
     "source_bytes_hashed_without_deserialization": {"const": true},
     "encoder_repository": {"const": "bioptimus/H-optimus-1"},
     "encoder_revision": {"const": "3592cb220dec7a150c5d7813fb56e68bd57473b9"},
     "encoder_manifest_sha256": {"$ref": "#/$defs/sha256"},
     "config_sha256": {"$ref": "#/$defs/sha256"},
     "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
-    "encoder_path": {"const": "heir.features.hoptimus1.HOptimus1Encoder.encode"},
+    "input_shape": {"const": [1, 224, 224, 3]},
     "input_dtype": {"const": "uint8"},
     "input_layout": {"const": "NHWC_RGB"},
-    "input_shape": {"const": [1, 224, 224, 3]},
     "input_rgb_value": {"const": [255, 255, 255]},
     "input_sha256": {"$ref": "#/$defs/sha256"},
-    "feature_dtype": {"const": "float32"},
     "feature_shape": {"const": [1, 1536]},
+    "feature_dtype": {"const": "float32"},
     "feature_sha256": {"$ref": "#/$defs/sha256"},
     "broadcast_rows": {"const": 36121},
     "broadcast_rule": {"const": "repeat_identical_feature_for_each_observation"},
     "supplement_schema": {"const": "heir.hest_blank_patch_supplement_npz.v1"},
     "supplement_sha256": {"$ref": "#/$defs/sha256"},
     "supplement_members": {
-      "type": "array", "minItems": 10, "maxItems": 10, "uniqueItems": true,
+      "type": "array", "minItems": 9, "maxItems": 9, "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
     },
     "batch_parity": {
       "type": "object", "additionalProperties": false,
       "required": [
-        "batch_sizes", "single_feature_sha256", "repeated_features_sha256",
-        "minimum_cosine", "minimum_required_cosine", "maximum_absolute_error", "passed"
+        "batch_sizes", "batch_1_feature_sha256", "batch_32_features_sha256",
+        "minimum_cosine", "mean_cosine", "maximum_absolute_error",
+        "minimum_required_cosine", "all_finite", "all_nonzero", "passed"
       ],
       "properties": {
         "batch_sizes": {"const": [1, 32]},
-        "single_feature_sha256": {"$ref": "#/$defs/sha256"},
-        "repeated_features_sha256": {"$ref": "#/$defs/sha256"},
+        "batch_1_feature_sha256": {"$ref": "#/$defs/sha256"},
+        "batch_32_features_sha256": {"$ref": "#/$defs/sha256"},
         "minimum_cosine": {"type": "number", "minimum": 0.9999, "maximum": 1.000001},
-        "minimum_required_cosine": {"const": 0.9999},
+        "mean_cosine": {"type": "number", "minimum": 0.9999, "maximum": 1.000001},
         "maximum_absolute_error": {"type": "number", "minimum": 0},
+        "minimum_required_cosine": {"const": 0.9999},
+        "all_finite": {"const": true},
+        "all_nonzero": {"const": true},
         "passed": {"const": true}
       }
     },
@@ -81,16 +82,32 @@
         "encoder_base_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
-    "runtime": {"type": "object"},
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "git_commit", "git_worktree_dirty_at_start", "python_version", "numpy_version",
+        "torch_version", "timm_version", "safetensors_version", "device",
+        "cuda_device_name", "cuda_autocast_enabled_by_encoder", "tf32_enabled",
+        "cublas_workspace_config"
+      ],
+      "properties": {
+        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "git_worktree_dirty_at_start": {"const": false},
+        "python_version": {"type": "string", "minLength": 1},
+        "numpy_version": {"type": "string", "minLength": 1},
+        "torch_version": {"type": "string", "minLength": 1},
+        "timm_version": {"type": "string", "minLength": 1},
+        "safetensors_version": {"type": "string", "minLength": 1},
+        "device": {"enum": ["cpu", "cuda", "cuda:0"]},
+        "cuda_device_name": {"type": ["string", "null"]},
+        "cuda_autocast_enabled_by_encoder": {"type": "boolean"},
+        "tf32_enabled": {"const": false},
+        "cublas_workspace_config": {"enum": [":4096:8", ":16:8"]}
+      }
+    },
     "molecular_outcomes_read": {"const": false},
     "predictions_read": {"const": false},
-    "query_outcomes_used": {"const": false},
-    "biological_experiment_run": {"const": false},
-    "engineering_decision_available": {"const": false},
-    "authorizes_h_cell": {"const": false},
-    "authorizes_h_intrinsic": {"const": false},
-    "authorizes_h_ref": {"const": false},
-    "authorizes_full_heir": {"const": false}
+    "biological_experiment_run": {"const": false}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
