@@ -1,1 +1,3 @@
 *.tsv whitespace=-blank-at-eol,-blank-at-eof
+# Preserve the exact CRLF bytes of the hash-bound study fold manifest.
+configs/personalized/study_folds.csv -text whitespace=cr-at-eol

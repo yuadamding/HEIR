@@ -103,6 +103,51 @@ def regional_demo(regional_workflow):
     return root, output, target
 
 
+def test_predefined_pilot_controls_fit_distinct_paths_and_reject_changed_budget(regional_demo):
+    root, baseline, _ = regional_demo
+    output = root / "controls"
+    command = [
+        "cohort-controls",
+        "--root",
+        str(root),
+        "--config",
+        str(root / "workflow.json"),
+        "--baseline-run",
+        str(baseline),
+        "--epochs",
+        "2",
+        "--output",
+        str(output),
+    ]
+    assert main(command) == 0
+    summary = json.loads((output / "run.json").read_text())
+    assert set(summary["comparisons"]) == {
+        "rna_transfer_trained",
+        "constant_reference",
+        "constant_reference.transfer",
+        "rna_rank2",
+        "rna_rank2.transfer",
+    }
+    constant, metadata = load_prediction(output / "constant_reference.npz")
+    assert metadata["assignment_mode"] == "constant_reference"
+    assert torch.equal(
+        constant.conditional_assignment,
+        constant.conditional_assignment[:1].expand_as(constant.conditional_assignment),
+    )
+    transfer, _ = load_prediction(output / "rna_transfer_trained.npz")
+    assert torch.equal(transfer.expression, transfer.transfer)
+    assert not transfer.log_correction.any()
+    fitted = FittedModel.load(output / "rna_transfer_trained.bundle")
+    assert fitted.model.config.transfer_only
+    assert summary["comparisons"]["constant_reference.transfer"]["active_trainable_parameters"] == 0
+    mismatch = command.copy()
+    mismatch[mismatch.index("--epochs") + 1] = "3"
+    mismatch[mismatch.index("--output") + 1] = str(root / "changed-budget")
+    with pytest.raises(ValueError, match="settings must match"):
+        main(mismatch)
+    assert not (root / "changed-budget").exists()
+
+
 def test_demo_exports_three_comparisons_and_predict_ignores_unavailable_targets(
     regional_demo, monkeypatch
 ):

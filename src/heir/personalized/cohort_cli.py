@@ -7,7 +7,7 @@ import hashlib
 import json
 import sys
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -369,6 +369,8 @@ def _prediction_provenance(fitted, sources):
         "target_payload_read": False,
         "prediction_unit": "tissue_region",
         "coordinate_units": "registered_pixel",
+        "assignment_mode": fitted.model.config.assignment_mode,
+        "reference_control": fitted.preparation.get("reference_pool"),
     }
 
 
@@ -384,6 +386,11 @@ def predict_command(args):
     inputs, sources = prepare_cohort_inputs(
         args.root, args.biopsy, gene_ids=fitted.model.config.gene_ids, **config["preparation"]
     )
+    if fitted.preparation.get("reference_pool"):
+        from .study import load_pooled_reference
+
+        inputs = replace(inputs, reference=load_pooled_reference(args.bundle), proteins=None)
+        sources["rna_reference_control"] = fitted.preparation["reference_pool"]
     prediction = fitted.predict(inputs)
     save_prediction(prediction, args.output, _prediction_provenance(fitted, sources))
 
@@ -512,7 +519,131 @@ def demo_command(args):
     )
 
 
+def controls_command(args):
+    """Fit three predefined controls against an existing same-biopsy full RNA pilot."""
+    config, model = _config(args.config)
+    model = replace(model, variant="he_rna", transfer_only=False, assignment_mode="learned")
+    baseline_path = Path(args.baseline_run)
+    baseline = FittedModel.load(baseline_path / "he_rna.bundle", device=args.device)
+    settings = _settings(args)
+    if baseline.model.config != model or any(
+        baseline.training_config.get(key) != value for key, value in asdict(settings).items()
+    ):
+        raise ValueError("control settings must match the existing full RNA pilot")
+    if baseline.preparation.get("evaluation_role") != "development_in_sample":
+        raise ValueError("controls require an explicitly in-sample pilot baseline")
+    if baseline.preparation.get("cohort_workflow") != _workflow(config):
+        raise ValueError("control preparation must match the existing pilot")
+    sample, sources, target_record = _sample(args.root, args.biopsy, config, model)
+    if list(baseline.training_patient_ids) != [sample.inputs.patient_id]:
+        raise ValueError("control biopsy differs from the fitted pilot patient")
+    if target_record != json.loads((baseline_path / "target_coverage.json").read_text()):
+        raise ValueError("control target coverage differs from the existing pilot")
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=False)
+    _write(output / "config.json", config)
+    _write(output / "input_preparation.json", sources)
+    _write(output / "target_coverage.json", target_record)
+    experiments = {
+        "rna_transfer_trained": replace(model, transfer_only=True),
+        "constant_reference": replace(model, assignment_mode="constant_reference"),
+        "rna_rank2": replace(model, residual_rank=2),
+    }
+    results = {}
+    for name, current in experiments.items():
+        print(f"Fitting pilot control {name}", flush=True)
+        fitted = fit(
+            [sample],
+            current,
+            settings,
+            preparation={
+                "cohort_workflow": _workflow(config),
+                "evaluation_role": "development_in_sample",
+                "control": name,
+                "constant_mixture_policy": "RNA_reference_proportions_not_true_tissue_abundance"
+                if current.assignment_mode == "constant_reference"
+                else None,
+            },
+        )
+        fitted.save(output / f"{name}.bundle")
+        for transfer in [False, True] if not current.transfer_only else [False]:
+            fitted.model.config = replace(current, transfer_only=True) if transfer else current
+            prediction = fitted.predict(sample.inputs)
+            label = f"{name}.transfer" if transfer else name
+            save_prediction(
+                prediction, output / f"{label}.npz", _prediction_provenance(fitted, sources)
+            )
+            report = comparison_scores(
+                prediction,
+                sample.targets,
+                sample.observation,
+                sample.observation_groups,
+                current.gene_ids,
+                current.normalization_gene_ids,
+            )
+            report.update(
+                evaluation_role="development_in_sample",
+                control=name,
+                postfit_transfer_ablation=transfer,
+            )
+            _write(output / f"{label}.scores.json", report)
+            results[label] = {
+                "spearman": report["mean_replicate_median_gene_spearman"],
+                "normalized_log_mse": report["normalized_log_mse"],
+                "headline_status": report["headline_status"],
+                "active_trainable_parameters": fitted.model.active_trainable_parameter_count(),
+                "mean_absolute_log_correction": float(prediction.log_correction.abs().mean()),
+                "initial_training_loss": fitted.history[0]["loss"],
+                "final_training_loss": fitted.history[-1]["loss"],
+            }
+    _write(
+        output / "run.json",
+        {
+            "schema": "heir.pilot_controls.v1",
+            "biopsy_id": args.biopsy,
+            "evaluation_role": "development_in_sample",
+            "scientific_qualification": False,
+            "baseline_run": str(baseline_path.resolve()),
+            "training": asdict(settings),
+            "comparisons": results,
+            "interpretation": "predefined mechanisms; no held-out or true-abundance claim",
+        },
+    )
+
+
+def diagnostics_command(args):
+    """Diagnose existing pilot predictions and fixed-model protein interventions."""
+    from .diagnostics import write_pilot_diagnostics
+
+    write_pilot_diagnostics(args.root, args.run_directory, args.output)
+
+
+def study_command(args):
+    """Execute a frozen internal patient-held-out protocol with validation-only selection."""
+    from .study import run_study
+
+    run_study(args.root, args.config, args.folds, args.protocol, args.output)
+
+
 def add_commands(commands):
+    diagnostics = commands.add_parser("cohort-diagnose", help=diagnostics_command.__doc__)
+    diagnostics.add_argument("--root", required=True)
+    diagnostics.add_argument("--run", dest="run_directory", required=True)
+    diagnostics.add_argument("--output", required=True)
+    diagnostics.set_defaults(run=diagnostics_command)
+    study = commands.add_parser("cohort-study", help=study_command.__doc__)
+    for name in ("root", "config", "folds", "protocol", "output"):
+        study.add_argument(f"--{name}", required=True)
+    study.set_defaults(run=study_command)
+    controls = commands.add_parser("cohort-controls", help=controls_command.__doc__)
+    for name in ("root", "config", "baseline-run", "output"):
+        controls.add_argument(f"--{name}", required=True)
+    controls.add_argument("--biopsy", default="313-932")
+    controls.add_argument("--epochs", type=int, default=100)
+    controls.add_argument("--learning-rate", type=float, default=1e-3)
+    controls.add_argument("--seed", type=int, default=0)
+    controls.add_argument("--device", default="cpu")
+    controls.set_defaults(run=controls_command)
     inspect = commands.add_parser("cohort-inspect", help="inventory the 13-biopsy regional cohort")
     inspect.add_argument("--root", required=True)
     inspect.add_argument("--output", required=True)

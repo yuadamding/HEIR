@@ -1,0 +1,94 @@
+{
+  "schema": "heir.internal_patient_study.v1",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "ranks": [
+    2,
+    16
+  ],
+  "training": {
+    "epochs": 100,
+    "learning_rate": 0.001,
+    "protein_weight": 0.1,
+    "abundance_weight": 0.0,
+    "residual_weight": 0.001,
+    "seed": 0,
+    "device": "cpu"
+  },
+  "arms": {
+    "he": {
+      "variant": "he"
+    },
+    "he_rna": {
+      "variant": "he_rna"
+    },
+    "he_rna_protein": {
+      "variant": "he_rna_protein"
+    },
+    "constant_reference": {
+      "variant": "he_rna",
+      "assignment_mode": "constant_reference"
+    },
+    "generic_reference": {
+      "variant": "he_rna",
+      "reference_source": "training_pool"
+    },
+    "rna_transfer_trained": {
+      "variant": "he_rna",
+      "transfer_only": true
+    }
+  },
+  "selection": "highest_equal_patient_validation_spearman_then_lower_mse_then_lower_rank",
+  "max_reference_states": 32,
+  "prior_cohort_exposure": true,
+  "independent_confirmation": false,
+  "normalization_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "outcome_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "config_sha256": "75422ac836be0d11850f9f3d08dc4129e814ada6d04009eb9fca9723b61a4c25",
+  "folds_sha256": "b08ac3bccb3af7ab77054d27554c1addd6042a584ada774ac13ab3ec9898d881",
+  "metadata_review_sha256": "43e5767d44419e0108789dae1a8974f61332fa3ce582b59a303527cd100e6072",
+  "source_base_commit": "902a6efa607fa42e676e7dcb2c1db0c1c2b45a72",
+  "protocol_stage": "frozen_before_new_pilot_control_results_and_patient_study",
+  "test_prediction_before_target_loading": true,
+  "no_train_validation_refit": true,
+  "headline": "equal_patient_mean_of_equal_replicate_within_replicate_median_gene_spearman",
+  "paired_contrasts": [
+    "he_rna-minus-he",
+    "he_rna_protein-minus-he_rna",
+    "he_rna-minus-constant_reference",
+    "he_rna-minus-generic_reference",
+    "he_rna-minus-rna_transfer_trained"
+  ],
+  "secondary": "normalized_log_mse; transfer-only postfit; correction diagnostics; direct-marker versus other outcomes",
+  "pilot_diagnostics": {
+    "permutation_seed": 0,
+    "interior_tissue_fraction": 0.9,
+    "subsets_do_not_replace_main_result": true
+  },
+  "scientific_qualification": false
+}

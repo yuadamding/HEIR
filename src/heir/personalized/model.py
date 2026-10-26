@@ -44,6 +44,7 @@ class ModelConfig:
     refinement_bound: float = 0.25
     transfer_only: bool = False
     lr_interactions: tuple[LRInteraction, ...] = ()
+    assignment_mode: str = "learned"
 
     def __post_init__(self) -> None:
         for name in ("gene_ids", "supervised_gene_ids", "normalization_gene_ids", "state_gene_ids"):
@@ -55,6 +56,10 @@ class ModelConfig:
         object.__setattr__(self, "lr_interactions", interactions)
         if self.variant not in VARIANTS:
             raise ValueError(f"variant must be one of {VARIANTS}")
+        if self.assignment_mode not in {"learned", "constant_reference"}:
+            raise ValueError("assignment_mode must be learned or constant_reference")
+        if self.assignment_mode == "constant_reference" and self.variant != "he_rna":
+            raise ValueError("constant_reference assignment requires the noncontext he_rna arm")
         if not self.gene_ids or len(set(self.gene_ids)) != len(self.gene_ids):
             raise ValueError("model gene_ids must be nonempty and unique")
         if any(not isinstance(gene, str) or not gene.strip() for gene in self.gene_ids):
@@ -137,6 +142,8 @@ class PersonalizedModel(nn.Module):
             "supervised_mask",
             torch.tensor([gene in config.supervised_gene_ids for gene in config.gene_ids]),
         )
+        if config.assignment_mode == "constant_reference":
+            self.freeze_mapper()
 
     def initialize_fixed_mapper(self, baseline: "PersonalizedModel") -> None:
         """Copy and freeze the fitted protein mapper for equal-input context arms."""
@@ -168,6 +175,54 @@ class PersonalizedModel(nn.Module):
             for parameter in getattr(self, name).parameters():
                 parameter.requires_grad_(False)
         self.protein_log_strength.requires_grad_(False)
+
+    def active_trainable_parameter_count(self) -> int:
+        """Count trainable scalar parameters in the configured expression pathway.
+
+        Excludes unused arms, the support diagnostic, frozen parameters, masked
+        output rows, and noncontext message columns. This is architectural
+        capacity, not a count of nonzero gradients on one sample: absent protein
+        evidence, zero-valued features, or saturated clamps can deactivate more
+        parameters for a particular input.
+        """
+
+        def count(parameter, elements=None):
+            return (
+                (parameter.numel() if elements is None else elements)
+                if (parameter.requires_grad)
+                else 0
+            )
+
+        def module_count(module):
+            return sum(count(parameter) for parameter in module.parameters())
+
+        config = self.config
+        supervised = len(config.supervised_gene_ids)
+        if config.variant == "he":
+            if not supervised:
+                return 0
+            return (
+                module_count(self.decoder_image)
+                + count(self.baseline_head.weight, supervised * config.hidden_dim)
+                + count(self.baseline_head.bias, supervised)
+            )
+        total = 0
+        context = config.variant.startswith(("generic_", "lr_"))
+        if config.assignment_mode == "learned":
+            total += module_count(self.image_mapper) + module_count(self.state_mapper)
+            if self.uses_proteins:
+                total += count(self.protein_log_strength)
+            if context and config.variant.endswith("_refined"):
+                total += module_count(self.refinement_message)
+        if not config.transfer_only and supervised:
+            width = config.hidden_dim + (2 * len(config.lr_interactions) if context else 0)
+            total += (
+                module_count(self.decoder_image)
+                + count(self.residual_cell.weight, config.residual_rank * width)
+                + count(self.residual_cell.bias)
+                + count(self.residual_gene, supervised * config.residual_rank)
+            )
+        return total
 
     @property
     def uses_proteins(self) -> bool:
@@ -231,7 +286,7 @@ class PersonalizedModel(nn.Module):
             if inputs.registration_sensitivity is not None
             else x.new_full((n,), float("nan"))
         )
-        decoder_features = self.decoder_image(x)
+        decoder_features = self.decoder_image(x) if not config.transfer_only else None
         if config.variant == "he":
             # Neither RNA values, state IDs, nor proteins enter the H&E baseline.
             assignment = x.new_ones((n, 1))
@@ -257,16 +312,23 @@ class PersonalizedModel(nn.Module):
                 raise ValueError(
                     f"requested output genes missing from reference: {sorted(missing)}"
                 )
-            ordered_embedding = self._tensor(reference.embedding)[
-                :, [embedding_index[gene] for gene in config.state_gene_ids]
-            ]
-            state_features = self.state_mapper(ordered_embedding)
-            image_features = self.image_mapper(x)
-            compatible = image_features @ state_features.T / config.hidden_dim**0.5
-            logits = torch.cat((self.unsupported_head(image_features), compatible), dim=1)
-            logits = self._protein_logits(logits, inputs)
-            assignment = logits.softmax(dim=1)
-            conditional = logits[:, 1:].softmax(dim=1)
+            if config.assignment_mode == "constant_reference":
+                mixture = self._tensor(reference.proportions)
+                conditional = (mixture / mixture.sum()).expand(n, -1)
+                # This control imposes reference participation, not biological
+                # support or tissue abundance. No spatial mapper is consulted.
+                assignment = torch.cat((x.new_zeros((n, 1)), conditional), dim=1)
+            else:
+                ordered_embedding = self._tensor(reference.embedding)[
+                    :, [embedding_index[gene] for gene in config.state_gene_ids]
+                ]
+                state_features = self.state_mapper(ordered_embedding)
+                image_features = self.image_mapper(x)
+                compatible = image_features @ state_features.T / config.hidden_dim**0.5
+                logits = torch.cat((self.unsupported_head(image_features), compatible), dim=1)
+                logits = self._protein_logits(logits, inputs)
+                assignment = logits.softmax(dim=1)
+                conditional = logits[:, 1:].softmax(dim=1)
             context = config.variant.startswith(("generic_", "lr_"))
             messages = x.new_zeros((n, 2 * len(config.lr_interactions)))
             if context:
@@ -302,21 +364,21 @@ class PersonalizedModel(nn.Module):
                 :, [gene_index[gene] for gene in config.gene_ids]
             ]
             transfer = conditional @ ordered_expression
-            factors = self.residual_cell(
-                torch.cat((decoder_features, torch.log1p(messages)), dim=1)
-            )
-            delta = (factors @ self.residual_gene.T).clamp(
-                -config.residual_bound, config.residual_bound
-            )
-            delta = delta * self.supervised_mask
             if config.transfer_only:
-                delta = torch.zeros_like(delta)
-            # Exact transfer for unsupervised genes and the transfer-only diagnostic.
-            # Epsilon is added only for corrected genes, never to untrained outputs.
-            corrected = (transfer + 1e-8) * torch.exp(delta)
-            expression = torch.where(self.supervised_mask, corrected, transfer)
-            if config.transfer_only:
+                delta = torch.zeros_like(transfer)
                 expression = transfer
+            else:
+                factors = self.residual_cell(
+                    torch.cat((decoder_features, torch.log1p(messages)), dim=1)
+                )
+                delta = (factors @ self.residual_gene.T).clamp(
+                    -config.residual_bound, config.residual_bound
+                )
+                delta = delta * self.supervised_mask
+                # Exact transfer for unsupervised genes. Epsilon is added only
+                # for corrected genes, never to untrained outputs.
+                corrected = (transfer + 1e-8) * torch.exp(delta)
+                expression = torch.where(self.supervised_mask, corrected, transfer)
             state_ids = ("unsupported", *reference.state_ids)
         entropy = -(assignment * assignment.clamp_min(1e-12).log()).sum(dim=1)
         return Prediction(

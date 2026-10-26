@@ -1,0 +1,285 @@
+{
+  "source_metadata_sha256": "025d5dd02ee80322c3ba0e70c93984beddfa349301b12e9e3c876f5bc1bc8839",
+  "source_metadata": "/mnt/seagate/HnE/HTAPP_MBC/metadata/selected_13_biopsies.tsv",
+  "method": "seed0 one snRNA patient per testfold; scRNA patients by rarest site first, balancing site then occupancy; 3/3/3/2/2 test patients; deterministic rotating one snRNA and one scRNA validation patient",
+  "role_counts_reviewed": true,
+  "balance_limit": "rare sites cannot occur in every fold; no population representativeness claim",
+  "annotation_policy": "published cohort-curated RNA-only labels; not fold-fitted",
+  "prior_exposure": "all 13 prior engineering acceptance; 313-932 and 514-6760 prior pilots; all scores remain internal development assessment",
+  "folds": [
+    {
+      "outer_fold": 0,
+      "roles": {
+        "train": {
+          "patients": [
+            "HTA1_330",
+            "HTA1_514",
+            "HTA1_812",
+            "HTA1_853",
+            "HTA1_880",
+            "HTA1_917",
+            "HTA1_982",
+            "HTA1_997"
+          ],
+          "rna_assays": {
+            "scRNAseq": 5,
+            "snRNAseq": 3
+          },
+          "sites": {
+            "Liver": 6,
+            "Axilla": 2
+          }
+        },
+        "validation": {
+          "patients": [
+            "HTA1_213",
+            "HTA1_313"
+          ],
+          "rna_assays": {
+            "snRNAseq": 1,
+            "scRNAseq": 1
+          },
+          "sites": {
+            "Chest wall": 1,
+            "Liver": 1
+          }
+        },
+        "test": {
+          "patients": [
+            "HTA1_364",
+            "HTA1_783",
+            "HTA1_878"
+          ],
+          "rna_assays": {
+            "scRNAseq": 2,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Liver": 1,
+            "Breast": 1,
+            "Axilla": 1
+          }
+        }
+      }
+    },
+    {
+      "outer_fold": 1,
+      "roles": {
+        "train": {
+          "patients": [
+            "HTA1_213",
+            "HTA1_313",
+            "HTA1_364",
+            "HTA1_783",
+            "HTA1_853",
+            "HTA1_878",
+            "HTA1_880",
+            "HTA1_982"
+          ],
+          "rna_assays": {
+            "snRNAseq": 3,
+            "scRNAseq": 5
+          },
+          "sites": {
+            "Chest wall": 1,
+            "Liver": 5,
+            "Breast": 1,
+            "Axilla": 1
+          }
+        },
+        "validation": {
+          "patients": [
+            "HTA1_330",
+            "HTA1_514"
+          ],
+          "rna_assays": {
+            "scRNAseq": 1,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Liver": 1,
+            "Axilla": 1
+          }
+        },
+        "test": {
+          "patients": [
+            "HTA1_812",
+            "HTA1_917",
+            "HTA1_997"
+          ],
+          "rna_assays": {
+            "scRNAseq": 2,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Axilla": 1,
+            "Liver": 2
+          }
+        }
+      }
+    },
+    {
+      "outer_fold": 2,
+      "roles": {
+        "train": {
+          "patients": [
+            "HTA1_213",
+            "HTA1_330",
+            "HTA1_364",
+            "HTA1_514",
+            "HTA1_812",
+            "HTA1_917",
+            "HTA1_982",
+            "HTA1_997"
+          ],
+          "rna_assays": {
+            "snRNAseq": 3,
+            "scRNAseq": 5
+          },
+          "sites": {
+            "Chest wall": 1,
+            "Liver": 5,
+            "Axilla": 2
+          }
+        },
+        "validation": {
+          "patients": [
+            "HTA1_783",
+            "HTA1_878"
+          ],
+          "rna_assays": {
+            "scRNAseq": 1,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Breast": 1,
+            "Axilla": 1
+          }
+        },
+        "test": {
+          "patients": [
+            "HTA1_313",
+            "HTA1_853",
+            "HTA1_880"
+          ],
+          "rna_assays": {
+            "scRNAseq": 2,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Liver": 3
+          }
+        }
+      }
+    },
+    {
+      "outer_fold": 3,
+      "roles": {
+        "train": {
+          "patients": [
+            "HTA1_313",
+            "HTA1_330",
+            "HTA1_364",
+            "HTA1_514",
+            "HTA1_812",
+            "HTA1_853",
+            "HTA1_878",
+            "HTA1_880",
+            "HTA1_917"
+          ],
+          "rna_assays": {
+            "scRNAseq": 6,
+            "snRNAseq": 3
+          },
+          "sites": {
+            "Liver": 6,
+            "Axilla": 3
+          }
+        },
+        "validation": {
+          "patients": [
+            "HTA1_783",
+            "HTA1_997"
+          ],
+          "rna_assays": {
+            "scRNAseq": 1,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Breast": 1,
+            "Liver": 1
+          }
+        },
+        "test": {
+          "patients": [
+            "HTA1_213",
+            "HTA1_982"
+          ],
+          "rna_assays": {
+            "snRNAseq": 1,
+            "scRNAseq": 1
+          },
+          "sites": {
+            "Chest wall": 1,
+            "Liver": 1
+          }
+        }
+      }
+    },
+    {
+      "outer_fold": 4,
+      "roles": {
+        "train": {
+          "patients": [
+            "HTA1_313",
+            "HTA1_364",
+            "HTA1_783",
+            "HTA1_812",
+            "HTA1_878",
+            "HTA1_880",
+            "HTA1_917",
+            "HTA1_982",
+            "HTA1_997"
+          ],
+          "rna_assays": {
+            "scRNAseq": 6,
+            "snRNAseq": 3
+          },
+          "sites": {
+            "Liver": 6,
+            "Breast": 1,
+            "Axilla": 2
+          }
+        },
+        "validation": {
+          "patients": [
+            "HTA1_213",
+            "HTA1_853"
+          ],
+          "rna_assays": {
+            "snRNAseq": 1,
+            "scRNAseq": 1
+          },
+          "sites": {
+            "Chest wall": 1,
+            "Liver": 1
+          }
+        },
+        "test": {
+          "patients": [
+            "HTA1_330",
+            "HTA1_514"
+          ],
+          "rna_assays": {
+            "scRNAseq": 1,
+            "snRNAseq": 1
+          },
+          "sites": {
+            "Liver": 1,
+            "Axilla": 1
+          }
+        }
+      }
+    }
+  ]
+}

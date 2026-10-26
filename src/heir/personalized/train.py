@@ -188,6 +188,8 @@ def fit(
     """
     if not samples or not model_config.supervised_gene_ids:
         raise ValueError("training needs specimens and an explicit supervised gene panel")
+    if model_config.assignment_mode == "constant_reference" and model_config.transfer_only:
+        raise ValueError("constant-reference transfer-only has no trainable prediction pathway")
     input_units = {(s.inputs.prediction_unit, s.inputs.coordinate_units) for s in samples}
     if len(input_units) != 1:
         raise ValueError("training samples must share prediction_unit and coordinate_units")

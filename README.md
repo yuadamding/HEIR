@@ -21,6 +21,8 @@ Version 0.4 adds cohort preparation, patient-fold fitting, prediction, and repli
 Version 0.5 adds explicit interaction-radius units, a visual regional inspection, and verified
 frozen histology caches alongside the RGB control. Pilot comparisons report transfer and correction
 separately, including direct protein-marker outcomes versus the other outcomes.
+Version 0.6 adds fixed-model diagnostics, separately fitted transfer and constant-reference
+controls, and a frozen internal patient-held-out study with validation-only rank selection.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
@@ -64,6 +66,21 @@ The inspection writes a self-contained `index.html` and exact coverage tables. F
 reads H&E only; its generated configuration binds the image, grid, checkpoint, and feature cache.
 Coordinates remain in registered pixels; physical calibration is unresolved. See the
 [recorded pilot and its limits](docs/personalized_development.md#version-05-regional-pilot).
+
+Diagnose an existing pilot or fit the three predefined controls with its original settings:
+
+```bash
+uv run heir cohort-diagnose --root /mnt/seagate/HnE/HTAPP_MBC \
+  --run /tmp/heir-313-histology-pilot --output /tmp/heir-313-diagnostics
+uv run heir cohort-controls --root /mnt/seagate/HnE/HTAPP_MBC \
+  --config /tmp/heir-313-hoptimus1/config.json \
+  --baseline-run /tmp/heir-313-histology-pilot --output /tmp/heir-313-controls
+```
+
+The [internal study protocol](configs/personalized/study.json) binds exact configuration and
+patient folds. Its [workflow and results](docs/personalized_development.md#version-06-contribution-tests)
+retain prior cohort exposure, target consistency, correction effects, and the observed null protein
+increment. Neighborhood comparisons remain subsequent work.
 
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:

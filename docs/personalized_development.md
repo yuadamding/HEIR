@@ -108,6 +108,8 @@ remain in `src/heir/features/`. Historical study implementations are retained in
 | `cohort.py` / `cohort_cli.py` | Registered HTAPP tissue-region preparation and workflows |
 | `region_features.py` | Frozen encoder crops and verified regional feature caches |
 | `inspection.py` | H&E and assay overlays with exact coverage and exclusion tables |
+| `diagnostics.py` | Fixed-fit correction, protein intervention, coverage, and replicate diagnostics |
+| `study.py` | Frozen patient folds, validation selection, training-only reference control, and paired patient reporting |
 
 ### Small-workflow commands
 
@@ -600,14 +602,169 @@ The inspectable HTML, cache, bundles, predictions, scores, and comparison summar
 `/storage/HE_GPT/HEIR-cohort-runs/v050-review`; its README indexes the artifacts. Data, weights,
 and outputs stay outside the source repository. The earlier v0.4 acceptance runs remain intact.
 
-The assessment's immediate interaction-unit, visual-pilot, and frozen-representation steps are
-implemented, with the small baseline comparison also reported. Candidate folds have not been
-promoted to a frozen scientific protocol. Full patient-held-out model selection, paired patient
-contrasts, and staged generic/LR experiments remain subsequent work; earlier development exposure
-to this cohort must be acknowledged in any study design.
+At version 0.5, the interaction-unit, visual-pilot, and frozen-representation steps were
+implemented, with the small baseline comparison also reported. Candidate folds had not yet been
+promoted to a fixed protocol. Patient-held-out selection and contrasts were subsequent work;
+earlier development exposure to this cohort remains relevant to every study design.
+
+### Version 0.6 contribution tests
+
+The next assessment accepted v0.5's engineering behavior and requested contribution tests.
+`cohort-diagnose` reuses the five saved predictions and the fitted protein bundle without fitting.
+It checks source/preparation and bundle identities and reproduces the saved prediction before
+intervening on protein evidence. All scores retain the same eligible rows and fixed nine-gene
+normalizer. The report includes normalized full-minus-transfer effects and clamp saturation by
+gene, replicate, and spatial scope. Raw correction magnitude is not an effective normalized
+expression change: a common multiplicative factor can cancel in the denominator.
+
+For the original 313-932 frozen-feature pilot:
+
+| Prediction | Spatial Spearman summary | Normalized log MSE |
+| --- | ---: | ---: |
+| H&E-only | 0.264 | 6.749 |
+| RNA full | 0.414 | 4.993 |
+| RNA post-fit transfer | 0.154 | 6.484 |
+| Protein full | 0.412 | 4.996 |
+| Protein post-fit transfer | 0.134 | 6.509 |
+
+Complete usable CODEX evidence covers 146/147 and 158/159 scored regions in the two Slide-seq
+replicates. On the common 304 region-replicates, RNA/protein scores remain 0.410/0.408 and MSEs
+4.970/4.973. Missing protein coverage is therefore an unlikely explanation for the null increment.
+The prespecified occupancy split at tissue fraction 0.9 gives 184 interior and 122 partially
+occupied region-replicates; RNA/protein correlations are 0.368/0.366 and 0.457/0.446, respectively.
+These subsets explain the main result and do not replace it. Occupancy is not anatomical boundary
+certification.
+
+With the fitted protein weights held fixed, original, zero-confidence, and spatially permuted
+protein evidence give full scores of 0.41205, 0.41243, and 0.41209. Transfer scores are 0.13389,
+0.13576, and 0.14070. Zero confidence changes conditional mixtures by mean row L1 0.01013 on
+unique scored regions; permutation changes them by 0.00128. The H&E correction is exactly
+unchanged under these interventions. Whole marker vectors are permuted with seed 0 within CODEX
+replicate and availability-pattern groups, preserving marker identities, missingness, and quality
+at each location. The fitted pathway responds weakly to protein localization and shows no benefit
+from it under these conditions. This is a fixed-model diagnosis, not a retrained protein ablation.
+
+The two Slide-seq replicates share 124 eligible H&E regions. Their gene-wise spatial correlations
+range from -0.025 (CD8A) to 0.313 (COL1A2), with median 0.139. This weak agreement limits confidence
+in the regional target's consistency; it is neither a universal prediction ceiling nor a qualified
+ST-informed comparator. Normalized correction mean absolute effects across nine genes are
+0.627/0.657 for RNA and 0.634/0.665 for protein in replicates 1/2. Among 182 unique scored regions,
+roughly half of CD8A and MKI67 corrections reach an exact bound. Full gene/replicate tables and
+all-region versus scored-region scopes remain in the diagnostic report.
+
+`cohort-controls` fixes three experiments before fitting and requires matching preparation,
+patient, target coverage, and optimization settings with the original full RNA pilot. With the
+same 100 epochs, seed 0, frozen features, and nine-gene endpoint:
+
+| Newly fitted control | Spatial Spearman summary | Normalized log MSE |
+| --- | ---: | ---: |
+| RNA transfer-only from initialization | 0.149 | 6.363 |
+| Constant RNA reference mixture plus H&E correction | 0.260 | 6.759 |
+| Learned RNA mixture with rank-2 correction factors | 0.374 | 5.501 |
+
+The constant control uses the reference's normalized RNA sampling proportions at every region,
+freezes the mapper, and trains the unchanged H&E correction branch. This mixture is an imposed
+control, not true tissue abundance. Its reference participation of one is also imposed and remains
+uncalibrated. `assignment_mode` is saved in the model configuration; old bundles default to
+`learned`. Transfer-only fitting skips the correction branch, while post-fit transfer exports
+remain explicitly distinct. Rank 16 does not restrict a nine-gene axis; rank 2 supplies a smaller
+factor bottleneck, but elementwise clipping means the final correction has no strict matrix-rank
+guarantee. The full RNA fit outperforms these controls in sample; withheld patients are needed to
+assess the contribution beyond this development specimen.
+
+Active trainable expression-path counts distinguish architecture from instantiated unused modules:
+H-optimus-1 H&E/RNA/protein paths contain 49,481/99,648/99,649 scalar parameters, versus
+713/2,112/2,113 with RGB. The constant control uses 49,856, separately trained transfer uses 49,792,
+and the rank-2 full RNA path uses 99,060. These are architectural counts, not observed nonzero
+gradients or independent effective degrees of freedom.
+
+The committed [study protocol](../configs/personalized/study.json),
+[configuration](../configs/personalized/study_config.json),
+[folds](../configs/personalized/study_folds.csv), and
+[metadata review](../configs/personalized/metadata-review.json) were frozen before the new pilot
+control results and patient study. All 13 biopsies have verified frozen features, totaling 6,580
+regions; the original pilot cache is reused byte-identically. Test folds contain 3/3/3/2/2 patients,
+each with one snRNA patient. Each validation split contains one snRNA and one scRNA patient.
+Rare sites cannot appear in every fold. Metadata balance was reviewed without new outcome scores;
+published cohort-curated RNA labels and all previous development exposure remain declared.
+
+```bash
+heir cohort-study --root /mnt/seagate/HnE/HTAPP_MBC \
+  --config configs/personalized/study_config.json \
+  --folds configs/personalized/study_folds.csv \
+  --protocol configs/personalized/study.json --output internal-study/
+```
+
+The protocol binds configuration and fold hashes. It uses 100 CPU epochs, learning rate 0.001,
+seed 0, and exactly two RNA correction ranks, 2 and 16. Selection uses the equal-patient validation
+spatial score, then lower MSE and lower rank as tie-breakers. The selected rank is shared across
+the full RNA, protein, constant-mixture, and generic-reference arms; validation patients are not
+added to training afterward. This standardizes correction complexity rather than optimizing each
+arm independently. H&E-only and separately trained transfer-only complete the six arms.
+Every test prediction is saved before that fold's test targets are loaded. The generic RNA control
+uses the same model architecture with a reference constructed exclusively from training patients,
+with equal-patient mixture weights and at most 32 pooled prototypes. Its persisted reference is
+reloaded for ordinary `cohort-predict` rather than replaced with the query's matched RNA.
+
+Patient reports retain replicate/gene detail, normalized error, post-fit transfer, and correction
+diagnostics. Aggregation gives patients equal weight and reports paired differences; regions and
+replicates do not become independent patients. The protocol supports a disciplined internal
+assessment. It cannot erase prior cohort inspection or establish independent confirmation.
+
+All five folds completed, with rank 2 selected in folds 0–3 and rank 16 in fold 4. Every patient
+contributes exactly one outer test result. All 13 patient headlines are defined for each full arm:
+
+| Patient-held-out arm | Mean patient spatial Spearman | Mean patient normalized log MSE |
+| --- | ---: | ---: |
+| H&E-only | 0.0551 | 15.6515 |
+| Matched RNA | 0.0739 | 12.5298 |
+| Matched RNA plus proteins | 0.0742 | 12.5452 |
+| Constant matched-RNA mixture plus correction | 0.0529 | 12.0496 |
+| Training-patient generic RNA reference | 0.0839 | 12.6604 |
+| Separately trained matched-RNA transfer only | 0.0742 | 13.0733 |
+
+Paired differences use the same 13 patients; positive correlation differences and negative error
+differences favor the first arm:
+
+| Contrast | Mean correlation difference | Correlation higher in patients | Mean MSE difference |
+| --- | ---: | ---: | ---: |
+| Matched RNA − H&E | +0.01884 | 9/13 | -3.12171 |
+| Protein − matched RNA | +0.00026 | 5/13 | +0.01536 |
+| Matched RNA − constant mixture | +0.02097 | 8/13 | +0.48022 |
+| Matched RNA − generic reference | -0.00999 | 4/13 | -0.13057 |
+| Matched RNA − separately trained transfer | -0.00029 | 8/13 | -0.54346 |
+
+The matched-RNA versus H&E correlation difference ranges from -0.09765 to +0.06820 across
+patients. Protein differences range from -0.01250 to +0.03013, with median -0.00057. These
+descriptive paired results are not significance tests. Post-fit RNA transfer averages 0.07294
+correlation and 13.14116 MSE, compared with 0.07391 and 12.52980 for its full prediction. Thus the
+large pilot correlation gain from correction does not carry over to the patient-held-out mean.
+Generic-reference post-fit transfer scores 0.09649 with MSE 13.23016; constant-reference transfer
+has an undefined spatial headline, as required for a spatially constant prediction, and MSE
+12.76678.
+
+The study does not establish useful generalization or a personalization/protein advantage.
+Matched RNA modestly improves the spatial headline over H&E and the constant-mixture control,
+but the constant-mixture control has lower expression error. The same-architecture generic RNA
+control has the higher mean spatial correlation. The nearly zero protein increment accompanies
+slightly worse MSE. Weak pilot replicate agreement, the small compositional endpoint, unresolved
+registration/scale, one training seed, and prior cohort exposure all limit interpretation.
+No neighborhood models or additional hyperparameter search were run in response to these results.
+
+An independent artifact audit reconciled all 130 test full/transfer exports, 165 bundle-file
+hashes, 27 package-source hashes, five training-only reference pools, patient roles, selected
+ranks, and summary/paired means. Full patient, replicate, gene, and correction results remain in
+`internal-study/`; the run-root README provides the compact comparison and artifact index.
+
+Version 0.6 passes 253 CPU tests plus Ruff lint/format, frozen-lock, and wheel/source-build checks.
+New regressions cover normalized correction cancellation, observation joins, protein permutations,
+fixed-mixture persistence, transfer-only gradients, active capacity counts, protocol bindings,
+patient-role isolation, validation selection, generic-reference integrity/reload, and complete
+prediction export before test-target access. Generated artifacts remain under
+`/storage/HE_GPT/HEIR-cohort-runs/v060-controls`, outside the compact repository.
 
 Physical calibration, exact section/core matching, registration sensitivity, marker calibration,
-and full study selection remain scientific work.
+and independent scientific validation remain outstanding.
 Independently segmented nuclei are required only for the nucleus-level extension, not for running
 the explicitly regional profile. Neither the regional development scores nor the source inspection
 establish same-cell placement or communication effects.
@@ -615,8 +772,8 @@ establish same-cell placement or communication effects.
 | Milestone | Software scope in this revision | Scientific acceptance still required |
 | --- | --- | --- |
 | Data qualification | Verified consumed source hashes, retained count axes, biopsy-level adapter, explicit pixel frame | Exact section/core provenance, physical calibration, and scientific registration review |
-| Baseline path | RGB controls, verified frozen histology features, an inspectable pilot, and all-13 execution acceptance | Independently qualified predictive performance and reviewed folds |
-| Personalized baseline | Controlled same-biopsy H&E/RNA/protein comparisons with transfer and correction reports | Patient-held-out added value under a fixed protocol |
+| Baseline path | RGB/frozen-feature controls, visual pilot, and completed five-fold internal patient assessment | Useful and independently qualified predictive performance |
+| Personalized baseline | Transfer/correction/constant/generic controls, patient-paired scores, and declared cohort exposure | Reproducible personalization benefit beyond the generic reference |
 | Protein contribution | Shared regional observation operator, confidence weights, and source identity checks | Validated marker interpretation, registration uncertainty, and incremental expression/localization evidence |
 | Neighborhood/communication | Generic/LR fixed/refined family with explicit graph and radius units | Controlled staged comparison with identical base mapper, budgets, and independent readouts |
 | Robustness/ST reference | Explicit output and evaluation boundaries | Full perturbation/control suite, within-type endpoint, calibrated uncertainty, separate ST-informed comparator |
