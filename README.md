@@ -18,6 +18,9 @@ Nucleus-level inputs remain supported by the original canonical workflow.
 Version 0.3 fixes the numerical issues identified in the assessment of `d955c01`: fixed
 normalization panels, support-independent transfer, and separate protein observation geometry.
 Version 0.4 adds cohort preparation, patient-fold fitting, prediction, and replicate-wise evaluation.
+Version 0.5 adds explicit interaction-radius units, a visual regional inspection, and verified
+frozen histology caches alongside the RGB control. Pilot comparisons report transfer and correction
+separately, including direct protein-marker outcomes versus the other outcomes.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
@@ -42,6 +45,25 @@ uv run heir cohort-demo --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
 The default uses nine shared outcome genes and handcrafted RGB control features. The demo fits
 and scores the same biopsy; it tests the software, not held-out biological performance. The cohort
 workflow also supplies `cohort-train`, `cohort-predict`, and `cohort-evaluate` commands.
+
+Inspect assay coverage and cache the retained H-optimus-1 encoder on the same H&E regions:
+
+```bash
+uv run heir cohort-inspect-pilot --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
+  --output /tmp/heir-313-inspection
+uv run heir cohort-features --root /mnt/seagate/HnE/HTAPP_MBC --biopsies 313-932 \
+  --encoder-manifest manifests/encoders/hoptimus1.json \
+  --model-dir /mnt/seagate/HnE/pretrained/H-optimus-1 \
+  --device cuda --batch-size 1 --output /tmp/heir-313-hoptimus1
+uv run heir cohort-demo --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
+  --config /tmp/heir-313-hoptimus1/config.json --epochs 100 \
+  --output /tmp/heir-313-histology-pilot
+```
+
+The inspection writes a self-contained `index.html` and exact coverage tables. Feature extraction
+reads H&E only; its generated configuration binds the image, grid, checkpoint, and feature cache.
+Coordinates remain in registered pixels; physical calibration is unresolved. See the
+[recorded pilot and its limits](docs/personalized_development.md#version-05-regional-pilot).
 
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Real
 from typing import Optional
 
 import numpy as np
@@ -187,13 +188,35 @@ class ProteinEvidence:
 
 @dataclass(frozen=True)
 class SpatialGraph:
+    """Sparse graph with declared distance units and optional isotropic calibration.
+
+    ``distances_um`` is a legacy field name. Read ``distances`` together with
+    ``distance_units``; registered-pixel distances are not implicitly physical.
+    A supplied micrometres-per-pixel scale permits explicit unit conversion.
+    """
+
     senders: np.ndarray
     receivers: np.ndarray
     distances_um: np.ndarray
     weights: np.ndarray
     n_cells: int
+    distance_units: str = "um"
+    micrometres_per_pixel: Optional[float] = None
 
     def __post_init__(self):
+        if not isinstance(self.distance_units, str) or self.distance_units not in {
+            "um",
+            "registered_pixel",
+        }:
+            raise ValueError("graph distance_units must be um or registered_pixel")
+        scale = self.micrometres_per_pixel
+        if scale is not None and (
+            isinstance(scale, bool)
+            or not isinstance(scale, Real)
+            or not np.isfinite(scale)
+            or scale <= 0
+        ):
+            raise ValueError("graph micrometres_per_pixel must be a finite positive scalar")
         e = len(self.senders)
         if self.n_cells < 1:
             raise ValueError("graph n_cells must be positive")
@@ -205,6 +228,11 @@ class SpatialGraph:
                 raise ValueError("graph node index out of bounds")
         array(self.distances_um, (e,), "graph distances_um", nonnegative=True)
         array(self.weights, (e,), "graph weights", nonnegative=True)
+
+    @property
+    def distances(self) -> np.ndarray:
+        """Edge distances in ``distance_units``, without implicit conversion."""
+        return self.distances_um
 
 
 @dataclass(frozen=True)
@@ -246,6 +274,8 @@ class PredictionInputs:
                 raise ValueError("protein state evidence must be aligned to reference states")
         if self.graph is not None and self.graph.n_cells != n:
             raise ValueError("graph must use the H&E cell axis")
+        if self.graph is not None and self.graph.distance_units != self.coordinate_units:
+            raise ValueError("graph distance_units must match input coordinate_units")
         if self.registration_sensitivity is not None:
             # NaN denotes not assessed; it must not be silently advertised as zero sensitivity.
             if np.shape(self.registration_sensitivity) != (n,):

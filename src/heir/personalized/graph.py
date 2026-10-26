@@ -18,12 +18,18 @@ from .schema import RNAReference, SpatialGraph
 
 @dataclass(frozen=True)
 class LRInteraction:
-    """A directed, complex-aware candidate from a separately recorded resource."""
+    """A directed candidate with explicit cutoff units.
+
+    ``radius_um`` is the legacy numeric field; ``radius_units`` governs its units.
+    Existing programs default to micrometres. Pixel-defined development programs
+    must explicitly declare ``registered_pixel`` and make no physical-range claim.
+    """
 
     ligand: tuple[str, ...]
     receptor: tuple[str, ...]
     mode: str = "diffusible"
     radius_um: float = 100.0
+    radius_units: str = "um"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ligand", tuple(self.ligand))
@@ -37,6 +43,16 @@ class LRInteraction:
             raise ValueError("interaction mode must be contact or diffusible")
         if not np.isfinite(self.radius_um) or self.radius_um <= 0:
             raise ValueError("interaction radius_um must be finite and positive")
+        if not isinstance(self.radius_units, str) or self.radius_units not in {
+            "um",
+            "registered_pixel",
+        }:
+            raise ValueError("interaction radius_units must be um or registered_pixel")
+
+    @property
+    def radius(self) -> float:
+        """Cutoff in ``radius_units``; the property does not convert units."""
+        return self.radius_um
 
 
 def build_graph(
@@ -46,6 +62,8 @@ def build_graph(
     tissue_component_ids: Sequence[str],
     max_neighbors: int = 32,
     edge_allowed: Callable[[int, int], bool] | None = None,
+    coordinate_units: str = "um",
+    micrometres_per_pixel: float | None = None,
 ) -> SpatialGraph:
     """Build directed radius/k-nearest edges with bounded degree using grid buckets.
 
@@ -53,6 +71,9 @@ def build_graph(
     *within* a component, supply an ``edge_allowed(sender, receiver)`` predicate
     derived from the tissue mask; coordinates alone cannot establish tissue support.
     Equal-distance ties use stable input indices. No dense all-pairs matrix is built.
+    Legacy ``coordinates_um`` and ``radius_um`` arguments use ``coordinate_units``;
+    declared calibration is preserved for interaction-cutoff conversion, not used
+    to silently rescale the graph geometry.
     """
 
     xy = np.asarray(coordinates_um, dtype=float)
@@ -93,6 +114,8 @@ def build_graph(
         distances_um=np.asarray(distances, dtype=np.float32),
         weights=np.asarray(weights, dtype=np.float32),
         n_cells=len(xy),
+        distance_units=coordinate_units,
+        micrometres_per_pixel=micrometres_per_pixel,
     )
 
 
@@ -164,13 +187,26 @@ def compute_messages(
         reference.expression, device=assignment.device, dtype=assignment.dtype
     )
     gene_index = {gene: index for index, gene in enumerate(reference.gene_ids)}
-    distances = torch.as_tensor(graph.distances_um, device=assignment.device)
+    distances = torch.as_tensor(graph.distances, device=assignment.device)
     outputs = []
     for interaction in interactions:
+        cutoff_distances = distances
+        if interaction.radius_units != graph.distance_units:
+            scale = graph.micrometres_per_pixel
+            if scale is None:
+                raise ValueError(
+                    "interaction radius_units differ from graph distance_units without "
+                    "micrometres_per_pixel calibration"
+                )
+            cutoff_distances = (
+                distances * scale
+                if graph.distance_units == "registered_pixel"
+                else distances / scale
+            )
         ligand = assignment @ _complex_support(expression, gene_index, interaction.ligand)
         receptor = assignment @ _complex_support(expression, gene_index, interaction.receptor)
         incoming = neighborhood_average(
-            ligand[:, None], graph, edge_mask=distances <= interaction.radius_um
+            ligand[:, None], graph, edge_mask=cutoff_distances <= interaction.radius
         )[:, 0]
         first = incoming * receptor if mode == "lr" else incoming
         outputs.extend((first, receptor))

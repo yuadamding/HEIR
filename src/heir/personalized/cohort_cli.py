@@ -14,6 +14,8 @@ import numpy as np
 
 from .cohort import (
     DEFAULT_EMBEDDING_GENES,
+    DEFAULT_PROTEIN_MARKERS,
+    _verified_source_path,
     discover_cohort,
     load_cohort_targets,
     prepare_cohort_inputs,
@@ -21,6 +23,7 @@ from .cohort import (
 from .evaluate import score
 from .model import ModelConfig
 from .observation import ObservationOperator
+from .regions import build_region_grid
 from .schema import SpatialTargets
 from .serialization import load_prediction, save_prediction
 from .train import (
@@ -111,6 +114,65 @@ def inspect_command(args):
             "target_expression_read": False,
             "scientific_qualification": False,
         },
+    )
+
+
+def features_command(args):
+    """Cache one retained frozen encoder on H&E-only regions, without molecular payloads."""
+    from heir.features import create_frozen_encoder, load_encoder_manifest
+    from heir.features.base import verified_model_file
+
+    from .region_features import write_feature_cache
+
+    config, model = _config(args.config)
+    manifest = load_encoder_manifest(args.encoder_manifest)
+    if manifest.config_filename:
+        verified_model_file(args.model_dir, manifest.config_filename, manifest.config_sha256)
+    cohort = discover_cohort(args.root)
+    if len(set(args.biopsies)) != len(args.biopsies) or not set(args.biopsies) <= set(cohort):
+        raise ValueError("feature extraction requires unique known biopsy IDs")
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    encoder = create_frozen_encoder(Path(args.model_dir), manifest, device=args.device)
+    reports = {}
+    for biopsy in args.biopsies:
+        source = cohort[biopsy]["role_sources"]["he"]
+        image = _verified_source_path(args.root, source)
+        grid = build_region_grid(
+            image,
+            bin_size_pixels=config["preparation"]["region_size"],
+            min_tissue_fraction=config["preparation"]["min_tissue_fraction"],
+        )
+        reports[biopsy] = write_feature_cache(
+            image,
+            grid,
+            output / f"{biopsy}.npz",
+            encoder,
+            manifest,
+            expected_image_sha256=source["sha256"],
+            batch_size=args.batch_size,
+        )
+    config["preparation"].update(
+        feature_cache_dir=str(output), feature_encoder_manifest_sha256=manifest.sha256
+    )
+    config["model"] = replace(model, feature_dim=manifest.feature_width).to_dict()
+    config["interpretation"] = "regional development with retained frozen histology features"
+    _write(output / "config.json", config)
+    _write(output / "features.json", reports)
+
+
+def inspect_pilot_command(args):
+    """Build a visual evaluation-coverage report after target-independent region selection."""
+    from .inspection import write_pilot_inspection
+
+    config, model = _config(args.config)
+    write_pilot_inspection(
+        args.root,
+        args.biopsy,
+        args.output,
+        preparation=config["preparation"],
+        gene_ids=model.gene_ids,
+        normalization_gene_ids=model.normalization_gene_ids,
     )
 
 
@@ -205,6 +267,32 @@ def replicate_scores(prediction, targets, operator, groups, genes, normalization
         "scientific_qualification": False,
         "interpretation": "regional prediction; no nucleus placement or communication claim",
     }
+
+
+def comparison_scores(prediction, targets, operator, groups, genes, normalization_genes):
+    """Partition outcomes by direct protein-marker overlap without changing exposure."""
+    result = replicate_scores(prediction, targets, operator, groups, genes, normalization_genes)
+    direct = {gene for _, gene in DEFAULT_PROTEIN_MARKERS}
+    panels = {
+        "direct_protein_marker_genes": [gene for gene in genes if gene in direct],
+        "other_outcome_genes": [gene for gene in genes if gene not in direct],
+    }
+    result["outcome_groups"] = {
+        name: {
+            "gene_ids": panel,
+            "status": "reported" if panel else "no_requested_outcomes_in_group",
+            "scores": replicate_scores(
+                prediction, targets, operator, groups, panel, normalization_genes
+            )
+            if panel
+            else None,
+        }
+        for name, panel in panels.items()
+    }
+    result["outcome_group_interpretation"] = (
+        "direct marker overlap versus other outcomes; biological independence is not implied"
+    )
+    return result
 
 
 def _sample(root, biopsy, config, model):
@@ -310,7 +398,7 @@ def evaluate_command(args):
         args.root, sources["biopsy_id"], prediction, sources, model
     )
     genes = model.gene_ids if args.genes is None else json.loads(Path(args.genes).read_text())
-    result = replicate_scores(
+    result = comparison_scores(
         prediction, targets, operator, groups, genes, model.normalization_gene_ids
     )
     role = provenance.get("fold_roles", {}).get(prediction.patient_id, "development")
@@ -358,7 +446,7 @@ def demo_command(args):
         save_prediction(
             prediction, output / f"{variant}.npz", _prediction_provenance(fitted, sources)
         )
-        result = replicate_scores(
+        result = comparison_scores(
             prediction,
             sample.targets,
             sample.observation,
@@ -373,14 +461,35 @@ def demo_command(args):
             "final_training_loss": fitted.history[-1]["loss"],
             "mean_replicate_median_gene_spearman": result["mean_replicate_median_gene_spearman"],
             "normalized_log_mse": result["normalized_log_mse"],
+            "mean_absolute_log_correction": float(
+                prediction.log_correction.detach().abs().mean().cpu()
+            ),
         }
         if variant != "he":
             fitted.model.config = replace(current, transfer_only=True)
+            transfer = fitted.predict(sample.inputs)
             save_prediction(
-                fitted.predict(sample.inputs),
+                transfer,
                 output / f"{variant}.transfer.npz",
                 _prediction_provenance(fitted, sources),
             )
+            transfer_result = comparison_scores(
+                transfer,
+                sample.targets,
+                sample.observation,
+                sample.observation_groups,
+                current.gene_ids,
+                current.normalization_gene_ids,
+            )
+            transfer_result["evaluation_role"] = "development_in_sample"
+            _write(output / f"{variant}.transfer.scores.json", transfer_result)
+            summaries[f"{variant}_transfer"] = {
+                "mean_replicate_median_gene_spearman": transfer_result[
+                    "mean_replicate_median_gene_spearman"
+                ],
+                "normalized_log_mse": transfer_result["normalized_log_mse"],
+                "mean_absolute_log_correction": 0.0,
+            }
     _write(
         output / "run.json",
         {
@@ -389,7 +498,7 @@ def demo_command(args):
             "scientific_qualification": False,
             "prediction_unit": "tissue_region",
             "coordinate_units": "registered_pixel",
-            "image_encoder": "handcrafted_rgb_moments_negative_control",
+            "image_features": sources["image_features"],
             "n_regions": len(sample.inputs.cell_ids),
             "n_states": len(sample.inputs.reference.state_ids),
             "n_target_region_replicates": len(sample.targets.observation_ids),
@@ -408,6 +517,22 @@ def add_commands(commands):
     inspect.add_argument("--root", required=True)
     inspect.add_argument("--output", required=True)
     inspect.set_defaults(run=inspect_command)
+    features = commands.add_parser("cohort-features", help=features_command.__doc__)
+    features.add_argument("--root", required=True)
+    features.add_argument("--output", required=True)
+    features.add_argument("--biopsies", nargs="+", default=["313-932"])
+    features.add_argument("--config")
+    features.add_argument("--encoder-manifest", required=True)
+    features.add_argument("--model-dir", required=True)
+    features.add_argument("--device", default="cuda")
+    features.add_argument("--batch-size", type=int, default=1)
+    features.set_defaults(run=features_command)
+    pilot = commands.add_parser("cohort-inspect-pilot", help=inspect_pilot_command.__doc__)
+    pilot.add_argument("--root", required=True)
+    pilot.add_argument("--biopsy", default="313-932")
+    pilot.add_argument("--config")
+    pilot.add_argument("--output", required=True)
+    pilot.set_defaults(run=inspect_pilot_command)
     for name, runner in (("cohort-train", train_command), ("cohort-demo", demo_command)):
         parser = commands.add_parser(name, help=runner.__doc__)
         parser.add_argument("--root", required=True)

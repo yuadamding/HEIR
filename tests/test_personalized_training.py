@@ -122,8 +122,15 @@ def _sample(patient="P1", shift=0.0, missing=False):
     return TrainingSample(inputs, target, operator)
 
 
-def _config(variant="he_rna"):
-    interactions = (LRInteraction(("A",), ("B",), radius_um=25),)
+def _change_units(inputs, **changes):
+    graph = replace(
+        inputs.graph, distance_units=changes.get("coordinate_units", inputs.coordinate_units)
+    )
+    return replace(inputs, graph=graph, **changes)
+
+
+def _config(variant="he_rna", *, radius_units="um"):
+    interactions = (LRInteraction(("A",), ("B",), radius_um=25, radius_units=radius_units),)
     return ModelConfig(
         feature_dim=2,
         state_dim=2,
@@ -497,7 +504,7 @@ def test_legacy_bundle_cannot_silently_acquire_new_numerical_semantics(tmp_path)
 )
 def test_fit_rejects_mixed_prediction_or_coordinate_units(changes):
     first, second = _sample("P1"), _sample("P2")
-    second = replace(second, inputs=replace(second.inputs, **changes))
+    second = replace(second, inputs=_change_units(second.inputs, **changes))
     with pytest.raises(ValueError, match="share prediction_unit and coordinate_units"):
         fit([first, second], _config(), TrainingConfig(epochs=1))
 
@@ -506,7 +513,7 @@ def test_registered_pixel_region_fit_and_context_keep_unit_contract(tmp_path):
     sample = _sample()
     regions = replace(
         sample,
-        inputs=replace(
+        inputs=_change_units(
             sample.inputs, prediction_unit="tissue_region", coordinate_units="registered_pixel"
         ),
     )
@@ -514,11 +521,15 @@ def test_registered_pixel_region_fit_and_context_keep_unit_contract(tmp_path):
     baseline = fit([regions], _config("he_rna_protein"), settings)
     assert baseline.training_config["prediction_unit"] == "tissue_region"
     assert baseline.training_config["coordinate_units"] == "registered_pixel"
-    fixed = fit([regions], _config("lr_fixed"), settings, baseline=baseline)
+    fixed = fit(
+        [regions], _config("lr_fixed", radius_units="registered_pixel"), settings, baseline=baseline
+    )
     assert fixed.predict(regions.inputs).prediction_unit == "tissue_region"
     fixed.save(tmp_path / "region_bundle")
     restored = FittedModel.load(tmp_path / "region_bundle")
     assert restored.training_config["coordinate_units"] == "registered_pixel"
+    assert restored.model.config.lr_interactions[0].radius_units == "registered_pixel"
+    assert restored.model.config == fixed.model.config
     torch.testing.assert_close(
         restored.predict(regions.inputs).expression,
         fixed.predict(regions.inputs).expression,
@@ -527,7 +538,7 @@ def test_registered_pixel_region_fit_and_context_keep_unit_contract(tmp_path):
     )
     for incompatible in (
         replace(regions.inputs, prediction_unit="nucleus"),
-        replace(regions.inputs, coordinate_units="um"),
+        _change_units(regions.inputs, coordinate_units="um"),
     ):
         for operation in (restored.transform, restored.predict):
             with pytest.raises(ValueError, match="differs from fitted model"):
@@ -556,7 +567,7 @@ def test_legacy_bundle_without_units_keeps_nucleus_um_inference_contract(tmp_pat
     assert actual.prediction_unit == "nucleus" and actual.coordinate_units == "um"
     with pytest.raises(ValueError, match="differs from fitted model"):
         loaded.predict(
-            replace(
+            _change_units(
                 sample.inputs, prediction_unit="tissue_region", coordinate_units="registered_pixel"
             )
         )

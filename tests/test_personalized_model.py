@@ -280,6 +280,14 @@ def test_tissue_region_prediction_preserves_declared_coordinate_units(variant):
         cell_ids=("region1", "region2", "region3"),
         prediction_unit="tissue_region",
         coordinate_units="registered_pixel",
+        graph=replace(inputs.graph, distance_units="registered_pixel"),
+    )
+    net.config = replace(
+        net.config,
+        lr_interactions=tuple(
+            replace(interaction, radius_units="registered_pixel")
+            for interaction in net.config.lr_interactions
+        ),
     )
     actual = net(regions)
     assert actual.prediction_unit == "tissue_region"
@@ -299,6 +307,92 @@ def test_tissue_region_prediction_preserves_declared_coordinate_units(variant):
 def test_prediction_input_requires_known_unit_metadata(changes):
     with pytest.raises(ValueError):
         replace(specimen(), **changes)
+
+
+@pytest.mark.parametrize("variant", ["generic_fixed", "lr_fixed", "generic_refined", "lr_refined"])
+def test_context_rejects_uncalibrated_micrometre_radius_on_pixel_graph(variant):
+    inputs = specimen()
+    pixels = replace(
+        inputs,
+        prediction_unit="tissue_region",
+        coordinate_units="registered_pixel",
+        graph=replace(inputs.graph, distance_units="registered_pixel"),
+    )
+    net = model(variant)
+    with pytest.raises(ValueError, match="radius_units differ.*without.*calibration"):
+        net(pixels)
+    net.config = replace(
+        net.config,
+        lr_interactions=tuple(
+            replace(interaction, radius_units="registered_pixel")
+            for interaction in net.config.lr_interactions
+        ),
+    )
+    assert torch.isfinite(net(pixels).expression).all()
+    restored = ModelConfig.from_dict(net.config.to_dict())
+    assert restored == net.config
+    assert restored.lr_interactions[0].radius_units == "registered_pixel"
+
+
+@pytest.mark.parametrize("mode", ["lr", "generic"])
+@pytest.mark.parametrize("physical_radius", [150.0, 250.0])
+def test_calibrated_pixel_and_micrometre_layouts_produce_identical_messages(mode, physical_radius):
+    # Illustrative calibration only; it is not an assertion about HTAPP pixel size.
+    pixels = np.asarray([[0.0, 0.0], [100.0, 0.0]])
+    pixel_graph = build_graph(
+        pixels,
+        150,
+        tissue_component_ids=("tissue",) * 2,
+        coordinate_units="registered_pixel",
+        micrometres_per_pixel=2.0,
+    )
+    physical_graph = build_graph(
+        pixels * 2,
+        300,
+        tissue_component_ids=("tissue",) * 2,
+        coordinate_units="um",
+        micrometres_per_pixel=2.0,
+    )
+    np.testing.assert_array_equal(pixel_graph.senders, physical_graph.senders)
+    np.testing.assert_array_equal(pixel_graph.receivers, physical_graph.receivers)
+    np.testing.assert_allclose(pixel_graph.weights, physical_graph.weights, rtol=0, atol=0)
+    np.testing.assert_array_equal(pixel_graph.distances * 2, physical_graph.distances)
+    interaction = LRInteraction(("A",), ("C",), radius_um=physical_radius)
+    conditional = torch.eye(2)
+    reference = specimen().reference
+    expected = compute_messages(physical_graph, conditional, reference, (interaction,), mode=mode)
+    actual = compute_messages(pixel_graph, conditional, reference, (interaction,), mode=mode)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert actual[1, 0].item() == (0.0 if physical_radius == 150 else 12.0 if mode == "lr" else 4.0)
+    pixel_program = replace(
+        interaction, radius_um=physical_radius / 2, radius_units="registered_pixel"
+    )
+    for graph in (physical_graph, replace(pixel_graph, micrometres_per_pixel=None)):
+        explicit_pixels = compute_messages(
+            graph, conditional, reference, (pixel_program,), mode=mode
+        )
+        torch.testing.assert_close(explicit_pixels, expected, atol=0, rtol=0)
+
+
+def test_graph_coordinate_units_must_agree_with_declared_input_frame():
+    inputs = specimen()
+    with pytest.raises(ValueError, match="graph distance_units must match input coordinate_units"):
+        replace(inputs, coordinate_units="registered_pixel")
+    with pytest.raises(ValueError, match="graph distance_units must match input coordinate_units"):
+        replace(inputs, graph=replace(inputs.graph, distance_units="registered_pixel"))
+
+
+@pytest.mark.parametrize("scale", [0, -1, float("nan"), float("inf"), [1, 2], True])
+def test_graph_rejects_invalid_physical_calibration(scale):
+    with pytest.raises(ValueError, match="micrometres_per_pixel"):
+        replace(specimen().graph, micrometres_per_pixel=scale)
+
+
+def test_unknown_graph_or_interaction_units_are_rejected():
+    with pytest.raises(ValueError, match="distance_units"):
+        replace(specimen().graph, distance_units="pixels")
+    with pytest.raises(ValueError, match="radius_units"):
+        LRInteraction(("A",), ("C",), radius_units="pixels")
 
 
 @pytest.mark.parametrize("variant", VARIANTS)

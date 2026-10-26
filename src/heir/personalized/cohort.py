@@ -312,6 +312,8 @@ def prepare_cohort_inputs(
     rna_cofactor=10.0,
     graph_radius=150.0,
     graph_max_neighbors=8,
+    feature_cache_dir=None,
+    feature_encoder_manifest_sha256=None,
 ):
     """Prepare H&E regions, independent RNA, and CODEX without opening spatial RNA.
 
@@ -327,6 +329,42 @@ def prepare_cohort_inputs(
         bin_size_pixels=region_size,
         min_tissue_fraction=min_tissue_fraction,
     )
+    feature_provenance = {
+        "kind": "rgb_control",
+        "encoder_name": grid.settings["encoder_name"],
+        "encoder_manifest_sha256": grid.settings["encoder_manifest_sha256"],
+        "feature_dim": int(grid.image_features.shape[1]),
+        "contains_spatial_rna_derived_features": False,
+    }
+    if (feature_cache_dir is None) != (feature_encoder_manifest_sha256 is None):
+        raise ValueError("frozen features require both cache directory and encoder manifest hash")
+    if feature_cache_dir is not None:
+        from .region_features import load_feature_cache
+
+        cache = Path(feature_cache_dir) / f"{biopsy_id}.npz"
+        features, metadata = load_feature_cache(
+            cache,
+            grid,
+            expected_image_sha256=sources["he"]["sha256"],
+            expected_encoder_manifest_sha256=feature_encoder_manifest_sha256,
+        )
+        grid = replace(
+            grid,
+            image_features=features,
+            settings={
+                **grid.settings,
+                "encoder_name": metadata["encoder"]["encoder_id"],
+                "encoder_manifest_sha256": feature_encoder_manifest_sha256,
+            },
+        )
+        feature_provenance = {
+            "kind": "frozen_histology",
+            "cache_path": str(cache.resolve()),
+            "metadata": metadata,
+            "feature_dim": int(features.shape[1]),
+            "encoder_manifest_sha256": feature_encoder_manifest_sha256,
+            "contains_spatial_rna_derived_features": False,
+        }
     panel = _axis(
         DEFAULT_EMBEDDING_GENES if embedding_gene_ids is None else embedding_gene_ids,
         "embedding gene panel",
@@ -379,6 +417,7 @@ def prepare_cohort_inputs(
         tissue_component_ids=grid.component_ids,
         max_neighbors=graph_max_neighbors,
         edge_allowed=adjacent,
+        coordinate_units="registered_pixel",
     )
     inputs = PredictionInputs(
         specimen_id=entry["specimen_id"],
@@ -403,6 +442,7 @@ def prepare_cohort_inputs(
         "prediction_unit": "tissue_region",
         "coordinate_units": "registered_pixel",
         "source_integrity": "consumed_input_payload_sizes_and_sha256_verified",
+        "image_features": feature_provenance,
         "sources": {key: sources[key] for key in ("he", "rna", "protein")},
         "grid": {
             "settings": grid.settings,
@@ -429,6 +469,8 @@ def prepare_cohort_inputs(
             "radius": graph_radius,
             "max_neighbors": graph_max_neighbors,
             "coordinate_units": "registered_pixel",
+            "distance_units": "registered_pixel",
+            "radius_units": "registered_pixel",
             "support": "adjacent_selected_bins_no_corner_gaps",
         },
         "registration": {

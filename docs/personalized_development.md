@@ -105,6 +105,9 @@ remain in `src/heir/features/`. Historical study implementations are retained in
 | `evaluate.py` | Join completed predictions to separate targets and report explicit metric eligibility |
 | `serialization.py` | Validate prediction axes and values, preserve supplied provenance, and write/read pickle-free NPZ exports |
 | `cli.py` | Preparation, training, prediction, and evaluation entry points |
+| `cohort.py` / `cohort_cli.py` | Registered HTAPP tissue-region preparation and workflows |
+| `region_features.py` | Frozen encoder crops and verified regional feature caches |
+| `inspection.py` | H&E and assay overlays with exact coverage and exclusion tables |
 
 ### Small-workflow commands
 
@@ -142,7 +145,8 @@ Use `heir predict ... --transfer-only --output transfer-only.npz` to export a fi
 model's transfer-only diagnostic. Training a fixed-context transfer-only model is rejected because
 its frozen mapper leaves no decoder to optimize. H&E-only prediction has no transfer diagnostic.
 Training and prediction accept `--device cpu` (the default) or `--device cuda` for a locally
-available CUDA device. This revision's checks ran on CPU; CUDA execution remains unqualified.
+available CUDA device. Model fitting and regression checks have run on CPU. Version 0.5 also ran
+the retained frozen H-optimus-1 encoder on local CUDA; that does not qualify CUDA model training.
 
 Paths in these commands are examples and require actual qualified local input files. The manifest
 identifies the sparse cell-to-observation NPZ through `paths.observation`, including explicit cell
@@ -166,6 +170,16 @@ Version 0.4 retains canonical manifest/bundle v2 and writes prediction v3 with g
 inputs whose spatial units differ from training. The Python `coordinates_um` field remains a
 legacy compatibility name; new code uses `coordinates` together with the declared units.
 
+Version 0.5 carries units into graph distances and interaction cutoffs. Graph `distance_units` and
+interaction `radius_units` must be `um` or `registered_pixel`. The legacy `distances_um` and
+`radius_um` fields retain their names, but their numerical values use the explicitly declared
+units. An omitted interaction unit means `um`, preserving the canonical physical workflow.
+A pixel graph rejects such a program unless a positive, independently established
+`micrometres_per_pixel` calibration is provided. Conversion affects the cutoff comparison only;
+it does not rescale coordinates or graph weights. The regional adapter supplies no calibration.
+Regional context experiments must therefore declare `"radius_units": "registered_pixel"` on
+each interaction. Configuration, bundles, and prediction provenance preserve these units.
+
 For a synthetic integration fixture, use:
 
 ```bash
@@ -177,11 +191,12 @@ expression arrays and are intended for small development specimens. The bundle p
 model state and configuration; reproducing a scientific prediction also requires retaining the
 matched-reference inputs, preparation settings, mapping metadata, and cached-feature identities.
 
-Segmentation and image encoding remain preprocessing tasks. The existing frozen encoder adapters
-are reusable; the new core consumes cached, nucleus-ID-keyed features. A new CellViT adapter,
-automated two-scale physical crops, and complete image-cache provenance still need specimen-level
-qualification. Existing studies retain their recorded H-optimus-1/UNI2-h roles and checkpoint
-identities. The attached plan's optional UNI2-h suggestion does not rewrite those studies.
+Segmentation and image encoding remain preprocessing tasks. The canonical core consumes cached,
+nucleus-ID-keyed features; version 0.5 connects the retained frozen encoder to the regional path
+with source and crop provenance. A new CellViT adapter, automated two-scale physical crops, and
+nucleus-feature qualification remain future work. Existing studies retain their recorded
+H-optimus-1/UNI2-h roles and checkpoint identities. The attached plan's optional UNI2-h suggestion
+does not rewrite those studies.
 
 ## HTAPP qualification
 
@@ -250,8 +265,9 @@ same-cell claims, but does not prevent this explicitly regional development work
 `regions.py` selects a fixed grid from processed H&E image 1 alone, defaulting to 100-pixel bins.
 Tissue fraction uses fixed saturation/intensity thresholds, and disconnected selected bins have
 separate components. Arrays follow the published lower-origin convention without an extra flip.
-Neither CODEX nor target RNA selects regions or computes image features. The initial encoder is
-the existing 12-feature handcrafted RGB negative control, not a pretrained histology model.
+Neither CODEX nor target RNA selects regions or computes image features. The default retains
+the existing 12-feature handcrafted RGB control. Version 0.5 also supports verified frozen
+H-optimus-1 features on the identical grid.
 Region assignments describe reference-state mixtures at tissue locations, not cell placements;
 cell-abundance regularization is disabled for this profile.
 
@@ -297,11 +313,53 @@ heir cohort-evaluate --root /mnt/seagate/HnE/HTAPP_MBC \
 
 `cohort-inspect` writes inventory, configuration, and deterministic candidate patient folds;
 it does not certify fold balance or read target expression. `cohort-demo` fits H&E-only,
-RNA-guided, and protein-guided models on one biopsy, then exports full and transfer-only
-predictions. Its scores are explicitly `development_in_sample`. `cohort-train` reads target
+RNA-guided, and protein-guided models on one biopsy, then exports and scores full and transfer-only
+predictions. Its scores are explicitly `development_in_sample`. Each score reports CD8A/MKI67
+separately from the other seven default outcomes using the same nine-gene normalization basis
+and eligible rows. These groups describe direct marker overlap, not biological independence.
+The run summary also reports mean absolute learned log correction. `cohort-train` reads target
 payloads only for training patients; `cohort-predict --transfer-only` preserves the fitted mapper.
 The original canonical commands continue to support independently prepared H&E nuclei and frozen
 encoder features.
+
+### Regional inspection and frozen image features
+
+```bash
+heir cohort-inspect-pilot --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
+  --config configs/personalized/cohort.json --output pilot-inspection/
+heir cohort-features --root /mnt/seagate/HnE/HTAPP_MBC --biopsies 313-932 \
+  --config configs/personalized/cohort.json \
+  --encoder-manifest manifests/encoders/hoptimus1.json \
+  --model-dir /mnt/seagate/HnE/pretrained/H-optimus-1 \
+  --device cuda --batch-size 1 --output frozen-region-features/
+heir cohort-demo --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
+  --config frozen-region-features/config.json --epochs 100 --seed 0 \
+  --output frozen-feature-pilot/
+```
+
+`cohort-inspect-pilot` builds the H&E grid first, then deliberately opens targets for coverage
+inspection. Its self-contained HTML provides separate CODEX and Slide-seq replicate overlays,
+source points, target exposure, marker availability, exact region tables, and exclusion reasons.
+H&E and points share the authors' lower-origin display convention. Displayed source points are
+bounded to 8,000 per replicate; tables and coverage counts use all observations. `regions.tsv`
+and `summary.json` retain exact results. Visual review can identify coverage problems; it does
+not certify registration accuracy, physical calibration, or same-cell correspondence.
+
+`cohort-features` opens source H&E and source metadata only. It verifies the retained checkpoint
+and configuration against the encoder manifest. Each selected grid bin supplies one crop, clipped
+at image edges without padding or geometry flips, then resized once to the manifest's 224-pixel
+input. A 100-pixel registered bin is not a qualified 100-µm crop. The encoder's preferred 0.5 µm
+per pixel records its training scale, not the registered image's calibration.
+
+The pickle-free per-biopsy NPZ binds source-image SHA-256, region IDs, coordinates, grid identity,
+crop and preprocessing definitions, full encoder manifest, checkpoint/configuration identities,
+feature dimension, and feature-array hash. Loading rejects changed images, grids, encoder
+identities, axes, or feature values. There is no fallback to RGB when a requested cache fails.
+The generated configuration records the cache directory and manifest hash and sets the model
+feature dimension (1,536 for H-optimus-1). Use that configuration for training; prediction uses
+the preparation saved in its bundle. For a patient-fold study, cache every required biopsy with
+`--biopsies`; frozen extraction uses no targets or cross-patient fitting. The feature mean and
+scale used by the predictive model continue to be fitted on training patients only.
 
 Preparation consumes the documented canonical local format. Portal bundles with different AnnData
 keys or metadata columns need explicit adaptation before loading; the importer does not infer
@@ -493,8 +551,63 @@ cohort experiment. Local outputs are under `/storage/HE_GPT/HEIR-cohort-runs/v04
 the compact source repository. Unit tests separately exercise missing/changed targets and missing
 input payloads during evaluation.
 
-Physical calibration, exact section/core matching, meaningful pretrained image features,
-registration sensitivity, marker calibration, and full study selection remain scientific work.
+### Version 0.5 regional pilot
+
+Version 0.5 passes 230 CPU tests plus lint, formatting, lockfile, and wheel/source-build checks.
+Regressions include incompatible interaction units, equivalent calibrated
+pixel/µm messages in both conversion directions, and bundle persistence. Frozen-cache regressions
+cover source/grid/encoder mismatches, crop edges and row ordering, feature corruption, and
+target-free CLI preparation. Inspection tests cover axis orientation, replicate exclusions, and
+the retained H5AD categorical encodings.
+
+The 313-932 visual report selects 629 of 2,772 image bins using H&E alone; 2,143 fail the tissue
+rule. CODEX covers 499 selected regions with all five selected markers available. Slide-seq
+replicates cover 150 and 160 regions; three and one respectively have zero fixed-panel exposure,
+leaving 147 and 159 eligible region-replicates. The report identifies all exclusions and uncovered
+regions. Browser review found the broad assay footprints over tissue, with CODEX extending into
+a detached lower fragment and Slide-seq concentrated centrally. Small isolated and partly occupied
+boundary bins remain review items. This coarse visual check does not qualify registration accuracy.
+
+The retained H-optimus-1 manifest and local checkpoint were verified before extracting 1,536
+features for every selected region on a local RTX 3080. Two controlled CPU pilots then used RGB
+and frozen histology features with the same biopsy, grid, 32 reference states, nine-gene panel,
+eligible target rows, seed 0, learning rate 0.001, and 100-epoch schedule. Model settings were
+identical except for input feature width (12 versus 1,536); that also changes first-layer parameter
+count. All five exports per representation were scored on the training biopsy:
+
+| Prediction | RGB control | H-optimus-1 |
+| --- | ---: | ---: |
+| H&E-only | 0.104 | 0.264 |
+| RNA-guided transfer only | 0.003 | 0.154 |
+| RNA-guided with correction | 0.046 | 0.414 |
+| Protein-guided transfer only | 0.008 | 0.134 |
+| Protein-guided with correction | 0.043 | 0.412 |
+
+Values are equal-replicate means of within-replicate median gene-wise spatial Spearman
+correlations. They are **in-sample development fits**, not held-out estimates. Frozen histology
+features fit this specimen better than RGB under these settings. The corrected RNA/protein arms
+have mean absolute log corrections of 0.602/0.612, versus zero for transfer-only exports; much
+of their score depends on learned correction. The full RNA/protein normalized log MSEs are
+4.993/4.996. Neither the full prediction nor transfer-only result shows incremental protein
+benefit in this pilot.
+
+For H-optimus-1 full predictions, CD8A/MKI67 subgroup scores are 0.426 (RNA) and 0.430 (protein);
+the other seven outcomes score 0.414 and 0.397. All use the unchanged nine-gene normalizer.
+The small direct-marker difference does not establish a protein benefit or independent
+within-type reconstruction. Per-gene and replicate details remain in each score export.
+
+The inspectable HTML, cache, bundles, predictions, scores, and comparison summary are under
+`/storage/HE_GPT/HEIR-cohort-runs/v050-review`; its README indexes the artifacts. Data, weights,
+and outputs stay outside the source repository. The earlier v0.4 acceptance runs remain intact.
+
+The assessment's immediate interaction-unit, visual-pilot, and frozen-representation steps are
+implemented, with the small baseline comparison also reported. Candidate folds have not been
+promoted to a frozen scientific protocol. Full patient-held-out model selection, paired patient
+contrasts, and staged generic/LR experiments remain subsequent work; earlier development exposure
+to this cohort must be acknowledged in any study design.
+
+Physical calibration, exact section/core matching, registration sensitivity, marker calibration,
+and full study selection remain scientific work.
 Independently segmented nuclei are required only for the nucleus-level extension, not for running
 the explicitly regional profile. Neither the regional development scores nor the source inspection
 establish same-cell placement or communication effects.
@@ -502,10 +615,10 @@ establish same-cell placement or communication effects.
 | Milestone | Software scope in this revision | Scientific acceptance still required |
 | --- | --- | --- |
 | Data qualification | Verified consumed source hashes, retained count axes, biopsy-level adapter, explicit pixel frame | Exact section/core provenance, physical calibration, and scientific registration review |
-| Baseline path | Two real regional pilots and all-13 patient-fold execution acceptance | Meaningful image representation and independently qualified predictive performance |
-| Personalized baseline | H&E-only and RNA comparison configuration | Patient-held-out added value with transfer and correction reported separately |
+| Baseline path | RGB controls, verified frozen histology features, an inspectable pilot, and all-13 execution acceptance | Independently qualified predictive performance and reviewed folds |
+| Personalized baseline | Controlled same-biopsy H&E/RNA/protein comparisons with transfer and correction reports | Patient-held-out added value under a fixed protocol |
 | Protein contribution | Shared regional observation operator, confidence weights, and source identity checks | Validated marker interpretation, registration uncertainty, and incremental expression/localization evidence |
-| Neighborhood/communication | Generic/LR fixed/refined configuration family | Controlled staged comparison with identical base mapper, budgets, and independent readouts |
+| Neighborhood/communication | Generic/LR fixed/refined family with explicit graph and radius units | Controlled staged comparison with identical base mapper, budgets, and independent readouts |
 | Robustness/ST reference | Explicit output and evaluation boundaries | Full perturbation/control suite, within-type endpoint, calibrated uncertainty, separate ST-informed comparator |
 | Packaging and scale | Small cached-feature workflow and persistence contract | Full inference provenance, restart qualification, block halos, chunked/factorized exports, external comparators, and measured real-specimen resources |
 

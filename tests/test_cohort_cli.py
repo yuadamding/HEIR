@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,11 +11,17 @@ import pytest
 import torch
 from test_personalized_cohort import _tsv
 from test_personalized_cohort import published_cohort as published_cohort
+from test_region_features import StubEncoder
 
 from heir.personalized import cohort
 from heir.personalized.cli import main
-from heir.personalized.cohort_cli import DEFAULT_OUTCOME_GENES, default_config, replicate_scores
-from heir.personalized.evaluate import score
+from heir.personalized.cohort_cli import (
+    DEFAULT_OUTCOME_GENES,
+    comparison_scores,
+    default_config,
+    replicate_scores,
+)
+from heir.personalized.evaluate import normalized_observations, score
 from heir.personalized.observation import ObservationOperator
 from heir.personalized.schema import SpatialTargets
 from heir.personalized.serialization import load_prediction
@@ -101,19 +108,43 @@ def test_demo_exports_three_comparisons_and_predict_ignores_unavailable_targets(
 ):
     root, output, target = regional_demo
     run = json.loads((output / "run.json").read_text())
-    assert set(run["comparisons"]) == {"he", "he_rna", "he_rna_protein"}
+    variants = {"he", "he_rna", "he_rna_protein"}
+    assert set(run["comparisons"]) == variants | {"he_rna_transfer", "he_rna_protein_transfer"}
     assert run["prediction_unit"] == "tissue_region"
     assert run["coordinate_units"] == "registered_pixel"
     assert run["evaluation_role"] == "development_in_sample"
     assert not run["scientific_qualification"]
-    for variant in run["comparisons"]:
+    for variant in variants:
         prediction, provenance = load_prediction(output / f"{variant}.npz")
         assert prediction.expression.shape == (4, 2)
         assert prediction.prediction_unit == "tissue_region"
         assert not provenance["target_payload_read"]
+        full_scores = json.loads((output / f"{variant}.scores.json").read_text())
+        full_summary = run["comparisons"][variant]
+        assert full_summary["mean_absolute_log_correction"] == pytest.approx(
+            prediction.log_correction.abs().mean().item()
+        )
+        assert full_summary["normalized_log_mse"] == full_scores["normalized_log_mse"]
         if variant != "he":
             transfer, _ = load_prediction(output / f"{variant}.transfer.npz")
             np.testing.assert_array_equal(transfer.expression, transfer.transfer)
+            np.testing.assert_array_equal(transfer.transfer, prediction.transfer)
+            assert not transfer.log_correction.any()
+            transfer_scores = json.loads((output / f"{variant}.transfer.scores.json").read_text())
+            transfer_summary = run["comparisons"][f"{variant}_transfer"]
+            assert transfer_summary["mean_absolute_log_correction"] == 0
+            assert transfer_summary["normalized_log_mse"] == transfer_scores["normalized_log_mse"]
+            assert (
+                transfer_summary["mean_replicate_median_gene_spearman"]
+                == transfer_scores["mean_replicate_median_gene_spearman"]
+            )
+            assert transfer_scores["evaluation_role"] == "development_in_sample"
+            assert (
+                transfer_scores["normalization_gene_ids"] == full_scores["normalization_gene_ids"]
+            )
+            assert [r["assay_replicate"] for r in transfer_scores["replicate_scores"]] == [
+                r["assay_replicate"] for r in full_scores["replicate_scores"]
+            ]
 
     original, _ = load_prediction(output / "he_rna_protein.npz")
     read = cohort._read_h5ad
@@ -196,6 +227,79 @@ def test_replicate_scoring_cannot_use_between_replicate_mean_differences():
         report["gene_scores"][0]["undefined_reason"] == "constant_target"
         for report in result["replicate_scores"]
     )
+
+
+def _comparison_case():
+    ids = tuple(f"region:{i}" for i in range(8))
+    rng = np.random.default_rng(23)
+    values = rng.integers(1, 20, (8, len(DEFAULT_OUTCOME_GENES))).astype(np.float32)
+    measured = rng.integers(1, 20, values.shape).astype(np.float32)
+    prediction = SimpleNamespace(
+        cell_ids=ids,
+        gene_ids=DEFAULT_OUTCOME_GENES,
+        expression=torch.from_numpy(values),
+        patient_id="patient",
+        specimen_id="biopsy",
+        prediction_unit="tissue_region",
+        coordinate_units="registered_pixel",
+    )
+    targets = SpatialTargets(
+        ids,
+        DEFAULT_OUTCOME_GENES,
+        measured,
+        np.ones(measured.shape, dtype=bool),
+        "patient",
+        "biopsy",
+    )
+    operator = ObservationOperator(ids, ids, np.arange(8), np.arange(8), np.ones(8))
+    return prediction, targets, operator, ("1",) * 4 + ("2",) * 4
+
+
+def test_direct_marker_outcomes_and_other_genes_keep_full_nine_gene_normalization():
+    prediction, targets, operator, groups = _comparison_case()
+    genes = DEFAULT_OUTCOME_GENES
+    report = comparison_scores(prediction, targets, operator, groups, genes, genes)
+    full_values = normalized_observations(
+        prediction, targets, operator, genes, normalization_gene_ids=genes
+    )
+    panels = {
+        "direct_protein_marker_genes": ("CD8A", "MKI67"),
+        "other_outcome_genes": genes[:7],
+    }
+    for name, panel in panels.items():
+        subset = report["outcome_groups"][name]
+        assert subset["gene_ids"] == list(panel)
+        assert subset["status"] == "reported"
+        scored = subset["scores"]
+        assert scored["normalization_gene_ids"] == list(genes)
+        assert scored["evaluation_gene_ids"] == list(panel)
+        selected_values = normalized_observations(
+            prediction, targets, operator, panel, normalization_gene_ids=genes
+        )
+        indices = [genes.index(gene) for gene in panel]
+        for original, selected in zip(full_values, selected_values):
+            torch.testing.assert_close(selected, original[:, indices], atol=0, rtol=0)
+        for full_replicate, selected_replicate in zip(
+            report["replicate_scores"], scored["replicate_scores"]
+        ):
+            expected = [row for row in full_replicate["gene_scores"] if row["gene_id"] in panel]
+            assert selected_replicate["gene_scores"] == expected
+            assert selected_replicate["normalization_gene_ids"] == list(genes)
+
+
+@pytest.mark.parametrize("genes", [("EPCAM", "KRT8"), ("CD8A", "MKI67")])
+def test_empty_outcome_group_has_no_fabricated_metric(genes):
+    prediction, targets, operator, groups = _comparison_case()
+    report = comparison_scores(prediction, targets, operator, groups, genes, DEFAULT_OUTCOME_GENES)
+    empty = "direct_protein_marker_genes" if genes[0] == "EPCAM" else "other_outcome_genes"
+    assert report["outcome_groups"][empty] == {
+        "gene_ids": [],
+        "status": "no_requested_outcomes_in_group",
+        "scores": None,
+    }
+    assert report["normalization_gene_ids"] == list(DEFAULT_OUTCOME_GENES)
+    populated = next(value for key, value in report["outcome_groups"].items() if key != empty)
+    assert populated["scores"]["replicate_scores"] == report["replicate_scores"]
 
 
 def test_cohort_training_opens_targets_only_for_training_patients(regional_workflow, monkeypatch):
@@ -329,7 +433,14 @@ def test_context_training_reuses_protein_baseline_with_same_preparation(regional
     config = json.loads(config_path.read_text())
     config["model"].update(
         variant="generic_fixed",
-        lr_interactions=[{"ligand": ["EPCAM"], "receptor": ["KRT8"], "radius_um": 20}],
+        lr_interactions=[
+            {
+                "ligand": ["EPCAM"],
+                "receptor": ["KRT8"],
+                "radius_um": 20,
+                "radius_units": "registered_pixel",
+            }
+        ],
     )
     config_path.write_text(json.dumps(config))
     main([*command, "--baseline", str(baseline_path), "--output", str(context_path)])
@@ -341,3 +452,159 @@ def test_context_training_reuses_protein_baseline_with_same_preparation(regional
     assert context.training_patient_ids == baseline.training_patient_ids == ("HTA1_313",)
     np.testing.assert_array_equal(context.feature_mean, baseline.feature_mean)
     np.testing.assert_array_equal(context.feature_scale, baseline.feature_scale)
+
+
+def test_frozen_feature_cli_cache_demo_and_target_free_prediction(regional_workflow, monkeypatch):
+    """Exercise CLI wiring with a deterministic stub, not a real encoder acceptance claim."""
+    from heir import features
+    from heir.features import base as feature_base
+
+    root, rgb_config_path, target = regional_workflow
+    rgb_config = json.loads(rgb_config_path.read_text())
+    rgb, _ = cohort.prepare_cohort_inputs(
+        root,
+        "313-932",
+        gene_ids=rgb_config["model"]["gene_ids"],
+        **rgb_config["preparation"],
+    )
+    manifest_path = Path(__file__).parents[1] / "manifests/encoders/hoptimus1.json"
+    manifest = features.load_encoder_manifest(manifest_path)
+    encoder = StubEncoder(manifest)
+    verification_calls = []
+
+    def stub_factory(model_dir, configured, *, device):
+        assert configured == manifest and device == "cpu"
+        assert not model_dir.exists()
+        return encoder
+
+    def stub_config_verification(model_dir, filename, expected_sha256):
+        verification_calls.append((filename, expected_sha256))
+        return Path(model_dir) / filename
+
+    def forbidden_molecular_read(path):
+        pytest.fail(f"feature extraction opened molecular payload {path}")
+
+    cache_dir = root / "frozen_features"
+    with monkeypatch.context() as extraction:
+        extraction.setattr(features, "create_frozen_encoder", stub_factory)
+        extraction.setattr(feature_base, "verified_model_file", stub_config_verification)
+        extraction.setattr(cohort, "_read_h5ad", forbidden_molecular_read)
+        main(
+            [
+                "cohort-features",
+                "--root",
+                str(root),
+                "--config",
+                str(rgb_config_path),
+                "--encoder-manifest",
+                str(manifest_path),
+                "--model-dir",
+                str(root / "weights_are_stubbed_only"),
+                "--device",
+                "cpu",
+                "--batch-size",
+                "2",
+                "--output",
+                str(cache_dir),
+            ]
+        )
+    assert verification_calls == [(manifest.config_filename, manifest.config_sha256)]
+    assert sum(len(batch) for batch in encoder.batches) == len(rgb.cell_ids)
+    frozen_config_path = cache_dir / "config.json"
+    config = json.loads(frozen_config_path.read_text())
+    assert config["model"]["feature_dim"] == manifest.feature_width == 1536
+    assert config["preparation"]["feature_encoder_manifest_sha256"] == manifest.sha256
+    assert config["preparation"]["feature_cache_dir"] == str(cache_dir.resolve())
+    frozen, source_record = cohort.prepare_cohort_inputs(
+        root,
+        "313-932",
+        gene_ids=config["model"]["gene_ids"],
+        **config["preparation"],
+    )
+    assert frozen.cell_ids == rgb.cell_ids
+    np.testing.assert_array_equal(frozen.coordinates, rgb.coordinates)
+    assert frozen.image_features.shape == (4, 1536)
+    assert rgb.image_features.shape == (4, 12)
+    with np.load(cache_dir / "313-932.npz", allow_pickle=False) as archive:
+        np.testing.assert_array_equal(frozen.image_features, archive["features"])
+    assert source_record["image_features"]["kind"] == "frozen_histology"
+    assert (
+        source_record["image_features"]["metadata"]["encoder"]["encoder_id"] == manifest.encoder_id
+    )
+    assert source_record["image_features"]["metadata"]["physical_scale_verified"] is False
+
+    output = root / "frozen_demo"
+    main(
+        [
+            "cohort-demo",
+            "--root",
+            str(root),
+            "--config",
+            str(frozen_config_path),
+            "--epochs",
+            "1",
+            "--output",
+            str(output),
+        ]
+    )
+    bundle = output / "he_rna_protein.bundle"
+    fitted = FittedModel.load(bundle)
+    assert fitted.model.config.feature_dim == 1536
+    assert fitted.feature_mean.shape == (1536,)
+    original, provenance = load_prediction(output / "he_rna_protein.npz")
+    feature_record = provenance["cohort_inputs"]["image_features"]
+    assert feature_record["kind"] == "frozen_histology"
+    assert feature_record["feature_dim"] == 1536
+    assert feature_record["encoder_manifest_sha256"] == manifest.sha256
+    assert feature_record["metadata"]["encoder"]["encoder_id"] == manifest.encoder_id
+    assert original.cell_ids == rgb.cell_ids
+    np.testing.assert_array_equal(original.coordinates, rgb.coordinates)
+    assert original.coordinate_units == "registered_pixel"
+
+    command = [
+        "cohort-predict",
+        "--root",
+        str(root),
+        "--biopsy",
+        "313-932",
+        "--bundle",
+        str(bundle),
+    ]
+    target.unlink()
+    read = cohort._read_h5ad
+
+    def prediction_input_only(path):
+        assert "slide_seq" not in path.name
+        return read(path)
+
+    monkeypatch.setattr(cohort, "_read_h5ad", prediction_input_only)
+    predicted_path = root / "frozen_target_absent.npz"
+    main([*command, "--output", str(predicted_path)])
+    predicted, replay_provenance = load_prediction(predicted_path)
+    np.testing.assert_array_equal(predicted.expression, original.expression)
+    np.testing.assert_array_equal(predicted.assignment, original.assignment)
+    assert not replay_provenance["target_payload_read"]
+    assert replay_provenance["cohort_inputs"]["image_features"] == feature_record
+
+    config["preparation"]["feature_encoder_manifest_sha256"] = "a" * 64
+    wrong = root / "wrong_encoder.json"
+    wrong.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="identity mismatch"):
+        main(
+            [
+                "cohort-demo",
+                "--root",
+                str(root),
+                "--config",
+                str(wrong),
+                "--epochs",
+                "1",
+                "--output",
+                str(root / "wrong_encoder_demo"),
+            ]
+        )
+    (cache_dir / "313-932.npz").unlink()
+    missing_output = root / "missing_cache_prediction.npz"
+    with pytest.raises(FileNotFoundError):
+        main([*command, "--output", str(missing_output)])
+    assert not missing_output.exists()
