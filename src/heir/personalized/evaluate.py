@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from .observation import ObservationOperator, normalized_log_expression
-from .schema import Prediction, SpatialTargets, identifiers
+from .schema import Prediction, SpatialTargets, identifiers, spatial_metadata
 
 
 def aligned_observations(
@@ -19,6 +19,7 @@ def aligned_observations(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     genes = tuple(gene_ids)
     identifiers(genes, "evaluation genes")
+    spatial_metadata(prediction.prediction_unit, prediction.coordinate_units)
     if prediction.patient_id != targets.patient_id or prediction.specimen_id != targets.specimen_id:
         raise ValueError("prediction/target specimen or patient identity mismatch")
     if set(operator.observation_ids) != set(targets.observation_ids):
@@ -131,6 +132,8 @@ def _score_specimen(
     return {
         "patient_id": targets.patient_id,
         "specimen_id": targets.specimen_id,
+        "prediction_unit": prediction.prediction_unit,
+        "coordinate_units": prediction.coordinate_units,
         "expression_scale": "relative",
         "normalization": "aggregate_linear_then_fixed_complete_panel_library_1e4_then_log1p",
         "normalization_gene_ids": list(normalization_gene_ids),
@@ -172,6 +175,10 @@ def score_patient(
     """
     if not samples or min_regions < 3:
         raise ValueError("at least one specimen and min_regions >= 3 are required")
+    input_units = {(p.prediction_unit, p.coordinate_units) for p, _, _ in samples}
+    if len(input_units) != 1:
+        raise ValueError("patient samples must share prediction_unit and coordinate_units")
+    prediction_unit, coordinate_units = next(iter(input_units))
     if len({target.patient_id for _, target, _ in samples}) != 1:
         raise ValueError("score_patient requires exactly one biological patient")
     if len({target.specimen_id for _, target, _ in samples}) != len(samples):
@@ -202,6 +209,8 @@ def score_patient(
     ]
     return {
         "patient_id": samples[0][1].patient_id,
+        "prediction_unit": prediction_unit,
+        "coordinate_units": coordinate_units,
         "expression_scale": "relative",
         "normalization": "aggregate_linear_then_fixed_complete_panel_library_1e4_then_log1p",
         "normalization_gene_ids": list(normalization_gene_ids),

@@ -10,14 +10,16 @@ This is a development prototype. Real HTAPP qualification, calibrated uncertaint
 benefits from personalization or communication remain unestablished. See the
 [workflow and scientific limits](docs/personalized_development.md).
 
-The 13-biopsy source working set is available at `/mnt/seagate/HnE/HTAPP_MBC`. Its
-[local-data assessment](docs/personalized_development.md#htapp-qualification) records verified
-presence and pilot count axes, plus the geometry and H&E preprocessing still needed for a real fit.
+The 13-biopsy working set at `/mnt/seagate/HnE/HTAPP_MBC` now has a
+[tissue-region workflow](docs/personalized_development.md#htapp-tissue-region-workflow). It uses
+biopsy-level matching and the published registered pixel frame without inventing section IDs.
+Nucleus-level inputs remain supported by the original canonical workflow.
 
 Version 0.3 fixes the numerical issues identified in the assessment of `d955c01`: fixed
 normalization panels, support-independent transfer, and separate protein observation geometry.
-Specimen manifests, model bundles, and prediction exports now use **schema v2**; older artifacts
-must be regenerated after explicit configuration and metadata migration.
+Version 0.4 adds cohort preparation, patient-fold fitting, prediction, and replicate-wise evaluation.
+Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
+as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
 ## Install and run
 
@@ -28,6 +30,18 @@ uv run heir demo --output /tmp/heir-demo
 
 The `encoders` extra is optional when using cached image features. Environments and caches are
 rebuildable and excluded from the repository; `uv sync` recreates the local environment.
+
+For the available cohort, start with a real-data development run:
+
+```bash
+uv run heir cohort-inspect --root /mnt/seagate/HnE/HTAPP_MBC --output /tmp/heir-cohort
+uv run heir cohort-demo --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
+  --config configs/personalized/cohort.json --output /tmp/heir-313-regions
+```
+
+The default uses nine shared outcome genes and handcrafted RGB control features. The demo fits
+and scores the same biopsy; it tests the software, not held-out biological performance. The cohort
+workflow also supplies `cohort-train`, `cohort-predict`, and `cohort-evaluate` commands.
 
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:
@@ -50,9 +64,10 @@ uv run ruff format --check .
 ```
 
 Regression tests cover the supplied normalization, support, protein, and patient-scoring
-counterexamples. Checks use CPU and synthetic data. The active source contains the personalized
-pipeline, optional frozen encoder
-adapters, and their configuration files. The [comparison index](configs/personalized/comparisons.json)
+counterexamples, cohort target isolation, spatial units, and replicate handling. Unit tests use
+CPU and synthetic data; real cohort acceptance runs are documented separately. The active source
+contains the personalized pipeline, optional frozen encoder adapters, and their configuration
+files. The [comparison index](configs/personalized/comparisons.json)
 describes the seven model variants; context variants require a fitted protein baseline.
 
 ## Historical work

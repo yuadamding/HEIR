@@ -271,6 +271,37 @@ def test_predictions_accept_no_spatial_target_argument():
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
+def test_tissue_region_prediction_preserves_declared_coordinate_units(variant):
+    inputs = specimen()
+    net = model(variant)
+    expected = net(inputs)
+    regions = replace(
+        inputs,
+        cell_ids=("region1", "region2", "region3"),
+        prediction_unit="tissue_region",
+        coordinate_units="registered_pixel",
+    )
+    actual = net(regions)
+    assert actual.prediction_unit == "tissue_region"
+    assert actual.coordinate_units == "registered_pixel"
+    assert actual.cell_ids == regions.cell_ids
+    np.testing.assert_array_equal(regions.coordinates, regions.coordinates_um)
+    torch.testing.assert_close(actual.coordinates, actual.coordinates_um, atol=0, rtol=0)
+    torch.testing.assert_close(actual.expression, expected.expression, atol=0, rtol=0)
+    assert expected.prediction_unit == "nucleus"
+    assert expected.coordinate_units == "um"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"prediction_unit": "protein_cell"}, {"coordinate_units": "pixel"}],
+)
+def test_prediction_input_requires_known_unit_metadata(changes):
+    with pytest.raises(ValueError):
+        replace(specimen(), **changes)
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("unsupported_bias", [3.0, 1000.0])
 def test_unsupported_logits_cannot_weight_expression_messages_or_protein_loss(
     variant, unsupported_bias

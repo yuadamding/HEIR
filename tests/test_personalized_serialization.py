@@ -34,8 +34,14 @@ def prediction():
     )
 
 
-def test_exact_prediction_roundtrip_preserves_flags_and_provenance(tmp_path):
-    original = prediction()
+@pytest.mark.parametrize("prediction_unit", ["nucleus", "tissue_region"])
+@pytest.mark.parametrize("coordinate_units", ["um", "registered_pixel"])
+def test_exact_prediction_roundtrip_preserves_flags_and_provenance(
+    tmp_path, prediction_unit, coordinate_units
+):
+    original = replace(
+        prediction(), prediction_unit=prediction_unit, coordinate_units=coordinate_units
+    )
     path = tmp_path / "prediction.npz"
     provenance = {"training_patient_ids": ["patient2"], "fold_roles": {"patient1": "test"}}
     save_prediction(original, path, provenance)
@@ -50,6 +56,8 @@ def test_exact_prediction_roundtrip_preserves_flags_and_provenance(tmp_path):
         "expression_scale",
         "reference_support_calibrated",
         "unsupported_policy",
+        "prediction_unit",
+        "coordinate_units",
     ):
         assert getattr(restored, name) == getattr(original, name)
     for name in (
@@ -74,7 +82,11 @@ def test_exact_prediction_roundtrip_preserves_flags_and_provenance(tmp_path):
         np.testing.assert_array_equal(arrays["expression_adjustment"], np.zeros((2, 2)))
         assert all(arrays[name].dtype.kind in "fiubU" for name in arrays.files)
         metadata = json.loads(arrays["metadata_json"].item())
-        assert metadata["schema"] == "heir.personalized.prediction.v2"
+        assert metadata["schema"] == "heir.personalized.prediction.v3"
+        assert metadata["prediction_unit"] == prediction_unit
+        assert metadata["coordinate_units"] == coordinate_units
+        assert "coordinates_um" not in arrays.files
+        np.testing.assert_array_equal(arrays["coordinates"], original.coordinates)
         assert metadata["reference_support_calibrated"] is False
         assert metadata["unsupported_policy"] == "conditional_reference_unvalidated"
     before = path.read_bytes()
@@ -102,6 +114,8 @@ def test_exact_prediction_roundtrip_preserves_flags_and_provenance(tmp_path):
         {"registration_sensitivity": torch.tensor([float("inf"), 0.0])},
         {"expression_scale": "absolute_counts"},
         {"patient_id": ""},
+        {"prediction_unit": "protein_cell"},
+        {"coordinate_units": "pixel"},
     ],
 )
 def test_invalid_prediction_cannot_be_saved(tmp_path, changes):
@@ -179,3 +193,66 @@ def test_old_prediction_schema_cannot_be_silently_reinterpreted(tmp_path):
     np.savez(old, **data)
     with pytest.raises(ValueError, match="unsupported prediction archive schema"):
         load_prediction(old)
+
+
+def test_legacy_v2_load_preserves_explicit_nucleus_micrometre_contract(tmp_path):
+    original = prediction()
+    current = tmp_path / "current.npz"
+    provenance = {"model_config": {"normalization_gene_ids": ["g1", "g2"]}}
+    save_prediction(original, current, provenance)
+    with np.load(current, allow_pickle=False) as archive:
+        data = {name: archive[name].copy() for name in archive.files}
+    metadata = json.loads(data["metadata_json"].item())
+    metadata["schema"] = "heir.personalized.prediction.v2"
+    del metadata["prediction_unit"], metadata["coordinate_units"]
+    data["metadata_json"] = np.asarray(json.dumps(metadata))
+    data["coordinates_um"] = data.pop("coordinates")
+    legacy = tmp_path / "v2.npz"
+    np.savez(legacy, **data)
+    restored, restored_provenance = load_prediction(legacy)
+    assert restored.prediction_unit == "nucleus"
+    assert restored.coordinate_units == "um"
+    assert restored_provenance == provenance
+    torch.testing.assert_close(restored.coordinates, original.coordinates_um, atol=0, rtol=0)
+    torch.testing.assert_close(restored.expression, original.expression, atol=0, rtol=0)
+    metadata["coordinate_units"] = "registered_pixel"
+    data["metadata_json"] = np.asarray(json.dumps(metadata))
+    contradictory = tmp_path / "contradictory-v2.npz"
+    np.savez(contradictory, **data)
+    with pytest.raises(ValueError, match="v2 predictions require nucleus units and um"):
+        load_prediction(contradictory)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("prediction_unit", None),
+        ("prediction_unit", "cell"),
+        ("prediction_unit", []),
+        ("coordinate_units", None),
+        ("coordinate_units", "unknown"),
+        ("coordinate_units", {}),
+    ],
+)
+def test_v3_archive_requires_valid_prediction_and_coordinate_units(tmp_path, field, value):
+    current = tmp_path / "current.npz"
+    save_prediction(prediction(), current)
+    with np.load(current, allow_pickle=False) as archive:
+        data = {name: archive[name].copy() for name in archive.files}
+    metadata = json.loads(data["metadata_json"].item())
+    if value is None:
+        del metadata[field]
+    else:
+        metadata[field] = value
+    data["metadata_json"] = np.asarray(json.dumps(metadata))
+    malformed = tmp_path / "malformed.npz"
+    np.savez(malformed, **data)
+    with pytest.raises(ValueError, match=field):
+        load_prediction(malformed)
+
+
+def test_mutated_invalid_units_are_rejected_at_export(tmp_path):
+    original = prediction()
+    original.coordinate_units = "not_calibrated"
+    with pytest.raises(ValueError, match="coordinate_units"):
+        save_prediction(original, tmp_path / "invalid.npz")

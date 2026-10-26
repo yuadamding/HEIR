@@ -181,8 +181,11 @@ def evaluate_command(args):
 
 
 def main(argv=None):
+    from .cohort_cli import add_commands
+
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    add_commands(commands)
     prepare = commands.add_parser(
         "prepare", help="validate allowed specimen inputs without target access"
     )

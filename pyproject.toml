@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "heir-spatial"
-version = "0.3.0"
+version = "0.4.0"
 description = "Specimen-personalized spatial expression prediction"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,6 +20,7 @@ heir = "heir.personalized.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.5"]
 htapp = [
+  "pillow>=10",
   "anndata>=0.10,<0.13",
   "pandas>=1.5",
   "scipy>=1.10",

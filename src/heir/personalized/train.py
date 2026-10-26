@@ -23,6 +23,7 @@ class TrainingSample:
     inputs: PredictionInputs
     targets: SpatialTargets
     observation: ObservationOperator
+    observation_groups: Optional[tuple[str, ...]] = None
 
     def __post_init__(self):
         if (self.inputs.patient_id, self.inputs.specimen_id) != (
@@ -32,6 +33,17 @@ class TrainingSample:
             raise ValueError("training sample input/target identity mismatch")
         if set(self.inputs.cell_ids) != set(self.observation.cell_ids):
             raise ValueError("training geometry does not describe the input cells")
+        if self.observation_groups is not None:
+            if isinstance(self.observation_groups, str):
+                raise ValueError("observation_groups must be a sequence of group identifiers")
+            groups = tuple(self.observation_groups)
+            if len(groups) != len(self.observation.observation_ids) or any(
+                not isinstance(group, str) or not group.strip() for group in groups
+            ):
+                raise ValueError(
+                    "observation_groups must name a nonempty group for every observation row"
+                )
+            object.__setattr__(self, "observation_groups", groups)
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,11 @@ class FittedModel:
     training_config: Optional[dict] = None
 
     def transform(self, inputs: PredictionInputs) -> PredictionInputs:
+        settings = self.training_config or {}
+        if inputs.prediction_unit != settings.get(
+            "prediction_unit", "nucleus"
+        ) or inputs.coordinate_units != settings.get("coordinate_units", "um"):
+            raise ValueError("prediction_unit or coordinate_units differs from fitted model")
         if inputs.image_features.shape[1:] != self.feature_mean.shape:
             raise ValueError("image feature dimension differs from fitted transform")
         return replace(
@@ -171,6 +188,10 @@ def fit(
     """
     if not samples or not model_config.supervised_gene_ids:
         raise ValueError("training needs specimens and an explicit supervised gene panel")
+    input_units = {(s.inputs.prediction_unit, s.inputs.coordinate_units) for s in samples}
+    if len(input_units) != 1:
+        raise ValueError("training samples must share prediction_unit and coordinate_units")
+    prediction_unit, coordinate_units = next(iter(input_units))
     settings = training_config or TrainingConfig()
     specimen_ids = [(s.inputs.patient_id, s.inputs.specimen_id) for s in samples]
     if len(set(specimen_ids)) != len(samples):
@@ -200,6 +221,12 @@ def fit(
             )
         if baseline.preparation != (preparation or {}):
             raise ValueError("context baseline preparation settings differ")
+        baseline_settings = baseline.training_config or {}
+        if (
+            baseline_settings.get("prediction_unit", "nucleus") != prediction_unit
+            or baseline_settings.get("coordinate_units", "um") != coordinate_units
+        ):
+            raise ValueError("context baseline prediction_unit or coordinate_units differs")
         if baseline.model.config.normalization_gene_ids != model_config.normalization_gene_ids:
             raise ValueError("context baseline normalization panel differs")
         model.initialize_fixed_mapper(baseline.model)
@@ -212,6 +239,10 @@ def fit(
         scale = np.maximum(scale, 1e-6)
     fitted = FittedModel(model, mean, scale, patient_ids, [], preparation or {})
     fitted.training_config = asdict(settings)
+    fitted.training_config.update(
+        prediction_unit=prediction_unit,
+        coordinate_units=coordinate_units,
+    )
     if baseline is not None:
         digest = hashlib.sha256()
         for key, value in sorted(baseline.model.state_dict().items()):
@@ -243,10 +274,7 @@ def fit(
             if not mask.any():
                 raise ValueError("training specimen has no observed supervised values")
             error = (predicted - truth).square()
-            # Equal weight per measured gene; differing availability cannot dominate.
-            counts = mask.sum(0)
-            gene_losses = (error * mask).sum(0) / counts.clamp_min(1)
-            loss = gene_losses[counts > 0].mean()
+            loss = _expression_loss(error, mask, sample.observation_groups)
             loss = loss + settings.protein_weight * model.protein_loss(sample.inputs, prediction)
             if model_config.variant != "he":
                 abundance = _abundance_penalty(
@@ -265,6 +293,34 @@ def fit(
     fitted.optimizer_state = optimizer.state_dict()
     model.eval()
     return fitted
+
+
+def _expression_loss(
+    error: torch.Tensor,
+    observed: torch.Tensor,
+    observation_groups: Optional[tuple[str, ...]] = None,
+) -> torch.Tensor:
+    """Equal observed-gene MSE, optionally averaged equally across assay replicates.
+
+    Group labels follow observation-operator row order. They affect expression
+    supervision only; whole-specimen protein and abundance terms stay separate.
+    Without labels, preserve the original specimen-level gene weighting exactly.
+    """
+
+    def measured_gene_mean(values, mask):
+        counts = mask.sum(0)
+        if not (counts > 0).any():
+            raise ValueError("training observation group has no observed supervised values")
+        gene_losses = (values * mask).sum(0) / counts.clamp_min(1)
+        return gene_losses[counts > 0].mean()
+
+    if observation_groups is None:
+        return measured_gene_mean(error, observed)
+    losses = []
+    for group in dict.fromkeys(observation_groups):
+        rows = torch.tensor([value == group for value in observation_groups], device=error.device)
+        losses.append(measured_gene_mean(error[rows], observed[rows]))
+    return torch.stack(losses).mean()
 
 
 def _validate_training_normalization(model: PersonalizedModel, samples: Sequence[TrainingSample]):

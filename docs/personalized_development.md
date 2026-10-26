@@ -155,10 +155,16 @@ future reproducibility/resumption work, while inference loads numeric weights an
 `prepare` creates an input summary/eligibility record and geometry overlay without opening target
 ST. That target-free diagram is not the complete multimodal acceptance overlay.
 
-Version 0.3 requires specimen manifest, bundle, and prediction schema v2. Old model weights are
+Version 0.3 introduced specimen manifest, bundle, and prediction schema v2. Old v1 model weights are
 not silently loaded under the changed numerical semantics: update the normalization panel and
 protein/registration identities, replace protein `radius_um` with declared bin geometry, and
 prepare/refit/export again. The archived v1 evidence remains unchanged.
+
+Version 0.4 retains canonical manifest/bundle v2 and writes prediction v3 with generic
+`coordinates`, explicit `prediction_unit` (`nucleus` or `tissue_region`), and `coordinate_units`
+(`um` or `registered_pixel`). Existing v2 predictions load as nucleus/µm. Saved models reject
+inputs whose spatial units differ from training. The Python `coordinates_um` field remains a
+legacy compatibility name; new code uses `coordinates` together with the declared units.
 
 For a synthetic integration fixture, use:
 
@@ -231,6 +237,71 @@ core identities, or their relationships to independent RNA. The referenced
 not be substituted for biological section IDs. These links, antibody-to-gene interpretation, and
 common tissue coverage still require qualification. The final eligibility table must retain
 explicit reasons for incomplete or unresolved specimens.
+
+### HTAPP tissue-region workflow
+
+The user selected tissue regions as the initial cohort resolution. This profile uses the
+publication's biopsy grouping and preserves unknown section/core details as unknown. It does not
+require invented identifiers to satisfy the stricter nucleus-oriented canonical manifest.
+The registered canvas is the analysis frame: existing coordinates are used unchanged in
+`registered_pixel` units. Physical calibration uncertainty remains relevant to µm-scale or
+same-cell claims, but does not prevent this explicitly regional development workflow.
+
+`regions.py` selects a fixed grid from processed H&E image 1 alone, defaulting to 100-pixel bins.
+Tissue fraction uses fixed saturation/intensity thresholds, and disconnected selected bins have
+separate components. Arrays follow the published lower-origin convention without an extra flip.
+Neither CODEX nor target RNA selects regions or computes image features. The initial encoder is
+the existing 12-feature handcrafted RGB negative control, not a pretrained histology model.
+Region assignments describe reference-state mixtures at tissue locations, not cell placements;
+cell-abundance regularization is disabled for this profile.
+
+The [cohort configuration](../configs/personalized/cohort.json) keeps an 18-gene RNA embedding
+separate from nine shared supervised/normalization outcomes: EPCAM, KRT8, KRT18, KRT19, VIM,
+COL1A2, DCN, CD8A, and MKI67. These outcomes are present on the retained axes of all 13 biopsies;
+their selection used availability rather than expression scores. RNA prototypes still normalize
+over the full measured RNA library before selecting output genes. Larger explicitly specified
+panels are supported when their measured coverage passes the same checks; this initial run is
+not a transcriptome-wide benchmark.
+
+Protein evidence uses the original panel's unambiguous CD4/CD4, CD8/CD8A, CD45/PTPRC,
+CD31/PECAM1, and Ki67/MKI67 pairs. Ambiguous or conflicting mappings, including CD25/ISG20,
+are excluded. Fixed saturating transforms and their cofactors are recorded in configuration and
+provenance; their RNA/protein calibration remains unvalidated. Uniform regional protein means
+have a dedicated observation operator. Availability indicators do not claim registration confidence.
+
+Slide-seq counts are summed within each existing H&E region separately for each assay replicate.
+Regions with incomplete or zero fixed-panel exposure are excluded with explicit IDs, identically
+for every comparison. Training weights measured genes within replicates, replicates within each
+biopsy, and biological patients equally. Evaluation computes spatial correlations separately per
+replicate before reporting `mean_replicate_median_gene_spearman`; between-replicate means cannot
+produce spatial accuracy. All regions and replicates from a patient share one fold.
+
+The adapter verifies SHA-256 for each consumed source payload. Prediction opens only H&E,
+independent RNA, and CODEX; it works with target payloads removed or changed. Evaluation reuses
+the saved grid and opens only the spatial target payload. Source archives, extracted data, and
+acquisition receipts remain unchanged. Published RNA-only labels are an explicitly declared
+cohort-curated reference resource, not training-fold-fitted preprocessing.
+
+```bash
+heir cohort-inspect --root /mnt/seagate/HnE/HTAPP_MBC --output cohort-setup/
+heir cohort-demo --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 313-932 \
+  --config configs/personalized/cohort.json --output pilot-regions/
+heir cohort-train --root /mnt/seagate/HnE/HTAPP_MBC \
+  --config configs/personalized/cohort.json --folds cohort-setup/folds.csv \
+  --outer-fold 0 --output regional-bundle/
+heir cohort-predict --root /mnt/seagate/HnE/HTAPP_MBC --biopsy 330-1082 \
+  --bundle regional-bundle/ --output regional-prediction.npz
+heir cohort-evaluate --root /mnt/seagate/HnE/HTAPP_MBC \
+  --prediction regional-prediction.npz --output regional-scores.json
+```
+
+`cohort-inspect` writes inventory, configuration, and deterministic candidate patient folds;
+it does not certify fold balance or read target expression. `cohort-demo` fits H&E-only,
+RNA-guided, and protein-guided models on one biopsy, then exports full and transfer-only
+predictions. Its scores are explicitly `development_in_sample`. `cohort-train` reads target
+payloads only for training patients; `cohort-predict --transfer-only` preserves the fitted mapper.
+The original canonical commands continue to support independently prepared H&E nuclei and frozen
+encoder features.
 
 Preparation consumes the documented canonical local format. Portal bundles with different AnnData
 keys or metadata columns need explicit adaptation before loading; the importer does not infer
@@ -396,23 +467,42 @@ dependencies in optional environments.
 
 ## Acceptance and remaining work
 
-Version 0.3 passes 127 CPU tests, Ruff lint/format checks, frozen-lock validation, and wheel/source
+Version 0.3 recorded 127 passing CPU tests, Ruff lint/format checks, frozen-lock validation, and wheel/source
 distribution builds. Regression cases cover fixed-panel missingness and outcome subsetting,
 single-gene gradients and degenerate exposure, support-only logit changes, matched protein
 aggregation and confidence, protein/registration identity mismatches, and specimen-first scoring.
 
-The subsequent local-data inspection above supersedes the earlier missing-input status. Source
-acquisition is complete for the selected working set; a qualified canonical specimen is still
-pending. Resolve the physical-scale and section-linkage evidence, create independent H&E nuclei
-and frozen image features, curate molecular inputs, and construct common-region observation
-operators. Then compare H&E-only, RNA-transfer, and protein-guided outputs using the fixed
-normalization contract before expanding to patient-held-out experiments. No real-data model score
-or model memory qualification is claimed from the source inspection.
+Version 0.4 passes 185 CPU tests plus lint, formatting, lockfile, and wheel/source-build checks.
+New regressions cover target-independent cohort prediction, separately loaded targets, grouped
+replicate losses/scores, saved spatial-unit compatibility, regional geometry, source integrity,
+and staged context initialization.
+
+Version 0.4 completed the user-selected regional software path on real inputs. The ten-epoch
+313-932 and 514-6760 pilot runs each produced H&E-only, RNA-guided, protein-guided, and transfer-only
+outputs. They used 629/1,240 H&E regions, 306/639 positive-exposure target region-replicates, and
+nine outcomes. Whole-process peak RSS, including source import, was approximately 1.65/1.95 GB;
+this is not isolated model memory or large-scale qualification. The three arms' in-sample spatial
+correlations ranged from -0.031 to -0.008 for 313-932 and -0.004 to 0.087 for 514-6760. These weak
+results establish execution, not useful prediction or a protein benefit.
+
+A one-epoch patient-fold acceptance fit used eight training biopsies, followed by predictions and
+replicate-wise scores for the two validation and three test biopsies. Thus every selected biopsy
+passed real preparation and its relevant execution path. Test correlations were approximately
+0.006, -0.060, and 0.001; this short engineering check is not a tuned or independently qualified
+cohort experiment. Local outputs are under `/storage/HE_GPT/HEIR-cohort-runs/v040-regions`, outside
+the compact source repository. Unit tests separately exercise missing/changed targets and missing
+input payloads during evaluation.
+
+Physical calibration, exact section/core matching, meaningful pretrained image features,
+registration sensitivity, marker calibration, and full study selection remain scientific work.
+Independently segmented nuclei are required only for the nucleus-level extension, not for running
+the explicitly regional profile. Neither the regional development scores nor the source inspection
+establish same-cell placement or communication effects.
 
 | Milestone | Software scope in this revision | Scientific acceptance still required |
 | --- | --- | --- |
-| Data qualification | Local input contracts, HTAPP-oriented adapter, geometry helpers | Actual file-derived eligibility, matching provenance, count-axis inspection, and a complete first-specimen overlay |
-| Baseline path | Shared mapping/decoder, linear aggregation, training and scoring interfaces | One real specimen from qualified images and RNA through scored common-region predictions |
+| Data qualification | Verified consumed source hashes, retained count axes, biopsy-level adapter, explicit pixel frame | Exact section/core provenance, physical calibration, and scientific registration review |
+| Baseline path | Two real regional pilots and all-13 patient-fold execution acceptance | Meaningful image representation and independently qualified predictive performance |
 | Personalized baseline | H&E-only and RNA comparison configuration | Patient-held-out added value with transfer and correction reported separately |
 | Protein contribution | Shared regional observation operator, confidence weights, and source identity checks | Validated marker interpretation, registration uncertainty, and incremental expression/localization evidence |
 | Neighborhood/communication | Generic/LR fixed/refined configuration family | Controlled staged comparison with identical base mapper, budgets, and independent readouts |

@@ -31,6 +31,7 @@ from heir.personalized.train import (
     TrainingConfig,
     TrainingSample,
     _abundance_penalty,
+    _expression_loss,
     fit,
     make_patient_folds,
     read_fold_roles,
@@ -489,3 +490,152 @@ def test_legacy_bundle_cannot_silently_acquire_new_numerical_semantics(tmp_path)
     hashes_path.write_text(json.dumps(hashes))
     with pytest.raises(ValueError, match="retrain legacy bundles"):
         FittedModel.load(bundle)
+
+
+@pytest.mark.parametrize(
+    "changes", [{"prediction_unit": "tissue_region"}, {"coordinate_units": "registered_pixel"}]
+)
+def test_fit_rejects_mixed_prediction_or_coordinate_units(changes):
+    first, second = _sample("P1"), _sample("P2")
+    second = replace(second, inputs=replace(second.inputs, **changes))
+    with pytest.raises(ValueError, match="share prediction_unit and coordinate_units"):
+        fit([first, second], _config(), TrainingConfig(epochs=1))
+
+
+def test_registered_pixel_region_fit_and_context_keep_unit_contract(tmp_path):
+    sample = _sample()
+    regions = replace(
+        sample,
+        inputs=replace(
+            sample.inputs, prediction_unit="tissue_region", coordinate_units="registered_pixel"
+        ),
+    )
+    settings = TrainingConfig(epochs=1, abundance_weight=0)
+    baseline = fit([regions], _config("he_rna_protein"), settings)
+    assert baseline.training_config["prediction_unit"] == "tissue_region"
+    assert baseline.training_config["coordinate_units"] == "registered_pixel"
+    fixed = fit([regions], _config("lr_fixed"), settings, baseline=baseline)
+    assert fixed.predict(regions.inputs).prediction_unit == "tissue_region"
+    fixed.save(tmp_path / "region_bundle")
+    restored = FittedModel.load(tmp_path / "region_bundle")
+    assert restored.training_config["coordinate_units"] == "registered_pixel"
+    torch.testing.assert_close(
+        restored.predict(regions.inputs).expression,
+        fixed.predict(regions.inputs).expression,
+        atol=0,
+        rtol=0,
+    )
+    for incompatible in (
+        replace(regions.inputs, prediction_unit="nucleus"),
+        replace(regions.inputs, coordinate_units="um"),
+    ):
+        for operation in (restored.transform, restored.predict):
+            with pytest.raises(ValueError, match="differs from fitted model"):
+                operation(incompatible)
+    with pytest.raises(ValueError, match="baseline prediction_unit or coordinate_units differs"):
+        fit([sample], _config("lr_fixed"), settings, baseline=baseline)
+    with pytest.raises(ValueError, match="baseline preparation settings differ"):
+        fit(
+            [regions],
+            _config("lr_fixed"),
+            settings,
+            baseline=baseline,
+            preparation={"different_regions": True},
+        )
+
+
+def test_legacy_bundle_without_units_keeps_nucleus_um_inference_contract(tmp_path):
+    sample = _sample()
+    fitted = fit([sample], _config(), TrainingConfig(epochs=1))
+    del fitted.training_config["prediction_unit"], fitted.training_config["coordinate_units"]
+    fitted.save(tmp_path / "legacy_v2")
+    loaded = FittedModel.load(tmp_path / "legacy_v2")
+    expected = fitted.predict(sample.inputs)
+    actual = loaded.predict(sample.inputs)
+    torch.testing.assert_close(actual.expression, expected.expression, atol=0, rtol=0)
+    assert actual.prediction_unit == "nucleus" and actual.coordinate_units == "um"
+    with pytest.raises(ValueError, match="differs from fitted model"):
+        loaded.predict(
+            replace(
+                sample.inputs, prediction_unit="tissue_region", coordinate_units="registered_pixel"
+            )
+        )
+
+
+def test_scores_preserve_region_unit_metadata():
+    first = _identity_case([[1, 3], [2, 2], [3, 1]], [[1, 3], [2, 2], [3, 1]], specimen="S1")
+    first = (
+        replace(first[0], prediction_unit="tissue_region", coordinate_units="registered_pixel"),
+        first[1],
+        first[2],
+    )
+    individual = score(*first, ("A", "B"), normalization_gene_ids=("A", "B"))
+    patient = score_patient([first], ("A", "B"), normalization_gene_ids=("A", "B"))
+    for report in (individual, patient, patient["specimen_scores"][0]):
+        assert report["prediction_unit"] == "tissue_region"
+        assert report["coordinate_units"] == "registered_pixel"
+    assert individual["median_gene_spearman"] == pytest.approx(1)
+
+
+@pytest.mark.parametrize(
+    "changes", [{"prediction_unit": "tissue_region"}, {"coordinate_units": "registered_pixel"}]
+)
+def test_patient_score_rejects_mixed_units(changes):
+    first = _identity_case([[1, 3], [2, 2], [3, 1]], [[1, 3], [2, 2], [3, 1]], specimen="S1")
+    second = _identity_case([[1, 3], [2, 2], [3, 1]], [[1, 3], [2, 2], [3, 1]], specimen="S2")
+    second = (replace(second[0], **changes), second[1], second[2])
+    with pytest.raises(ValueError, match="share prediction_unit and coordinate_units"):
+        score_patient([first, second], ("A", "B"), normalization_gene_ids=("A", "B"))
+
+
+@pytest.mark.parametrize("groups", [("one",), ("one", "", "two"), ("one", None, "two"), "abc"])
+def test_training_observation_groups_require_named_aligned_rows(groups):
+    with pytest.raises(ValueError, match="observation_groups"):
+        replace(_sample(), observation_groups=groups)
+
+
+def test_expression_loss_equalizes_replicates_with_unequal_coverage_and_missingness():
+    error = torch.tensor([[4.0, 100.0], [1.0, 9.0], [1.0, 100.0], [1.0, 100.0]], requires_grad=True)
+    observed = torch.tensor([[True, False], [True, True], [True, False], [True, False]])
+    grouped = _expression_loss(
+        error, observed, ("replicate1", "replicate2", "replicate2", "replicate2")
+    )
+    # Replicate 1 contributes 4; replicate 2 contributes mean(gene A=1, gene B=9)=5.
+    assert grouped.item() == pytest.approx(4.5)
+    assert _expression_loss(error, observed).item() == pytest.approx(5.375)
+    grouped.backward()
+    assert not error.grad[~observed].any()
+    torch.testing.assert_close(error.grad[:, 0], torch.tensor([0.5, 1 / 12, 1 / 12, 1 / 12]))
+    assert error.grad[1, 1].item() == pytest.approx(0.25)
+
+
+def test_fit_uses_replicate_groups_without_changing_ungrouped_behavior():
+    sample = _sample(missing=True)
+    settings = TrainingConfig(
+        epochs=1, seed=17, protein_weight=0, abundance_weight=0, residual_weight=0
+    )
+    ungrouped = fit([sample], _config(), settings)
+    one_group = fit([replace(sample, observation_groups=("all",) * 3)], _config(), settings)
+    assert one_group.history == ungrouped.history
+    for key, expected in ungrouped.model.state_dict().items():
+        torch.testing.assert_close(one_group.model.state_dict()[key], expected, atol=0, rtol=0)
+    torch.manual_seed(settings.seed)
+    initial = PersonalizedModel(_config())
+    transformed = ungrouped.transform(sample.inputs)
+    predicted, truth, observed = normalized_observations(
+        initial(transformed),
+        sample.targets,
+        sample.observation,
+        _config().supervised_gene_ids,
+        normalization_gene_ids=_config().normalization_gene_ids,
+    )
+    error = (predicted - truth).square()
+    assert not observed[1, 0]
+    expected = (error[0].mean() + (error[2, 0] + error[1:, 1].mean()) / 2) / 2
+    grouped = fit(
+        [replace(sample, observation_groups=("replicate1", "replicate2", "replicate2"))],
+        _config(),
+        settings,
+    )
+    assert grouped.history[0]["loss"] == pytest.approx(expected.item())
+    assert grouped.history[0]["loss"] != pytest.approx(ungrouped.history[0]["loss"])

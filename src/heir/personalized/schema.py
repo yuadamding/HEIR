@@ -23,6 +23,13 @@ def array(value: np.ndarray, shape: tuple[int, ...], name: str, *, nonnegative=F
         raise ValueError(f"{name} must be nonnegative")
 
 
+def spatial_metadata(prediction_unit: str, coordinate_units: str) -> None:
+    if not isinstance(prediction_unit, str) or prediction_unit not in {"nucleus", "tissue_region"}:
+        raise ValueError("prediction_unit must be nucleus or tissue_region")
+    if not isinstance(coordinate_units, str) or coordinate_units not in {"um", "registered_pixel"}:
+        raise ValueError("coordinate_units must be um or registered_pixel")
+
+
 @dataclass(frozen=True)
 class RNAReference:
     state_ids: tuple[str, ...]
@@ -202,7 +209,13 @@ class SpatialGraph:
 
 @dataclass(frozen=True)
 class PredictionInputs:
-    """Allowed evidence only. Spatial targets/labels have no field in this interface."""
+    """Allowed evidence only. Spatial targets/labels have no field in this interface.
+
+    ``cell_ids`` names prediction units, including explicitly declared tissue
+    regions. ``coordinates_um`` is the legacy constructor name; its numerical
+    units are always defined by ``coordinate_units``, also available through
+    the unit-neutral ``coordinates`` property.
+    """
 
     specimen_id: str
     patient_id: str
@@ -213,8 +226,11 @@ class PredictionInputs:
     proteins: Optional[ProteinEvidence] = None
     graph: Optional[SpatialGraph] = None
     registration_sensitivity: Optional[np.ndarray] = None
+    prediction_unit: str = "nucleus"
+    coordinate_units: str = "um"
 
     def __post_init__(self):
+        spatial_metadata(self.prediction_unit, self.coordinate_units)
         identifiers(self.cell_ids, "cell_ids")
         if not self.specimen_id or not self.patient_id:
             raise ValueError("specimen_id and patient_id are required")
@@ -237,6 +253,11 @@ class PredictionInputs:
             known = np.asarray(self.registration_sensitivity)
             if np.isinf(known).any() or np.any(known[np.isfinite(known)] < 0):
                 raise ValueError("registration_sensitivity must be nonnegative or NaN")
+
+    @property
+    def coordinates(self) -> np.ndarray:
+        """Coordinates in the explicitly declared ``coordinate_units``."""
+        return self.coordinates_um
 
 
 @dataclass(frozen=True)
@@ -266,6 +287,13 @@ class SpatialTargets:
 
 @dataclass
 class Prediction:
+    """Expression per declared prediction unit, with explicit coordinate units.
+
+    ``coordinates_um`` remains a legacy Python field. New exports and consumers
+    use ``coordinates`` together with ``coordinate_units``; registered pixels
+    do not imply any physical calibration.
+    """
+
     cell_ids: tuple[str, ...]
     gene_ids: tuple[str, ...]
     state_ids: tuple[str, ...]
@@ -285,6 +313,16 @@ class Prediction:
     patient_id: str = ""
     reference_support_calibrated: bool = False
     unsupported_policy: str = "conditional_reference_unvalidated"
+    prediction_unit: str = "nucleus"
+    coordinate_units: str = "um"
+
+    def __post_init__(self):
+        spatial_metadata(self.prediction_unit, self.coordinate_units)
+
+    @property
+    def coordinates(self) -> torch.Tensor:
+        """Coordinates in the explicitly declared ``coordinate_units``."""
+        return self.coordinates_um
 
     @property
     def expression_adjustment(self) -> torch.Tensor:

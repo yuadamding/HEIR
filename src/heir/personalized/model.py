@@ -336,6 +336,8 @@ class PersonalizedModel(nn.Module):
             independently_evaluated_genes=torch.zeros_like(self.supervised_mask),
             specimen_id=inputs.specimen_id,
             patient_id=inputs.patient_id,
+            prediction_unit=inputs.prediction_unit,
+            coordinate_units=inputs.coordinate_units,
             reference_support_calibrated=False,
             unsupported_policy=(
                 "he_only" if config.variant == "he" else "conditional_reference_unvalidated"

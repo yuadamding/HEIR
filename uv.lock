@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "heir-spatial"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
@@ -515,6 +515,8 @@ htapp = [
     { name = "anndata", version = "0.11.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "anndata", version = "0.12.19", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas" },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "pyarrow" },
     { name = "scipy", version = "1.13.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
@@ -530,6 +532,7 @@ requires-dist = [
     { name = "anndata", marker = "extra == 'htapp'", specifier = ">=0.10,<0.13" },
     { name = "numpy", specifier = ">=1.23,<3" },
     { name = "pandas", marker = "extra == 'htapp'", specifier = ">=1.5" },
+    { name = "pillow", marker = "extra == 'htapp'", specifier = ">=10" },
     { name = "pyarrow", marker = "extra == 'htapp'", specifier = ">=14" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },

@@ -9,12 +9,13 @@ from typing import Optional
 import numpy as np
 import torch
 
-from .schema import Prediction, identifiers
+from .schema import Prediction, identifiers, spatial_metadata
 
-_SCHEMA = "heir.personalized.prediction.v2"
+_SCHEMA = "heir.personalized.prediction.v3"
+_LEGACY_SCHEMA = "heir.personalized.prediction.v2"
 _AXES = ("cell_ids", "gene_ids", "state_ids")
 _ARRAYS = (
-    "coordinates_um",
+    "coordinates",
     "assignment",
     "conditional_assignment",
     "transfer",
@@ -37,6 +38,7 @@ def _numpy(value):
 
 def _validate(prediction: Prediction) -> dict[str, np.ndarray]:
     """Check exported axes and values independently of the model constructor."""
+    spatial_metadata(prediction.prediction_unit, prediction.coordinate_units)
     for name in _AXES:
         identifiers(tuple(getattr(prediction, name)), name)
     if prediction.state_ids[0] != "unsupported":
@@ -56,7 +58,7 @@ def _validate(prediction: Prediction) -> dict[str, np.ndarray]:
             raise ValueError(f"prediction {name} is required")
     n, g, k = (len(getattr(prediction, name)) for name in _AXES)
     shapes = {
-        "coordinates_um": (n, 2),
+        "coordinates": (n, 2),
         "assignment": (n, k),
         "conditional_assignment": (n, k - 1),
         "transfer": (n, g),
@@ -142,6 +144,8 @@ def save_prediction(
         "patient_id": prediction.patient_id,
         "specimen_id": prediction.specimen_id,
         "expression_scale": prediction.expression_scale,
+        "prediction_unit": prediction.prediction_unit,
+        "coordinate_units": prediction.coordinate_units,
         "reference_support_calibrated": prediction.reference_support_calibrated,
         "unsupported_policy": prediction.unsupported_policy,
         "provenance": {} if provenance is None else provenance,
@@ -165,17 +169,41 @@ def save_prediction(
 
 
 def load_prediction(path: str | Path) -> tuple[Prediction, dict]:
-    """Read a validated prediction and its supplied provenance, with pickle disabled."""
-    required = {*_AXES, *_ARRAYS, *_DERIVED, "metadata_json"}
+    """Read v3 exports or v2 nucleus/um exports, with pickle disabled.
+
+    V2 has the same numerical semantics, but its coordinate field explicitly
+    denotes micrometres and it has no regional prediction-unit contract. It is
+    therefore loaded only as nucleus/um, never reinterpreted as registered pixels.
+    V1 remains incompatible with conditional reference-transfer semantics.
+    """
     with np.load(path, allow_pickle=False) as archive:
+        if "metadata_json" not in archive.files:
+            raise ValueError("prediction archive requires versioned metadata")
+        raw_metadata = archive["metadata_json"]
+        if raw_metadata.ndim != 0 or raw_metadata.dtype.kind != "U":
+            raise ValueError("prediction metadata must be one Unicode JSON string")
+        metadata = json.loads(raw_metadata.item())
+        if not isinstance(metadata, dict) or metadata.get("schema") not in {
+            _SCHEMA,
+            _LEGACY_SCHEMA,
+        }:
+            raise ValueError("unsupported prediction archive schema")
+        legacy = metadata["schema"] == _LEGACY_SCHEMA
+        coordinate_field = "coordinates_um" if legacy else "coordinates"
+        required = {*_AXES, *_ARRAYS, *_DERIVED, "metadata_json"}
+        required.remove("coordinates")
+        required.add(coordinate_field)
         if set(archive.files) != required:
             raise ValueError("prediction archive fields differ from the versioned schema")
         data = {name: archive[name].copy() for name in required}
-    if data["metadata_json"].ndim != 0 or data["metadata_json"].dtype.kind != "U":
-        raise ValueError("prediction metadata must be one Unicode JSON string")
-    metadata = json.loads(data["metadata_json"].item())
-    if not isinstance(metadata, dict) or metadata.get("schema") != _SCHEMA:
-        raise ValueError("unsupported prediction archive schema")
+    if legacy:
+        if (
+            metadata.get("prediction_unit", "nucleus") != "nucleus"
+            or metadata.get("coordinate_units", "um") != "um"
+        ):
+            raise ValueError("v2 predictions require nucleus units and um coordinates")
+        metadata.update(prediction_unit="nucleus", coordinate_units="um")
+        data["coordinates"] = data.pop("coordinates_um")
     provenance = metadata.get("provenance")
     if not isinstance(provenance, dict):
         raise ValueError("prediction provenance must be a JSON object")
@@ -190,12 +218,17 @@ def load_prediction(path: str | Path) -> tuple[Prediction, dict]:
             raise ValueError(f"prediction {name} must be numeric or boolean")
     prediction = Prediction(
         **axes,
-        **{name: torch.from_numpy(data[name]) for name in _ARRAYS},
+        **{
+            "coordinates_um" if name == "coordinates" else name: torch.from_numpy(data[name])
+            for name in _ARRAYS
+        },
         expression_scale=metadata.get("expression_scale"),
         patient_id=metadata.get("patient_id"),
         specimen_id=metadata.get("specimen_id"),
         reference_support_calibrated=metadata.get("reference_support_calibrated"),
         unsupported_policy=metadata.get("unsupported_policy"),
+        prediction_unit=metadata.get("prediction_unit"),
+        coordinate_units=metadata.get("coordinate_units"),
     )
     arrays = _validate(prediction)
     for name, expected in _derived(prediction, arrays).items():
