@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 from dataclasses import replace
 
 import numpy as np
 import pytest
 import torch
 
-from heir.personalized.evaluate import aligned_observations, score_patient
+from heir.personalized.evaluate import (
+    aligned_observations,
+    normalized_observations,
+    score,
+    score_patient,
+)
 from heir.personalized.graph import LRInteraction, build_graph
-from heir.personalized.model import ModelConfig
+from heir.personalized.model import ModelConfig, PersonalizedModel
 from heir.personalized.observation import ObservationOperator, normalized_log_expression
 from heir.personalized.schema import (
     Prediction,
     PredictionInputs,
     ProteinEvidence,
+    ProteinObservationOperator,
     RNAReference,
     SpatialTargets,
 )
@@ -22,6 +30,7 @@ from heir.personalized.train import (
     FittedModel,
     TrainingConfig,
     TrainingSample,
+    _abundance_penalty,
     fit,
     make_patient_folds,
     read_fold_roles,
@@ -37,6 +46,7 @@ def _prediction(values, *, cells=("c1", "c2", "c3"), genes=("A", "B", "C")):
         state_ids=("unsupported",),
         coordinates_um=torch.zeros((n, 2)),
         assignment=torch.ones((n, 1)),
+        conditional_assignment=torch.empty((n, 0)),
         transfer=expression.clone(),
         log_correction=torch.zeros((n, g)),
         expression=expression,
@@ -78,6 +88,13 @@ def _sample(patient="P1", shift=0.0, missing=False):
             observed=np.ones((6, 1), dtype=bool),
             state_values=np.asarray([[1.0], [0.0]]),
             correspondence="same_cell",
+            operator=ProteinObservationOperator(
+                cell_ids=cells,
+                observation_ids=cells,
+                rows=np.arange(6),
+                columns=np.arange(6),
+                weights=np.ones(6),
+            ),
         ),
         graph=build_graph(xy, 25, tissue_component_ids=("tissue",) * 6),
     )
@@ -112,6 +129,7 @@ def _config(variant="he_rna"):
         state_gene_ids=("A", "B"),
         gene_ids=("A", "B", "C"),
         supervised_gene_ids=("A", "B"),
+        normalization_gene_ids=("B", "C"),
         hidden_dim=4,
         residual_rank=2,
         variant=variant,
@@ -144,7 +162,7 @@ def test_sparse_observation_joins_cells_and_genes_before_linear_aggregation():
     expected = torch.tensor([[2.5, 4.0], [8.0, 12.0]])
     torch.testing.assert_close(predicted, expected)
     torch.testing.assert_close(truth, expected)
-    normalized = normalized_log_expression(predicted, mask)
+    normalized = normalized_log_expression(predicted, mask, normalization_indices=(0, 1))
     torch.testing.assert_close(normalized[0], torch.log1p(torch.tensor([2.5, 4.0]) / 6.5 * 1e4))
     # A log-before-sum pipeline gives a different number even for this simple footprint.
     wrong = torch.log1p(torch.tensor([1.0, 2.0])) + 0.5 * torch.log1p(torch.tensor([3.0, 4.0]))
@@ -286,9 +304,188 @@ def test_constant_prediction_cannot_improve_headline_by_dropping_a_gene():
         columns=np.arange(3),
         weights=np.ones(3),
     )
-    report = score_patient([(prediction, targets, operator)], ("A", "B", "C"))
+    report = score(
+        prediction, targets, operator, ("A", "B", "C"), normalization_gene_ids=("A", "B", "C")
+    )
     assert report["gene_scores"][0]["undefined_reason"] == "constant_prediction"
     assert report["requested_genes"] == 3
     assert report["defined_subset_median_diagnostic"] is not None
     assert report["median_gene_spearman"] is None
     assert report["headline_status"] == "undefined_prediction_on_evaluable_panel"
+
+
+def _identity_case(predicted, measured, *, observed=None, specimen="S1"):
+    predicted, measured = np.asarray(predicted), np.asarray(measured)
+    cells = tuple(f"c{i}" for i in range(len(predicted)))
+    genes = tuple("ABC"[: predicted.shape[1]])
+    prediction = replace(_prediction(predicted, cells=cells, genes=genes), specimen_id=specimen)
+    targets = SpatialTargets(
+        observation_ids=cells,
+        gene_ids=genes,
+        expression=measured,
+        observed=np.ones(measured.shape, dtype=bool) if observed is None else observed,
+        patient_id="P1",
+        specimen_id=specimen,
+    )
+    operator = ObservationOperator(
+        cell_ids=cells,
+        observation_ids=cells,
+        rows=np.arange(len(cells)),
+        columns=np.arange(len(cells)),
+        weights=np.ones(len(cells)),
+    )
+    return prediction, targets, operator
+
+
+def test_missing_denominator_gene_cannot_manufacture_spatial_correlation():
+    sample = _identity_case(
+        [[1.0, 1.0]] * 6,
+        [[1.0, 10.0]] * 6,
+        observed=np.asarray([[True, False], [True, True]] * 3),
+    )
+    with pytest.raises(ValueError, match="incomplete normalization coverage"):
+        score(*sample, ("A", "B"), normalization_gene_ids=("A", "B"))
+    with pytest.raises(ValueError, match="incomplete normalization coverage"):
+        score(*sample, ("A",), normalization_gene_ids=("A", "B"))
+
+
+def test_outcome_subset_cannot_redefine_normalized_values_or_gene_scores():
+    sample = _identity_case(
+        [[2, 3, 5], [4, 2, 2], [5, 6, 3], [3, 8, 7]],
+        [[3, 4, 2], [7, 2, 1], [4, 9, 3], [5, 7, 3]],
+    )
+    full = normalized_observations(*sample, ("A", "B", "C"), normalization_gene_ids=("B", "C"))
+    subset = normalized_observations(*sample, ("A",), normalization_gene_ids=("B", "C"))
+    for all_values, selected_values in zip(full, subset):
+        torch.testing.assert_close(all_values[:, :1], selected_values, rtol=0, atol=0)
+    full_report = score(*sample, ("A", "B", "C"), normalization_gene_ids=("B", "C"))
+    subset_report = score(*sample, ("A",), normalization_gene_ids=("B", "C"))
+    assert full_report["gene_scores"][0] == subset_report["gene_scores"][0]
+
+
+def test_single_outcome_has_gradient_with_separate_normalization_basis():
+    values = torch.tensor([[1.0, 3.0], [2.0, 2.0], [3.0, 1.0]], requires_grad=True)
+    truth = torch.tensor([[2.0, 1.0], [1.0, 3.0], [1.0, 4.0]])
+    observed = torch.ones_like(values, dtype=torch.bool)
+    prediction = normalized_log_expression(values, observed, normalization_indices=(0, 1))
+    target = normalized_log_expression(truth, observed, normalization_indices=(0, 1))
+    loss = (prediction[:, 0] - target[:, 0]).square().mean()
+    loss.backward()
+    assert loss.item() > 0
+    assert torch.all(values.grad[:, 0].abs() > 1e-6)
+    fitted = fit(
+        [_sample()],
+        replace(_config(), supervised_gene_ids=("A",)),
+        TrainingConfig(epochs=1, protein_weight=0, abundance_weight=0, residual_weight=0),
+    )
+    assert fitted.history[0]["loss"] > 0
+    with pytest.raises(ValueError, match="normalization"):
+        normalized_log_expression(values[:, :1], observed[:, :1], normalization_indices=(0,))
+    with pytest.raises(ValueError, match="normalization"):
+        replace(_config(), normalization_gene_ids=("A",))
+
+
+def test_missing_outcome_does_not_change_another_genes_normalization():
+    values = torch.tensor([[2.0, 3.0, 5.0], [2.0, 3.0, float("nan")]])
+    observed = torch.tensor([[True, True, True], [True, True, False]])
+    normalized = normalized_log_expression(values, observed, normalization_indices=(0, 1))
+    torch.testing.assert_close(normalized[0, :2], normalized[1, :2], rtol=0, atol=0)
+
+
+def test_empty_denominator_is_rejected_instead_of_replacing_exposure():
+    with pytest.raises(ValueError, match="denominator must be finite and positive"):
+        normalized_log_expression(
+            torch.zeros((3, 2)), torch.ones((3, 2), dtype=torch.bool), normalization_indices=(0, 1)
+        )
+
+
+@pytest.mark.parametrize("target_anchor", [0.0, 4.0])
+def test_effectively_one_gene_training_is_rejected_when_prediction_anchor_is_zero(target_anchor):
+    sample = _sample()
+    expression = sample.inputs.reference.expression.copy()
+    expression[:, 1] = 0
+    targets = sample.targets.expression.copy()
+    targets[:, 1] = target_anchor
+    sample = replace(
+        sample,
+        inputs=replace(
+            sample.inputs, reference=replace(sample.inputs.reference, expression=expression)
+        ),
+        targets=replace(sample.targets, expression=targets),
+    )
+    config = replace(_config(), supervised_gene_ids=("A",), normalization_gene_ids=("A", "B"))
+    with pytest.raises(ValueError, match="degenerate normalization.*\\['A'\\]"):
+        fit([sample], config, TrainingConfig(epochs=1))
+
+
+def test_single_sparse_region_does_not_invalidate_a_usable_training_panel():
+    sample = _sample()
+    targets = sample.targets.expression.copy()
+    targets[0, 1] = 0
+    config = replace(_config(), supervised_gene_ids=("A",), normalization_gene_ids=("A", "B"))
+    fit(
+        [replace(sample, targets=replace(sample.targets, expression=targets))],
+        config,
+        TrainingConfig(epochs=1),
+    )
+
+
+def test_between_specimen_means_cannot_create_within_specimen_spatial_accuracy():
+    first = _identity_case([[1.0, 9.0]] * 4, [[1.0, 9.0]] * 4, specimen="S1")
+    second = _identity_case([[9.0, 1.0]] * 4, [[9.0, 1.0]] * 4, specimen="S2")
+    report = score_patient([first, second], ("A", "B"), normalization_gene_ids=("A", "B"))
+    assert report["mean_specimen_median_gene_spearman"] is None
+    assert report["headline_status"] == "no_evaluable_target_genes"
+    assert report["evaluable_specimens"] == 0
+    assert all(item["median_gene_spearman"] is None for item in report["specimen_scores"])
+
+
+def test_patient_endpoint_weights_specimens_equally_not_by_region_count():
+    first = _identity_case([[1, 3], [2, 2], [3, 1]], [[1, 3], [2, 2], [3, 1]], specimen="S1")
+    second = _identity_case(
+        [[1, 6], [2, 5], [3, 4], [4, 3], [5, 2], [6, 1]],
+        [[6, 1], [5, 2], [4, 3], [3, 4], [2, 5], [1, 6]],
+        specimen="S2",
+    )
+    report = score_patient([first, second], ("A", "B"), normalization_gene_ids=("A", "B"))
+    assert report["mean_specimen_median_gene_spearman"] == pytest.approx(0)
+    assert [item["median_gene_spearman"] for item in report["specimen_scores"]] == pytest.approx(
+        [1, -1]
+    )
+
+
+def test_support_head_cannot_reweight_conditional_abundance():
+    sample = _sample()
+    model = PersonalizedModel(_config())
+    before = model(sample.inputs)
+    with torch.no_grad():
+        model.unsupported_head.weight.fill_(100)
+        model.unsupported_head.bias.fill_(50)
+    after = model(sample.inputs)
+    assert not torch.allclose(before.reference_support, after.reference_support)
+    torch.testing.assert_close(
+        before.conditional_assignment, after.conditional_assignment, rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        _abundance_penalty(before.conditional_assignment, sample.inputs.reference.proportions),
+        _abundance_penalty(after.conditional_assignment, sample.inputs.reference.proportions),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_legacy_bundle_cannot_silently_acquire_new_numerical_semantics(tmp_path):
+    fitted = fit([_sample()], _config(), TrainingConfig(epochs=1))
+    bundle = tmp_path / "bundle"
+    fitted.save(bundle)
+    metadata_path = bundle / "bundle.json"
+    metadata = json.loads(metadata_path.read_text())
+    assert metadata["schema"] == "heir.personalized.bundle.v2"
+    metadata["schema"] = "heir.personalized.bundle.v1"
+    metadata_path.write_text(json.dumps(metadata))
+    hashes_path = bundle / "sha256.json"
+    hashes = json.loads(hashes_path.read_text())
+    hashes["bundle.json"] = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+    hashes_path.write_text(json.dumps(hashes))
+    with pytest.raises(ValueError, match="retrain legacy bundles"):
+        FittedModel.load(bundle)

@@ -13,7 +13,8 @@ identities remain unchanged.
 
 The pre-cleanup repository passed **913 tests**. That broader implementation, its original
 review, and its scientific records are preserved in the [source archive](../archive/README.md).
-The compact active tree passes **53 focused tests**, lint, formatting, and wheel/source builds.
+The initial compact prototype at `d955c01` passed **53 focused tests**. Version 0.3 adds regression
+tests for the assessment's numerical and identity failures; that earlier pass did not exclude them.
 Its synthetic H5AD/Parquet workflow covers preparation, fitting, bundle reload, target-free
 prediction, and scoring on CPU. These checks establish engineering behavior only; they are not
 real-data, GPU, or biological qualification.
@@ -40,7 +41,8 @@ assignment, select a reference, define a protein feature, or determine an evalua
 The H&E-only arm must be independent of RNA and protein values.
 
 For each H&E nucleus the output contract includes its ID and coordinates; state probabilities with
-an explicit unsupported-reference component; reference-transferred expression; bounded learned
+an explicit unsupported-reference component; conditional known-state probabilities;
+reference-transferred expression; bounded learned
 log correction; final relative expression; assignment ambiguity and reference support; registration
 sensitivity when measured; and gene-level supervision/evaluation flags. Missing registration
 sensitivity must remain missing, not a false claim of zero sensitivity. Model variability is a
@@ -48,9 +50,42 @@ separate repeated-fit quantity.
 
 In personalized arms, genes without spatial training supervision retain reference transfer with
 zero learned correction. The H&E-only arm supports its spatially supervised genes only.
-Unsupported predictions must remain identifiable; a high unsupported probability is not evidence
-that the remaining genes are known to be zero. Absolute molecule counts and calibrated expression
+Reference support is diagnostic only. The unsupported head is zero-initialized and frozen until a
+qualified support objective exists. Transfer, message passing, refinement, protein discrepancies,
+and specimen abundance all use conditional known-state probabilities, computed directly by a
+known-state softmax to remain stable even when joint support numerically reaches zero. All cells
+therefore retain expression contributions; support cannot suppress an inconvenient cell's RNA.
+Exports label this provisional policy `conditional_reference_unvalidated` and set
+`reference_support_calibrated=false`. This conditional reference extrapolation is not a validated
+prediction for truly unsupported cells. Absolute molecule counts and calibrated expression
 intervals require additional measurement and validation models.
+
+### Fixed normalization and spatial endpoints
+
+Model configuration separates `normalization_gene_ids` from `supervised_gene_ids`; the evaluation
+command's `--genes` (alias `--evaluation-genes`) selects outcomes only. The normalization panel is
+saved in the bundle and is reused from prediction provenance when scoring. The contract is:
+
+1. Aggregate nonnegative linear cell expression into assay regions.
+2. Divide by the sum over the fixed normalization panel, scale to 10,000, and apply `log1p`.
+3. Select supervised/evaluation genes and apply their outcome-availability mask.
+
+Every normalization gene must be measured in every retained region, and both prediction and target
+denominators must be positive. Incomplete coverage is rejected; users must qualify a common complete
+panel/coverage before running a comparison. Missing outcomes outside that panel do not change its
+denominator. Changing the outcome subset therefore cannot redefine an existing gene's scale.
+
+A panel needs at least two distinct genes. One supervised gene is allowed with a separate
+normalization basis; training rejects an effectively one-gene denominator with no measured and
+initially predicted companion mass in any common training region. Individual sparse regions remain
+valid. H&E-only models must supervise every normalization gene because they have no RNA transfer
+for untrained genes. Exposure-based/count normalization is not implemented.
+
+`score()` computes gene-wise spatial correlations within one specimen. `score_patient()` first
+computes each specimen's median gene-wise correlation, then gives eligible specimens equal weight
+in `mean_specimen_median_gene_spearman`. Between-specimen mean differences cannot create this
+spatial endpoint. Reports retain per-specimen gene exclusions; a constant prediction for a
+target-evaluable gene invalidates the headline rather than selecting a favorable subset.
 
 ## Package boundaries
 
@@ -120,6 +155,11 @@ future reproducibility/resumption work, while inference loads numeric weights an
 `prepare` creates an input summary/eligibility record and geometry overlay without opening target
 ST. That target-free diagram is not the complete multimodal acceptance overlay.
 
+Version 0.3 requires specimen manifest, bundle, and prediction schema v2. Old model weights are
+not silently loaded under the changed numerical semantics: update the normalization panel and
+protein/registration identities, replace protein `radius_um` with declared bin geometry, and
+prepare/refit/export again. The archived v1 evidence remains unchanged.
+
 For a synthetic integration fixture, use:
 
 ```bash
@@ -176,9 +216,20 @@ the manifest's molecular reference. Default names are `patient_id`, `sampling_ep
 `targets.specimen_id_column` mappings. Target coordinates are `obsm["spatial"]` in micrometres and
 availability is Boolean `layers["observed"]`.
 
+For proteins, `matching.protein` names patient, sampling episode, lesion, represented region,
+specimen, core, section, and assay. The seven identity columns must also be present in the actual
+protein `.obs`; measurement IDs must be unique. `matching.query.specimen_id` must equal the
+manifest's H&E specimen. Registration `source_identity` must match the protein source and
+`target_identity` the H&E source on all seven fields. Unscoped identity aliases are rejected.
+Serial sections share the documented core with distinct section IDs; verified same-cell or
+same-section evidence requires matching core/section. Region-level evidence may span documented
+cores while preserving the shared biological match. These checks verify consistency, not the
+truth of independently unverified metadata.
+
 For tissue with internal gaps, supply `paths.tissue_mask`: an NPZ containing Boolean `mask[y, x]`,
-`origin_um` in `[x, y]` order, and `pixel_size_um` in `[x, y]` order. Graph edges and local protein
-pooling then exclude paths crossing empty tissue-mask pixels. Component IDs alone prevent crossing
+`origin_um` in `[x, y]` order, and `pixel_size_um` in `[x, y]` order. Graph edges exclude paths
+crossing empty tissue-mask pixels, and protein bins are split by connected mask islands.
+Component IDs alone prevent crossing
 between disconnected labeled components; they do not establish that every path within a component
 stays in tissue.
 
@@ -207,6 +258,20 @@ distributions. A nearest CODEX cell is not automatically the same cell as an H&E
 Same-cell constraints require independently justified correspondence. A complete first-specimen
 overlay must show H&E tissue, nuclei, protein coverage, ST coverage, and the common eligible
 evaluation regions. A synthetic coordinate diagram does not fulfill that milestone.
+
+Protein supervision has its own `ProteinObservationOperator`, independent of communication edges.
+For serial/soft/region evidence, `proteins.bin_size_um` and `origin_um` define common physical bins
+and tissue components. Measured intensities and predicted state-protein mixtures both use uniform
+means within those bins. A region-marker is available only with complete positive-confidence
+source coverage; incomplete markers are masked as a whole instead of changing the averaging
+kernel. Mean quality is a separate absolute confidence weight. The loss divides by observed-marker
+count, not quality sum, so lowering confidence weakens its influence. Excluded regions and markers
+are reported in `protein_coverage` during preparation.
+
+Correct assignments have zero discrepancy in a noiseless matched example. If both cells lie in
+one coarse bin, correct assignments and a 50/50 mixture can have the same regional mean; the data
+cannot identify their individual placements. Finer independently supported regions can resolve
+that difference. Altering the communication radius or degree cap does not change protein geometry.
 
 ## Model and comparison contract
 
@@ -241,9 +306,12 @@ Measured functional proteins gate programs only when those measurements exist an
 interpretation supports that use. Candidate compatibility is not measured signaling activity.
 One or two constrained refinement updates use identical computation during training and inference.
 Optimizing compatibility alone cannot establish biologically correct placement.
+The generic/LR comparison tests the interaction representation (incoming ligand and receiver
+receptor versus their product). Shuffled-LR controls are still required to attribute a gain to
+curated biological pairing.
 
-The observation operator applies `Y = A X` to linear cell expression, then restricts to the assay
-gene set, normalizes, applies `log1p`, and computes a masked loss. It must not sum log expression.
+The observation operator applies `Y = A X` to linear cell expression, normalizes using the fixed
+complete panel, applies `log1p`, then selects outcomes and computes a masked loss.
 Regional correspondence across serial sections does not establish exact shared physical cells.
 Count likelihoods remain deferred until RNA content and assay exposure are specified.
 
@@ -255,8 +323,9 @@ from a patient stays in the same role. Use metadata such as RNA assay, metastati
 coverage to define partitions before outcomes inform model selection. Fewer eligible patients
 require an explicitly revised design, not silent reuse of a 13-patient claim.
 
-The principal endpoint is per-patient median gene-wise spatial Spearman correlation on a fixed
-eligible gene/region set, accompanied by normalized-expression error. Undefined correlations and
+The principal endpoint is the equal-specimen mean of within-specimen median gene-wise spatial
+Spearman correlations on a fixed eligible gene/region set, accompanied by normalized-expression
+error. With one specimen per patient this reduces to that specimen's median. Undefined correlations and
 excluded genes are reported explicitly. Comparisons must use common coverage; each method cannot
 choose its own favorable subset. Seeds describe numerical variability and do not add biological
 replicates. Repeated model redesign using outer-fold results makes the analysis developmental
@@ -280,12 +349,24 @@ dependencies in optional environments.
 
 ## Acceptance and remaining work
 
+Version 0.3 passes 127 CPU tests, Ruff lint/format checks, frozen-lock validation, and wheel/source
+distribution builds. Regression cases cover fixed-panel missingness and outcome subsetting,
+single-gene gradients and degenerate exposure, support-only logit changes, matched protein
+aggregation and confidence, protein/registration identity mismatches, and specimen-first scoring.
+
+The user confirmed on October 26, 2026 that no local HTAPP specimen inputs are available. The
+real-specimen milestone is blocked on acquiring those files and their matching metadata; no
+real-data result or memory qualification is claimed. Once available, prepare one complete specimen,
+inspect its actual count axis and full H&E/protein/ST overlap, compare H&E-only, RNA-transfer, and
+protein-guided outputs, and score them using the fixed normalization contract before expanding
+to patient-held-out experiments.
+
 | Milestone | Software scope in this revision | Scientific acceptance still required |
 | --- | --- | --- |
 | Data qualification | Local input contracts, HTAPP-oriented adapter, geometry helpers | Actual file-derived eligibility, matching provenance, count-axis inspection, and a complete first-specimen overlay |
 | Baseline path | Shared mapping/decoder, linear aggregation, training and scoring interfaces | One real specimen from qualified images and RNA through scored common-region predictions |
 | Personalized baseline | H&E-only and RNA comparison configuration | Patient-held-out added value with transfer and correction reported separately |
-| Protein contribution | Observed/missing masks and local protein evidence | Validated marker interpretation, registration uncertainty, and incremental expression/localization evidence |
+| Protein contribution | Shared regional observation operator, confidence weights, and source identity checks | Validated marker interpretation, registration uncertainty, and incremental expression/localization evidence |
 | Neighborhood/communication | Generic/LR fixed/refined configuration family | Controlled staged comparison with identical base mapper, budgets, and independent readouts |
 | Robustness/ST reference | Explicit output and evaluation boundaries | Full perturbation/control suite, within-type endpoint, calibrated uncertainty, separate ST-informed comparator |
 | Packaging and scale | Small cached-feature workflow and persistence contract | Full inference provenance, restart qualification, block halos, chunked/factorized exports, external comparators, and measured real-specimen resources |

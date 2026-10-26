@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -69,20 +70,35 @@ def normalized_log_expression(
     values: torch.Tensor,
     observed: torch.Tensor,
     *,
+    normalization_indices: Sequence[int],
     library_size: float = 1e4,
 ) -> torch.Tensor:
-    """Normalize within the declared assay panel *after* aggregation, then log1p.
+    """Normalize on a fixed complete panel after aggregation, then apply log1p.
 
-    The same availability mask is applied to targets and predictions; missing values,
-    including NaN under the mask, cannot affect the denominator.
+    ``normalization_indices`` names the denominator independently of outcome
+    selection. Every normalization gene must be observed at every retained region;
+    incomplete or zero-exposure regions must be qualified/excluded upstream. The
+    outcome mask never changes the denominator. Missing outcomes are filled only
+    after the fixed denominator has been computed, and must be masked in scoring.
     """
-    if values.shape != observed.shape or observed.dtype != torch.bool:
+    if values.ndim != 2 or values.shape != observed.shape or observed.dtype != torch.bool:
         raise ValueError("normalization requires a matching boolean availability mask")
+    indices = tuple(normalization_indices)
+    if len(indices) < 2 or len(set(indices)) != len(indices):
+        raise ValueError("normalization requires at least two distinct fixed-panel genes")
+    if any(isinstance(i, bool) or not isinstance(i, (int, np.integer)) for i in indices):
+        raise ValueError("normalization indices must be integers")
+    if min(indices) < 0 or max(indices) >= values.shape[1]:
+        raise ValueError("normalization index outside the named gene axis")
     if not np.isfinite(library_size) or library_size <= 0:
         raise ValueError("library_size must be finite and positive")
+    if not observed[:, indices].all():
+        raise ValueError("incomplete normalization coverage; use a common complete fixed panel")
     present = values[observed]
     if not torch.isfinite(present).all() or torch.any(present < 0):
         raise ValueError("normalization requires nonnegative finite linear values")
+    denominator = values[:, indices].sum(dim=1, keepdim=True)
+    if not torch.isfinite(denominator).all() or torch.any(denominator <= 0):
+        raise ValueError("normalization denominator must be finite and positive in every region")
     masked = torch.where(observed, values, torch.zeros_like(values))
-    denominator = masked.sum(dim=1, keepdim=True)
-    return torch.log1p(masked / denominator.clamp_min(1e-12) * library_size)
+    return torch.log1p(masked / denominator * library_size)

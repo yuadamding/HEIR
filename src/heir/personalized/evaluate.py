@@ -46,6 +46,38 @@ def aligned_observations(
     return predicted, truth, mask
 
 
+def normalized_observations(
+    prediction: Prediction,
+    targets: SpatialTargets,
+    operator: ObservationOperator,
+    gene_ids: Sequence[str],
+    *,
+    normalization_gene_ids: Sequence[str],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Aggregate and normalize on a fixed panel before selecting outcomes.
+
+    Both normalization and outcome IDs are joined to their actual matrix axes.
+    Outcome availability is returned for the loss/metric; it does not redefine
+    the denominator. Incomplete normalization coverage is an explicit error.
+    """
+    outcomes, panel = tuple(gene_ids), tuple(normalization_gene_ids)
+    identifiers(outcomes, "outcome genes")
+    identifiers(panel, "normalization genes")
+    if len(panel) < 2:
+        raise ValueError("normalization requires at least two distinct fixed-panel genes")
+    genes = panel + tuple(gene for gene in outcomes if gene not in panel)
+    predicted, truth, mask = aligned_observations(prediction, targets, operator, genes)
+    indices = tuple(range(len(panel)))
+    normalized_prediction = normalized_log_expression(
+        predicted,
+        mask,
+        normalization_indices=indices,
+    )
+    normalized_truth = normalized_log_expression(truth, mask, normalization_indices=indices)
+    selected = [genes.index(gene) for gene in outcomes]
+    return normalized_prediction[:, selected], normalized_truth[:, selected], mask[:, selected]
+
+
 def _ranks(x: np.ndarray) -> np.ndarray:
     """Average ranks, including ties, without an optional scipy dependency."""
     _, inverse, counts = np.unique(x, return_inverse=True, return_counts=True)
@@ -53,33 +85,25 @@ def _ranks(x: np.ndarray) -> np.ndarray:
     return ((ends - counts + ends - 1) / 2)[inverse]
 
 
-def score_patient(
-    samples: Sequence[tuple[Prediction, SpatialTargets, ObservationOperator]],
+def _score_specimen(
+    prediction: Prediction,
+    targets: SpatialTargets,
+    operator: ObservationOperator,
     gene_ids: Sequence[str],
     *,
-    independent: bool = False,
-    min_regions: int = 3,
+    normalization_gene_ids: Sequence[str],
+    independent: bool,
+    min_regions: int,
 ) -> dict:
-    """Pool a patient's regions, then report the median gene-wise spatial Spearman.
-
-    Every requested gene is reported, including undefined correlations. Independent
-    evaluation must be established by caller split provenance, never by this metric.
-    """
-    if not samples or min_regions < 3:
-        raise ValueError("at least one specimen and min_regions >= 3 are required")
-    if len({target.patient_id for _, target, _ in samples}) != 1:
-        raise ValueError("score_patient requires exactly one biological patient")
-    if len({target.specimen_id for _, target, _ in samples}) != len(samples):
-        raise ValueError("duplicate specimens would count spatial observations twice")
-    predicted_parts, truth_parts, masks = [], [], []
-    for prediction, targets, operator in samples:
-        predicted, truth, mask = aligned_observations(prediction, targets, operator, gene_ids)
-        predicted_parts.append(normalized_log_expression(predicted, mask).detach().cpu().numpy())
-        truth_parts.append(normalized_log_expression(truth, mask).detach().cpu().numpy())
-        masks.append(mask.cpu().numpy())
-    predicted, truth, mask = map(np.concatenate, (predicted_parts, truth_parts, masks))
-    if not mask.any():
-        raise ValueError("no measured values on the prespecified evaluation panel")
+    predicted, truth, mask = normalized_observations(
+        prediction,
+        targets,
+        operator,
+        gene_ids,
+        normalization_gene_ids=normalization_gene_ids,
+    )
+    predicted, truth = (array.detach().cpu().numpy() for array in (predicted, truth))
+    mask = mask.cpu().numpy()
     rows = []
     for j, gene in enumerate(gene_ids):
         keep = mask[:, j]
@@ -105,9 +129,11 @@ def score_patient(
     incomplete = any(row["undefined_reason"] == "constant_prediction" for row in rows)
     subset_median = float(np.median(defined)) if defined else None
     return {
-        "patient_id": samples[0][1].patient_id,
+        "patient_id": targets.patient_id,
+        "specimen_id": targets.specimen_id,
         "expression_scale": "relative",
-        "normalization": "aggregate_linear_then_assay_panel_library_1e4_then_log1p",
+        "normalization": "aggregate_linear_then_fixed_complete_panel_library_1e4_then_log1p",
+        "normalization_gene_ids": list(normalization_gene_ids),
         "median_gene_spearman": None if incomplete else subset_median,
         "defined_subset_median_diagnostic": subset_median,
         "headline_status": (
@@ -117,7 +143,9 @@ def score_patient(
             if defined
             else "no_evaluable_target_genes"
         ),
-        "normalized_log_mse": float(np.mean((predicted[mask] - truth[mask]) ** 2)),
+        "normalized_log_mse": (
+            float(np.mean((predicted[mask] - truth[mask]) ** 2)) if mask.any() else None
+        ),
         "defined_genes": len(defined),
         "requested_genes": len(rows),
         "undefined_genes": len(rows) - len(defined),
@@ -127,6 +155,96 @@ def score_patient(
     }
 
 
-def score(prediction, targets, operator, gene_ids, **kwargs):
-    """Score one specimen; use score_patient for patients with several specimens."""
-    return score_patient([(prediction, targets, operator)], gene_ids, **kwargs)
+def score_patient(
+    samples: Sequence[tuple[Prediction, SpatialTargets, ObservationOperator]],
+    gene_ids: Sequence[str],
+    *,
+    normalization_gene_ids: Sequence[str],
+    independent: bool = False,
+    min_regions: int = 3,
+) -> dict:
+    """Score spatial variation within specimens, then average specimen medians.
+
+    Regions from separate specimens are never pooled into a spatial correlation.
+    Each target-evaluable specimen contributes equally regardless of its region
+    count. Undefined predictions invalidate the headline instead of silently
+    excluding unfavorable specimens. Target-only exclusions remain explicit.
+    """
+    if not samples or min_regions < 3:
+        raise ValueError("at least one specimen and min_regions >= 3 are required")
+    if len({target.patient_id for _, target, _ in samples}) != 1:
+        raise ValueError("score_patient requires exactly one biological patient")
+    if len({target.specimen_id for _, target, _ in samples}) != len(samples):
+        raise ValueError("duplicate specimens would count spatial observations twice")
+    specimens = [
+        _score_specimen(
+            prediction,
+            target,
+            operator,
+            gene_ids,
+            normalization_gene_ids=normalization_gene_ids,
+            independent=independent,
+            min_regions=min_regions,
+        )
+        for prediction, target, operator in samples
+    ]
+    incomplete = any(
+        item["headline_status"] == "undefined_prediction_on_evaluable_panel" for item in specimens
+    )
+    defined = [
+        item["median_gene_spearman"]
+        for item in specimens
+        if item["median_gene_spearman"] is not None
+    ]
+    mean = float(np.mean(defined)) if defined else None
+    errors = [
+        item["normalized_log_mse"] for item in specimens if item["normalized_log_mse"] is not None
+    ]
+    return {
+        "patient_id": samples[0][1].patient_id,
+        "expression_scale": "relative",
+        "normalization": "aggregate_linear_then_fixed_complete_panel_library_1e4_then_log1p",
+        "normalization_gene_ids": list(normalization_gene_ids),
+        "evaluation_gene_ids": list(gene_ids),
+        "mean_specimen_median_gene_spearman": None if incomplete else mean,
+        "defined_specimen_mean_diagnostic": mean,
+        "headline_status": (
+            "undefined_prediction_on_evaluable_panel"
+            if incomplete
+            else "evaluable"
+            if defined
+            else "no_evaluable_target_genes"
+        ),
+        "normalized_log_mse": float(np.mean(errors)) if errors else None,
+        "requested_genes": len(gene_ids),
+        "requested_specimens": len(specimens),
+        "evaluable_specimens": len(defined),
+        "undefined_specimens": len(specimens) - len(defined),
+        "aggregation": "equal_specimen_mean_of_within_specimen_median_gene_spearman",
+        "specimen_scores": specimens,
+        "biological_claim": "developmental prediction score; no communication claim",
+    }
+
+
+def score(
+    prediction: Prediction,
+    targets: SpatialTargets,
+    operator: ObservationOperator,
+    gene_ids: Sequence[str],
+    *,
+    normalization_gene_ids: Sequence[str],
+    independent: bool = False,
+    min_regions: int = 3,
+) -> dict:
+    """Score one specimen; use score_patient for an equal-specimen patient endpoint."""
+    if min_regions < 3:
+        raise ValueError("min_regions must be at least three")
+    return _score_specimen(
+        prediction,
+        targets,
+        operator,
+        gene_ids,
+        normalization_gene_ids=normalization_gene_ids,
+        independent=independent,
+        min_regions=min_regions,
+    )

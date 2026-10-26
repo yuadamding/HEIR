@@ -1,25 +1,37 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "patient_id": "REPLACE_PATIENT_ID",
-  "specimen_id": "REPLACE_SPECIMEN_ID",
+  "specimen_id": "REPLACE_HE_SPECIMEN_ID",
   "matching": {
     "query": {
-      "patient_id": "REPLACE_QUERY_PATIENT_ID",
-      "sampling_episode_id": "REPLACE_QUERY_SAMPLING_EPISODE_ID",
-      "lesion_id": "REPLACE_QUERY_LESION_ID",
-      "represented_region_id": "REPLACE_QUERY_REPRESENTED_REGION_ID",
-      "core_id": "REPLACE_QUERY_CORE_ID",
+      "patient_id": "REPLACE_PATIENT_ID",
+      "sampling_episode_id": "REPLACE_SAMPLING_EPISODE_ID",
+      "lesion_id": "REPLACE_LESION_ID",
+      "represented_region_id": "REPLACE_REPRESENTED_REGION_ID",
+      "core_id": "REPLACE_CORE_ID",
       "section_id": "REPLACE_QUERY_SECTION_ID",
+      "specimen_id": "REPLACE_HE_SPECIMEN_ID",
       "assay": "H&E"
     },
     "reference": {
-      "patient_id": "REPLACE_REFERENCE_PATIENT_ID",
-      "sampling_episode_id": "REPLACE_REFERENCE_SAMPLING_EPISODE_ID",
-      "lesion_id": "REPLACE_REFERENCE_LESION_ID",
-      "represented_region_id": "REPLACE_REFERENCE_REPRESENTED_REGION_ID",
+      "patient_id": "REPLACE_PATIENT_ID",
+      "sampling_episode_id": "REPLACE_SAMPLING_EPISODE_ID",
+      "lesion_id": "REPLACE_LESION_ID",
+      "represented_region_id": "REPLACE_REPRESENTED_REGION_ID",
       "core_id": "REPLACE_REFERENCE_CORE_ID",
       "section_id": "REPLACE_REFERENCE_SECTION_ID",
+      "specimen_id": "REPLACE_REFERENCE_SPECIMEN_ID",
       "assay": "snRNA-seq"
+    },
+    "protein": {
+      "patient_id": "REPLACE_PATIENT_ID",
+      "sampling_episode_id": "REPLACE_SAMPLING_EPISODE_ID",
+      "lesion_id": "REPLACE_LESION_ID",
+      "represented_region_id": "REPLACE_REPRESENTED_REGION_ID",
+      "core_id": "REPLACE_CORE_ID",
+      "section_id": "REPLACE_PROTEIN_SECTION_ID",
+      "specimen_id": "REPLACE_PROTEIN_SPECIMEN_ID",
+      "assay": "multiplex_IF"
     },
     "reference_independent_of_spatial_targets": true,
     "evidence": "REPLACE_WITH_METADATA_EVIDENCE"
@@ -56,7 +68,11 @@
     "library_size": 10000
   },
   "proteins": {
-    "radius_um": 100,
+    "bin_size_um": 100,
+    "origin_um": [
+      0,
+      0
+    ],
     "marker_table": [
       {
         "marker_id": "MARKER_A",

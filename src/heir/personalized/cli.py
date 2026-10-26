@@ -155,6 +155,11 @@ def predict_command(args):
 
 def evaluate_command(args):
     prediction, provenance = load_prediction(args.prediction)
+    if "model_config" not in provenance:
+        raise ValueError("evaluation requires the saved model's fixed normalization specification")
+    config = ModelConfig.from_dict(provenance["model_config"])
+    if tuple(prediction.gene_ids) != tuple(config.gene_ids):
+        raise ValueError("prediction gene axis differs from the saved model configuration")
     targets = load_spatial_targets(args.manifest)
     roles = provenance.get("fold_roles", {})
     independent = roles.get(prediction.patient_id) == "test"
@@ -165,6 +170,7 @@ def evaluate_command(args):
         targets,
         ObservationOperator.load(_source_path(args.manifest, "observation")),
         _json(args.genes),
+        normalization_gene_ids=config.normalization_gene_ids,
         independent=independent,
     )
     result["evaluation_role"] = roles.get(prediction.patient_id, "development")
@@ -205,7 +211,13 @@ def main(argv=None):
     evaluate = commands.add_parser("evaluate", help="join saved predictions to separate targets")
     evaluate.add_argument("--prediction", required=True)
     evaluate.add_argument("--manifest", required=True)
-    evaluate.add_argument("--genes", required=True, help="JSON list of prespecified shared genes")
+    evaluate.add_argument(
+        "--genes",
+        "--evaluation-genes",
+        dest="genes",
+        required=True,
+        help="JSON outcome-gene list; normalization stays fixed by the saved model",
+    )
     evaluate.add_argument("--output", required=True)
     evaluate.set_defaults(run=evaluate_command)
     demo = commands.add_parser(

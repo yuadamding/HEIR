@@ -10,6 +10,11 @@ This is a development prototype. Real HTAPP qualification, calibrated uncertaint
 benefits from personalization or communication remain unestablished. See the
 [workflow and scientific limits](docs/personalized_development.md).
 
+Version 0.3 fixes the numerical issues identified in the assessment of `d955c01`: fixed
+normalization panels, support-independent transfer, and separate protein observation geometry.
+Specimen manifests, model bundles, and prediction exports now use **schema v2**; older artifacts
+must be regenerated after explicit configuration and metadata migration.
+
 ## Install and run
 
 ```bash
@@ -40,8 +45,9 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The compact tree passes **53 tests**, lint, formatting, and wheel/source builds. Checks use CPU and
-synthetic data. The active source contains the personalized pipeline, optional frozen encoder
+Regression tests cover the supplied normalization, support, protein, and patient-scoring
+counterexamples. Checks use CPU and synthetic data. The active source contains the personalized
+pipeline, optional frozen encoder
 adapters, and their configuration files. The [comparison index](configs/personalized/comparisons.json)
 describes the seven model variants; context variants require a fitted protein baseline.
 

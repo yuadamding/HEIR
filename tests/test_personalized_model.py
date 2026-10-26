@@ -7,8 +7,19 @@ import pytest
 import torch
 
 from heir.personalized.graph import LRInteraction, build_graph, compute_messages
-from heir.personalized.model import ModelConfig, PersonalizedModel
-from heir.personalized.schema import PredictionInputs, ProteinEvidence, RNAReference, SpatialGraph
+from heir.personalized.model import VARIANTS, ModelConfig, PersonalizedModel
+from heir.personalized.schema import (
+    PredictionInputs,
+    ProteinEvidence,
+    ProteinObservationOperator,
+    RNAReference,
+    SpatialGraph,
+)
+
+
+def identity_protein_operator(cell_ids):
+    indices = np.arange(len(cell_ids))
+    return ProteinObservationOperator(cell_ids, cell_ids, indices, indices, np.ones(len(cell_ids)))
 
 
 def specimen() -> PredictionInputs:
@@ -46,6 +57,7 @@ def model(variant="he_rna", **kwargs) -> PersonalizedModel:
             state_dim=2,
             gene_ids=("A", "B", "C"),
             supervised_gene_ids=("A", "B"),
+            normalization_gene_ids=("A", "B"),
             hidden_dim=4,
             residual_rank=2,
             state_gene_ids=("A", "B"),
@@ -78,6 +90,17 @@ def test_reference_gene_and_state_order_do_not_change_prediction():
     assert after.state_ids == ("unsupported", "s2", "s1")
 
 
+def test_messages_reject_unconditional_support_weighted_assignments():
+    inputs = specimen()
+    with pytest.raises(ValueError, match="conditional known-state probabilities"):
+        compute_messages(
+            inputs.graph,
+            torch.full((3, 2), 0.1),
+            inputs.reference,
+            (LRInteraction(("A",), ("C",)),),
+        )
+
+
 def test_reference_embedding_feature_order_is_joined_by_gene_identity():
     inputs = specimen()
     net = model()
@@ -98,7 +121,13 @@ def test_same_sized_different_embedding_panel_is_rejected():
     with pytest.raises(ValueError, match="embedding panel differs.*missing genes"):
         model()(replace(inputs, reference=wrong_panel))
     with pytest.raises(ValueError, match="state_gene_ids must identify"):
-        ModelConfig(feature_dim=2, state_dim=2, gene_ids=("A", "B"), supervised_gene_ids=("A",))
+        ModelConfig(
+            feature_dim=2,
+            state_dim=2,
+            gene_ids=("A", "B"),
+            supervised_gene_ids=("A",),
+            normalization_gene_ids=("A", "B"),
+        )
 
 
 def test_unsupervised_genes_and_transfer_diagnostic_are_exact_transfer():
@@ -121,6 +150,7 @@ def test_missing_protein_values_are_never_observations():
         observed=np.asarray([[True, False]] * 3),
         state_values=np.asarray([[1.0, 0.0], [0.0, 1.0]]),
         correspondence="serial_section",
+        operator=identity_protein_operator(inputs.cell_ids),
     )
     net = model("he_rna_protein")
     before = net(replace(inputs, proteins=evidence))
@@ -129,11 +159,11 @@ def test_missing_protein_values_are_never_observations():
     after = net(replace(inputs, proteins=replace(evidence, values=changed)))
     torch.testing.assert_close(after.expression, before.expression)
     assert torch.isfinite(net.protein_loss(replace(inputs, proteins=evidence), before))
-    with pytest.raises(ValueError, match="requires a spatial graph"):
-        net(replace(inputs, proteins=evidence, graph=None))
+    without_graph = net(replace(inputs, proteins=evidence, graph=None))
+    torch.testing.assert_close(without_graph.expression, before.expression)
 
 
-def test_reference_deletion_increases_explicit_unsupported_mass():
+def test_reference_deletion_changes_uncalibrated_softmax_diagnostic_mechanically():
     inputs = specimen()
     net = model()
     before = net(inputs)
@@ -152,6 +182,8 @@ def test_reference_deletion_increases_explicit_unsupported_mass():
     assert torch.all(after.assignment[:, 0] > before.assignment[:, 0])
     torch.testing.assert_close(after.assignment.sum(dim=1), torch.ones(3))
     assert torch.isnan(after.registration_sensitivity).all()
+    assert after.reference_support_calibrated is False
+    assert after.unsupported_policy == "conditional_reference_unvalidated"
 
 
 def test_he_baseline_does_not_use_reference_or_proteins():
@@ -166,6 +198,8 @@ def test_he_baseline_does_not_use_reference_or_proteins():
     after = net(replace(inputs, reference=reference))
     assert torch.equal(after.expression, before.expression)
     assert after.assignment.shape == (3, 1)
+    assert after.conditional_assignment.shape == (3, 0)
+    assert after.unsupported_policy == "he_only"
     assert not after.reference_support.any()
     assert not after.expression[:, 2].any()
 
@@ -234,3 +268,237 @@ def test_predictions_accept_no_spatial_target_argument():
     net = model()
     with pytest.raises(TypeError):
         net(specimen(), spatial_targets=np.ones((3, 3)))
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+@pytest.mark.parametrize("unsupported_bias", [3.0, 1000.0])
+def test_unsupported_logits_cannot_weight_expression_messages_or_protein_loss(
+    variant, unsupported_bias
+):
+    inputs = specimen()
+    evidence = ProteinEvidence(
+        marker_ids=("m1", "m2"),
+        values=np.asarray([[0.8, 0.2], [0.1, 0.9], [0.4, 0.6]]),
+        observed=np.ones((3, 2), dtype=bool),
+        state_values=np.eye(2),
+        correspondence="same_cell",
+        operator=identity_protein_operator(inputs.cell_ids),
+    )
+    inputs = replace(inputs, proteins=evidence)
+    net = model(variant)
+    assert not any(parameter.requires_grad for parameter in net.unsupported_head.parameters())
+    assert not net.unsupported_head.weight.any() and not net.unsupported_head.bias.any()
+    before = net(inputs)
+    with torch.no_grad():
+        net.unsupported_head.weight.copy_(torch.tensor([[4.0, -3.0, 2.0, -1.0]]))
+        net.unsupported_head.bias.fill_(unsupported_bias)
+    after = net(inputs)
+    for name in ("conditional_assignment", "transfer", "expression", "log_correction"):
+        torch.testing.assert_close(getattr(after, name), getattr(before, name), atol=0, rtol=0)
+    torch.testing.assert_close(net.protein_loss(inputs, after), net.protein_loss(inputs, before))
+    if variant != "he":
+        assert not torch.equal(after.reference_support, before.reference_support)
+        torch.testing.assert_close(after.conditional_assignment.sum(1), torch.ones(3))
+        if unsupported_bias == 1000:
+            assert not after.reference_support.any()
+            assert not after.assignment[:, 1:].any()
+            assert torch.all(after.transfer.sum(1) > 0)
+    if net.config.lr_interactions:
+        for mode in ("generic", "lr"):
+            torch.testing.assert_close(
+                compute_messages(
+                    inputs.graph,
+                    before.conditional_assignment,
+                    inputs.reference,
+                    net.config.lr_interactions,
+                    mode=mode,
+                ),
+                compute_messages(
+                    inputs.graph,
+                    after.conditional_assignment,
+                    inputs.reference,
+                    net.config.lr_interactions,
+                    mode=mode,
+                ),
+                atol=0,
+                rtol=0,
+            )
+    # Even deliberately re-enabling the diagnostic head cannot give expression
+    # or protein objectives a gradient through that head.
+    net.unsupported_head.requires_grad_(True)
+    predicted = net(inputs)
+    (predicted.expression.sum() + net.protein_loss(inputs, predicted)).backward()
+    assert all(
+        parameter.grad is None or not parameter.grad.any()
+        for parameter in net.unsupported_head.parameters()
+    )
+
+
+@pytest.mark.parametrize("coarse", [False, True])
+def test_noiseless_protein_operator_never_prefers_spurious_mixing(coarse):
+    original = specimen()
+    cells = original.cell_ids[:2]
+    operator = (
+        ProteinObservationOperator(
+            cells,
+            ("common_region",),
+            np.asarray([0, 0]),
+            np.asarray([0, 1]),
+            np.asarray([0.5, 0.5]),
+        )
+        if coarse
+        else identity_protein_operator(cells)
+    )
+    measured = np.asarray([[0.5]]) if coarse else np.asarray([[1.0], [0.0]])
+    evidence = ProteinEvidence(
+        marker_ids=("m1",),
+        values=measured,
+        observed=np.ones_like(measured, dtype=bool),
+        state_values=np.asarray([[1.0], [0.0]]),
+        correspondence="serial_section",
+        operator=operator,
+    )
+    inputs = replace(
+        original,
+        cell_ids=cells,
+        coordinates_um=original.coordinates_um[:2],
+        image_features=original.image_features[:2],
+        graph=None,
+        proteins=evidence,
+    )
+    net = model("he_rna_protein")
+    predicted = net(inputs)
+    correct = replace(predicted, conditional_assignment=torch.eye(2))
+    mixed = replace(predicted, conditional_assignment=torch.full((2, 2), 0.5))
+    assert net.protein_loss(inputs, correct).item() == 0
+    mixed_loss = net.protein_loss(inputs, mixed).item()
+    assert mixed_loss == 0 if coarse else mixed_loss > 0
+    logits = torch.tensor([[0.0, 1000.0, -1000.0], [0.0, -1000.0, 1000.0]])
+    torch.testing.assert_close(net._protein_logits(logits, inputs), logits, atol=0, rtol=0)
+
+
+def test_protein_baseline_does_not_depend_on_communication_radius_or_degree_cap():
+    inputs = specimen()
+    evidence = ProteinEvidence(
+        marker_ids=("m1",),
+        values=np.asarray([[0.5]]),
+        observed=np.ones((1, 1), dtype=bool),
+        state_values=np.asarray([[1.0], [0.0]]),
+        correspondence="region",
+        operator=ProteinObservationOperator(
+            inputs.cell_ids,
+            ("region",),
+            np.asarray([0, 0, 0]),
+            np.arange(3),
+            np.full(3, 1 / 3),
+        ),
+    )
+    inputs = replace(inputs, proteins=evidence)
+    net = model("he_rna_protein")
+    expected = net(inputs)
+    for radius, degree in [(1, 1), (1000, 1), (1000, 100)]:
+        graph = build_graph(
+            inputs.coordinates_um,
+            radius,
+            tissue_component_ids=("a",) * 3,
+            max_neighbors=degree,
+        )
+        changed = replace(inputs, graph=graph)
+        actual = net(changed)
+        torch.testing.assert_close(actual.expression, expected.expression, atol=0, rtol=0)
+        torch.testing.assert_close(actual.assignment, expected.assignment, atol=0, rtol=0)
+        torch.testing.assert_close(
+            net.protein_loss(changed, actual), net.protein_loss(inputs, expected)
+        )
+
+
+@pytest.mark.parametrize("correspondence", ["same_cell", "serial_section"])
+def test_absolute_protein_quality_attenuates_loss_and_assignment_correction(correspondence):
+    inputs = specimen()
+    evidence = ProteinEvidence(
+        marker_ids=tuple(f"m{i}" for i in range(20)),
+        values=np.zeros((3, 20)),
+        observed=np.ones((3, 20), dtype=bool),
+        state_values=np.asarray([[1.0] * 20, [0.0] * 20]),
+        correspondence=correspondence,
+        operator=identity_protein_operator(inputs.cell_ids),
+    )
+    net = model("he_rna_protein")
+    logits = torch.zeros((3, 3))
+    prediction = replace(net(inputs), conditional_assignment=torch.full((3, 2), 0.5))
+    adjustments, losses = [], []
+    for quality in (1.0, 0.1, 0.01, 0.0):
+        changed = replace(inputs, proteins=replace(evidence, quality=np.full((3, 20), quality)))
+        adjustments.append(net._protein_logits(logits, changed)[:, 1:].abs().sum().item())
+        losses.append(net.protein_loss(changed, prediction).item())
+    assert all(left > right for left, right in zip(adjustments, adjustments[1:]))
+    np.testing.assert_allclose(losses, np.asarray([1.0, 0.1, 0.01, 0.0]) * losses[0], rtol=1e-6)
+
+
+@pytest.mark.parametrize("panel", [(), ("A",), ("A", "A"), ("A", "missing")])
+def test_normalization_panel_must_be_fixed_and_non_degenerate(panel):
+    with pytest.raises(ValueError, match="normalization_gene_ids"):
+        ModelConfig(
+            feature_dim=2,
+            state_dim=2,
+            gene_ids=("A", "B"),
+            supervised_gene_ids=("A",),
+            state_gene_ids=("A", "B"),
+            normalization_gene_ids=panel,
+        )
+
+
+def test_he_normalization_panel_must_have_predicted_genes():
+    with pytest.raises(ValueError, match="normalization genes must be supervised"):
+        replace(model().config, variant="he", supervised_gene_ids=("A",))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"rows": np.asarray([0.0, 1.0, 2.0])},
+        {"columns": np.asarray([0, 1, 3])},
+        {"weights": np.asarray([1.0, 1.0, 0.0])},
+        {"weights": np.asarray([1.0, 1.0, 0.5])},
+        {"rows": np.asarray([0, 1, 1])},
+        {"observation_ids": ("c1", "c2", "c2")},
+    ],
+)
+def test_protein_operator_rejects_incomplete_or_invalid_spatial_axes(changes):
+    operator = identity_protein_operator(specimen().cell_ids)
+    with pytest.raises(ValueError):
+        replace(operator, **changes)
+
+
+def test_protein_operator_maps_subset_rows_and_checks_cell_identity():
+    inputs = specimen()
+    operator = ProteinObservationOperator(
+        inputs.cell_ids,
+        ("protein_c3", "protein_c1"),
+        np.asarray([0, 1]),
+        np.asarray([2, 0]),
+        np.ones(2),
+    )
+    values = torch.tensor([[1.0], [2.0], [3.0]], requires_grad=True)
+    torch.testing.assert_close(operator.aggregate(values), torch.tensor([[3.0], [1.0]]))
+    torch.testing.assert_close(
+        operator.transpose(torch.tensor([[5.0], [6.0]])), torch.tensor([[6.0], [0.0], [5.0]])
+    )
+    operator.aggregate(values).sum().backward()
+    torch.testing.assert_close(values.grad, torch.tensor([[1.0], [0.0], [1.0]]))
+    evidence = ProteinEvidence(
+        marker_ids=("m1",),
+        values=np.asarray([[0.0], [1.0]]),
+        observed=np.ones((2, 1), dtype=bool),
+        state_values=np.asarray([[1.0], [0.0]]),
+        correspondence="same_cell",
+        operator=operator,
+    )
+    net = model("he_rna_protein")
+    valid = replace(inputs, proteins=evidence)
+    assert torch.isfinite(net.protein_loss(valid, net(valid)))
+    with pytest.raises(ValueError, match="ordered H&E cell IDs"):
+        replace(
+            inputs,
+            proteins=replace(evidence, operator=replace(operator, cell_ids=("c3", "c2", "c1"))),
+        )

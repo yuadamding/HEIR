@@ -156,7 +156,14 @@ def test_all_comparison_variants_fit_the_same_file_inputs(tmp_path):
         interaction = (LRInteraction(("GENE_A",), ("GENE_B",), radius_um=120),) if context else ()
         fitted = fit(
             [sample],
-            replace(config, variant=variant, lr_interactions=interaction),
+            replace(
+                config,
+                variant=variant,
+                lr_interactions=interaction,
+                supervised_gene_ids=config.gene_ids
+                if variant == "he"
+                else config.supervised_gene_ids,
+            ),
             settings,
             baseline=baseline if context else None,
         )
@@ -166,3 +173,26 @@ def test_all_comparison_variants_fit_the_same_file_inputs(tmp_path):
             np.testing.assert_array_equal(prediction.assignment, frozen_assignment)
         if variant != "he":
             np.testing.assert_array_equal(prediction.expression[:, 2], prediction.transfer[:, 2])
+
+
+def test_cli_outcome_subset_preserves_each_genes_normalized_score(tmp_path):
+    root = tmp_path / "demo"
+    main(["demo", "--output", str(root)])
+    original = json.loads((root / "scores.json").read_text())
+    gene = json.loads((root / "genes.json").read_text())[0]
+    (root / "one_gene.json").write_text(json.dumps([gene]))
+    main(
+        [
+            "evaluate",
+            "--prediction",
+            str(root / "prediction.npz"),
+            "--manifest",
+            str(root / "SYNTHETIC_P2" / "specimen.json"),
+            "--evaluation-genes",
+            str(root / "one_gene.json"),
+            "--output",
+            str(root / "one_score.json"),
+        ]
+    )
+    subset = json.loads((root / "one_score.json").read_text())
+    assert subset["gene_scores"] == [original["gene_scores"][0]]

@@ -13,9 +13,10 @@ from heir.personalized.data import (
     validate_matching,
 )
 from heir.personalized.geometry import (
-    local_protein_evidence,
+    mask_component_ids,
     prepare_geometry,
     region_bins,
+    regional_protein_evidence,
     tissue_mask_edge_filter,
     write_overlay,
 )
@@ -84,21 +85,76 @@ def test_registration_direction_units_and_global_bins():
         prepare_geometry([[20, 20]], {**registration, "direction": "target_to_source"})
 
 
-def test_local_proteins_ignore_missing_values_and_other_tissue_islands():
+def test_regional_proteins_keep_common_geometry_and_report_excluded_tissue():
     args = dict(
-        he_coordinates_um=[[0, 0], [100, 0]],
+        cell_ids=("c1", "c2", "c3"),
+        he_coordinates_um=[[0, 0], [20, 0], [100, 0]],
         protein_coordinates_um=[[1, 0], [2, 0], [0, 0]],
         observed=np.array([[True, False], [True, False], [True, True]]),
-        radius_um=10,
-        he_component_ids=["a", "a"],
+        bin_size_um=100,
+        he_component_ids=["a", "a", "a"],
         protein_component_ids=["a", "a", "b"],
     )
-    first = local_protein_evidence(values=[[2, np.nan], [6, -999], [100, 100]], **args)
-    second = local_protein_evidence(values=[[2, 1e9], [6, np.inf], [100, 100]], **args)
-    np.testing.assert_allclose(first[0], [[4, 0], [0, 0]])
-    np.testing.assert_array_equal(first[1], [[True, False], [False, False]])
-    for left, right in zip(first, second):
+    first = regional_protein_evidence(values=[[2, np.nan], [6, -999], [100, 100]], **args)
+    second = regional_protein_evidence(values=[[2, 1e9], [6, np.inf], [100, 100]], **args)
+    np.testing.assert_allclose(first[0], [[4, 0]])
+    np.testing.assert_array_equal(first[1], [[True, False]])
+    np.testing.assert_array_equal(first[3].columns, [0, 1])
+    np.testing.assert_allclose(first[3].weights, [0.5, 0.5])
+    assert first[4] == {
+        "shared_regions": 1,
+        "excluded_he_regions": 1,
+        "excluded_protein_regions": 1,
+        "unobserved_region_markers": 1,
+    }
+    for left, right in zip(first[:3], second[:3]):
         np.testing.assert_allclose(left, right)
+
+
+def test_region_marker_missingness_does_not_change_spatial_kernel():
+    args = dict(
+        cell_ids=("c1", "c2"),
+        he_coordinates_um=[[0, 0], [50, 0]],
+        protein_coordinates_um=[[0, 0], [50, 0]],
+        values=[[1, np.nan], [0, 1]],
+        observed=np.array([[True, False], [True, True]]),
+        he_component_ids=["a", "a"],
+        protein_component_ids=["a", "a"],
+        quality=np.array([[1.0, 0], [0.2, 1.0]]),
+    )
+    values, observed, quality, operator, _ = regional_protein_evidence(**args)
+    np.testing.assert_allclose(values, [[0.5, 0]])
+    np.testing.assert_array_equal(observed, [[True, False]])
+    np.testing.assert_allclose(quality, [[0.6, 0]])
+    np.testing.assert_allclose(operator.weights, [0.5, 0.5])
+    args["quality"][1, 0] = 0
+    values, observed, quality, operator, _ = regional_protein_evidence(**args)
+    assert not observed.any()
+    np.testing.assert_allclose(values, 0)
+    np.testing.assert_allclose(quality, 0)
+    np.testing.assert_allclose(operator.weights, [0.5, 0.5])
+
+
+def test_region_means_do_not_prefer_artificial_mixing():
+    import torch
+
+    args = dict(
+        cell_ids=("c1", "c2"),
+        he_coordinates_um=[[0, 0], [50, 0]],
+        protein_coordinates_um=[[0, 0], [50, 0]],
+        values=[[1], [0]],
+        observed=np.ones((2, 1), dtype=bool),
+        he_component_ids=["a", "a"],
+        protein_component_ids=["a", "a"],
+    )
+    actual = torch.tensor([[1.0], [0.0]])
+    mixed = torch.tensor([[0.5], [0.5]])
+    coarse = regional_protein_evidence(**args)
+    np.testing.assert_allclose(coarse[3].aggregate(actual), coarse[0])
+    np.testing.assert_allclose(coarse[3].aggregate(mixed), coarse[0])
+    fine = regional_protein_evidence(**args, bin_size_um=25)
+    np.testing.assert_allclose(fine[3].aggregate(actual), fine[0])
+    assert np.any(np.abs(fine[3].aggregate(mixed).numpy() - fine[0]) > 0)
 
 
 def test_tissue_mask_excludes_thin_internal_gaps():
@@ -114,6 +170,15 @@ def test_tissue_mask_excludes_thin_internal_gaps():
     assert not allowed(0, 2)
     assert not allowed(1, 2)
     assert not allowed(3, 0)
+    components = mask_component_ids(
+        [[0.1, 0.5], [4.9, 0.5], [6.1, 0.5]],
+        ["one_declared_component"] * 3,
+        mask,
+        origin_um=[0, 0],
+        pixel_size_um=[1, 1],
+    )
+    assert components[0] == components[1]
+    assert components[1] != components[2]
 
 
 @pytest.fixture
@@ -122,6 +187,16 @@ def htapp_manifest(tmp_path):
     pandas = pytest.importorskip("pandas")
     pa = pytest.importorskip("pyarrow")
     parquet = pytest.importorskip("pyarrow.parquet")
+    match = dict(
+        patient_id="p1",
+        sampling_episode_id="episode",
+        lesion_id="lesion",
+        represented_region_id="region",
+        core_id="core1",
+        section_id="section1",
+        specimen_id="s1",
+    )
+    protein_identity = {**match, "section_id": "section2", "specimen_id": "protein_section"}
     parquet.write_table(
         pa.table(
             {
@@ -158,7 +233,13 @@ def htapp_manifest(tmp_path):
     rna.write_h5ad(tmp_path / "rna.h5ad")
     proteins = anndata.AnnData(
         X=np.array([[1.0, np.nan], [3.0, 4.0]]),
-        obs=pandas.DataFrame({"tissue_component_id": ["island", "island"]}, index=["p1", "p2"]),
+        obs=pandas.DataFrame(
+            {
+                "tissue_component_id": ["island", "island"],
+                **{field: [value] * 2 for field, value in protein_identity.items()},
+            },
+            index=["p1", "p2"],
+        ),
         var=pandas.DataFrame(index=["mA", "mB"]),
     )
     proteins.obsm["spatial"] = np.array([[0.0, 0.0], [20.0, 0.0]])
@@ -173,29 +254,23 @@ def htapp_manifest(tmp_path):
         "uncertainty_um": 5,
         "affine": np.eye(3).tolist(),
         "correspondence": "serial_section",
+        "source_identity": protein_identity,
+        "target_identity": match,
     }
     (tmp_path / "registration.json").write_text(json.dumps(registration))
-    match = dict(
-        patient_id="p1",
-        sampling_episode_id="episode",
-        lesion_id="lesion",
-        represented_region_id="region",
-        core_id="core1",
-        section_id="section1",
-        assay="HE",
-    )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "specimen_id": "s1",
         "patient_id": "p1",
         "matching": {
-            "query": match,
+            "query": {**match, "assay": "HE"},
             "reference": {
                 **match,
                 "core_id": "core2",
                 "section_id": "dissociated",
                 "assay": "snRNA-seq",
             },
+            "protein": {**protein_identity, "assay": "multiplex_IF"},
             "reference_independent_of_spatial_targets": True,
             "evidence": "source metadata",
         },
@@ -222,7 +297,8 @@ def htapp_manifest(tmp_path):
             "max_states": 2,
         },
         "proteins": {
-            "radius_um": 30,
+            "bin_size_um": 100,
+            "origin_um": [0, 0],
             "marker_table": [
                 {
                     "marker_id": f"m{gene}",
@@ -246,8 +322,10 @@ def test_real_htapp_import_is_id_aligned_and_target_free(htapp_manifest):
     np.testing.assert_array_equal(first.image_features[:, 0], [1, 2, 3])
     assert first.reference.gene_ids == ("A", "B")
     assert first.proteins.correspondence == "serial_section"
-    np.testing.assert_allclose(first.proteins.values[:2, 0], [0.625, 0.625])
-    assert not first.proteins.observed[2].any()
+    np.testing.assert_allclose(first.proteins.values[:, 0], [0.625])
+    assert not first.proteins.observed[:, 1].any()
+    assert first.proteins.coverage["excluded_he_regions"] == 1
+    np.testing.assert_allclose(first.proteins.operator.weights, [0.5, 0.5])
     # Deliberately invalid target data must not be opened by preparation.
     (htapp_manifest.parent / "targets.h5ad").write_bytes(b"not a target file")
     second = prepare_sample(htapp_manifest)
@@ -312,6 +390,155 @@ def test_rna_payload_identity_is_checked_not_only_manifest(htapp_manifest):
     rna.write_h5ad(path)
     with pytest.raises(ValueError, match="RNA payload lesion_id"):
         prepare_sample(htapp_manifest)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "patient_id",
+        "sampling_episode_id",
+        "lesion_id",
+        "represented_region_id",
+        "core_id",
+        "section_id",
+        "specimen_id",
+    ],
+)
+def test_protein_payload_identity_rejected_before_evidence(htapp_manifest, monkeypatch, field):
+    import anndata
+
+    from heir.personalized import data
+
+    def unexpected_evidence(**kwargs):
+        pytest.fail("wrong biological identity reached ProteinEvidence construction")
+
+    monkeypatch.setattr(data, "ProteinEvidence", unexpected_evidence)
+    path = htapp_manifest.parent / "proteins.h5ad"
+    protein = anndata.read_h5ad(path)
+    protein.obs[field] = ["wrong_identity"] * protein.n_obs
+    protein.write_h5ad(path)
+    with pytest.raises(ValueError, match=f"protein payload {field}"):
+        prepare_sample(htapp_manifest)
+
+
+@pytest.mark.parametrize(
+    "measurement_ids, message",
+    [
+        (["duplicate", "duplicate"], "protein measurement IDs must be unique"),
+        (["", "valid"], "protein measurement ID is unresolved"),
+    ],
+)
+@pytest.mark.filterwarnings("ignore:Observation names are not unique:UserWarning")
+def test_protein_measurement_ids_rejected_before_evidence(
+    htapp_manifest, monkeypatch, measurement_ids, message
+):
+    import anndata
+
+    from heir.personalized import data
+
+    def unexpected_evidence(**kwargs):
+        pytest.fail("invalid protein measurement IDs reached ProteinEvidence construction")
+
+    monkeypatch.setattr(data, "ProteinEvidence", unexpected_evidence)
+    path = htapp_manifest.parent / "proteins.h5ad"
+    protein = anndata.read_h5ad(path)
+    protein.obs_names = measurement_ids
+    protein.write_h5ad(path)
+    with pytest.raises(ValueError, match=message):
+        prepare_sample(htapp_manifest)
+
+
+@pytest.mark.parametrize("side", ["source", "target"])
+@pytest.mark.parametrize("field", ["patient_id", "section_id", "specimen_id"])
+def test_registration_identity_rejected_before_evidence(htapp_manifest, monkeypatch, side, field):
+    from heir.personalized import data
+
+    def unexpected_evidence(**kwargs):
+        pytest.fail("wrong registration identity reached ProteinEvidence construction")
+
+    monkeypatch.setattr(data, "ProteinEvidence", unexpected_evidence)
+    path = htapp_manifest.parent / "registration.json"
+    registration = json.loads(path.read_text())
+    registration[f"{side}_identity"][field] = "wrong_identity"
+    path.write_text(json.dumps(registration))
+    with pytest.raises(ValueError, match=f"registration {side}_identity {field}"):
+        prepare_sample(htapp_manifest)
+
+
+@pytest.mark.parametrize("field", ["patient_id", "specimen_id"])
+def test_unscoped_registration_identity_is_rejected(htapp_manifest, field):
+    path = htapp_manifest.parent / "registration.json"
+    registration = json.loads(path.read_text())
+    registration[field] = "wrong_identity"
+    path.write_text(json.dumps(registration))
+    with pytest.raises(ValueError, match=f"ambiguous registration {field}"):
+        prepare_sample(htapp_manifest)
+
+
+def test_missing_protein_identity_and_legacy_manifest_require_migration(htapp_manifest):
+    manifest = json.loads(htapp_manifest.read_text())
+    manifest["schema_version"] = 1
+    htapp_manifest.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="schema_version must be 2"):
+        prepare_sample(htapp_manifest)
+    manifest["schema_version"] = 2
+    manifest["matching"].pop("protein")
+    htapp_manifest.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="matching.protein.patient_id is unresolved"):
+        prepare_sample(htapp_manifest)
+
+
+def test_query_specimen_must_match_manifest(htapp_manifest):
+    manifest = json.loads(htapp_manifest.read_text())
+    manifest["matching"]["query"]["specimen_id"] = "wrong"
+    with pytest.raises(ValueError, match="matching.query.specimen_id differs"):
+        validate_matching(manifest)
+
+
+def test_protein_operator_independent_of_graph_parameters(htapp_manifest):
+    first = prepare_sample(htapp_manifest)
+    manifest = json.loads(htapp_manifest.read_text())
+    manifest["graph"] = {"radius_um": 1, "max_neighbors": 1}
+    htapp_manifest.write_text(json.dumps(manifest))
+    second = prepare_sample(htapp_manifest)
+    np.testing.assert_array_equal(first.proteins.values, second.proteins.values)
+    for field in ("rows", "columns", "weights"):
+        np.testing.assert_array_equal(
+            getattr(first.proteins.operator, field), getattr(second.proteins.operator, field)
+        )
+    assert len(first.graph.senders) > len(second.graph.senders)
+
+
+def test_verified_same_cell_uses_only_explicit_pairs(htapp_manifest):
+    import anndata
+
+    manifest = json.loads(htapp_manifest.read_text())
+    identity = {
+        key: value for key, value in manifest["matching"]["query"].items() if key != "assay"
+    }
+    manifest["matching"]["protein"] = {**identity, "assay": "multiplex_IF"}
+    htapp_manifest.write_text(json.dumps(manifest))
+    path = htapp_manifest.parent / "proteins.h5ad"
+    protein = anndata.read_h5ad(path)
+    for field, value in identity.items():
+        protein.obs[field] = [value] * protein.n_obs
+    protein.obs["paired_he_cell_id"] = ["n2", "n1"]
+    protein.write_h5ad(path)
+    path = htapp_manifest.parent / "registration.json"
+    registration = json.loads(path.read_text())
+    registration.update(
+        source_identity=identity,
+        correspondence="same_cell",
+        same_cell_verified=True,
+    )
+    path.write_text(json.dumps(registration))
+    evidence = prepare_sample(htapp_manifest).proteins
+    np.testing.assert_array_equal(evidence.operator.columns, [1, 0])
+    np.testing.assert_array_equal(evidence.operator.rows, [0, 1])
+    np.testing.assert_allclose(evidence.operator.weights, 1)
+    np.testing.assert_allclose(evidence.values[:, 0], [0.5, 0.75])
+    np.testing.assert_array_equal(evidence.observed[:, 1], [False, True])
+    assert evidence.coverage["excluded_he_regions"] == 1
 
 
 def test_overlay_labels_coverage_without_claiming_registration(tmp_path):

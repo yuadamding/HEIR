@@ -12,11 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
-from .geometry import local_protein_evidence, prepare_geometry, tissue_mask_edge_filter
+from .geometry import (
+    mask_component_ids,
+    prepare_geometry,
+    regional_protein_evidence,
+    tissue_mask_edge_filter,
+)
 from .reference import build_reference, extract_raw_counts
-from .schema import PredictionInputs, ProteinEvidence, SpatialTargets
+from .schema import PredictionInputs, ProteinEvidence, ProteinObservationOperator, SpatialTargets
 
 _MATCH_FIELDS = ("patient_id", "sampling_episode_id", "lesion_id", "represented_region_id")
+_IDENTITY_FIELDS = (*_MATCH_FIELDS, "core_id", "section_id", "specimen_id")
 _BAD_ID = {"", "unknown", "unresolved", "none", "nan", "na", "n/a", "tbd"}
 _CORRESPONDENCE = {"same_cell", "same_section_soft", "serial_section", "region"}
 
@@ -24,8 +30,11 @@ _CORRESPONDENCE = {"same_cell", "same_section_soft", "serial_section", "region"}
 def _read_manifest(path):
     path = Path(path).resolve()
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1:
-        raise ValueError("HTAPP manifest schema_version must be 1")
+    if manifest.get("schema_version") != 2:
+        raise ValueError(
+            "HTAPP manifest schema_version must be 2; "
+            "migrate protein identities and region settings"
+        )
     return manifest, path.parent
 
 
@@ -56,6 +65,9 @@ def validate_matching(manifest):
             raise ValueError(f"query/reference {field} differs")
     if query["patient_id"] != patient:
         raise ValueError("manifest patient differs from matched patient")
+    query_specimen = _identifier(query.get("specimen_id"), "matching.query.specimen_id")
+    if query_specimen != manifest["specimen_id"]:
+        raise ValueError("matching.query.specimen_id differs from manifest specimen_id")
     for side, item in (("query", query), ("reference", reference)):
         for field in ("core_id", "section_id", "assay"):
             _identifier(item.get(field), f"matching.{side}.{field}")
@@ -64,6 +76,48 @@ def validate_matching(manifest):
     if matching.get("reference_independent_of_spatial_targets") is not True:
         raise ValueError("matched reference must be independent of spatial RNA targets")
     _identifier(matching.get("evidence"), "matching.evidence")
+    if manifest.get("paths", {}).get("proteins"):
+        protein = matching.get("protein", {})
+        for field in (*_IDENTITY_FIELDS, "assay"):
+            _identifier(protein.get(field), f"matching.protein.{field}")
+        for field in _MATCH_FIELDS:
+            if protein[field] != query[field]:
+                raise ValueError(f"query/protein {field} differs")
+
+
+def _validate_protein_identity(manifest, adata, registration):
+    """Bind actual protein rows and both registration frames to biological identities."""
+    query, protein = (manifest["matching"][side] for side in ("query", "protein"))
+    for field in _IDENTITY_FIELDS:
+        values = _column(adata.obs, field).astype(str)
+        if set(values) != {protein[field]}:
+            raise ValueError(f"protein payload {field} differs from matching.protein")
+    # Legacy unscoped identities cannot distinguish adjacent source/target sections.
+    for field in _IDENTITY_FIELDS:
+        prefixes = ("", "source_", "target_", "protein_", "he_")
+        if any(prefix + field in registration for prefix in prefixes):
+            raise ValueError(
+                f"ambiguous registration {field}; use source_identity and target_identity"
+            )
+    for side, expected in (("source", protein), ("target", query)):
+        identity = registration.get(f"{side}_identity")
+        if not isinstance(identity, dict):
+            raise ValueError(f"registration requires {side}_identity")
+        for field in _IDENTITY_FIELDS:
+            value = _identifier(identity.get(field), f"registration.{side}_identity.{field}")
+            if value != expected[field]:
+                raise ValueError(
+                    f"registration {side}_identity {field} differs from {side} payload"
+                )
+    correspondence = registration.get("correspondence")
+    same_core = protein["core_id"] == query["core_id"]
+    same_section = protein["section_id"] == query["section_id"]
+    if correspondence in {"same_cell", "same_section_soft"} and not (same_core and same_section):
+        raise ValueError("same-section protein correspondence requires matching core and section")
+    if correspondence == "serial_section" and (not same_core or same_section):
+        raise ValueError(
+            "serial-section protein correspondence requires one core and distinct sections"
+        )
 
 
 def _read_h5ad(path):
@@ -151,14 +205,22 @@ def _proteins(manifest, root, reference, cell_ids, coordinates, components):
     if not isinstance(marker_table, list) or not marker_table:
         raise ValueError("protein evidence requires an explicit marker interpretation table")
     adata = _read_h5ad(_path(manifest, root, "proteins"))
+    measurement_ids = tuple(map(str, adata.obs_names))
+    if len(set(measurement_ids)) != len(measurement_ids):
+        raise ValueError("protein measurement IDs must be unique")
+    for measurement_id in measurement_ids:
+        _identifier(measurement_id, "protein measurement ID")
     registration = json.loads(_path(manifest, root, "registration").read_text())
     correspondence = registration.get("correspondence")
     if correspondence not in _CORRESPONDENCE:
         raise ValueError("registration correspondence type must be explicit")
+    _validate_protein_identity(manifest, adata, registration)
     if "spatial" not in adata.obsm or "observed" not in adata.layers:
         raise ValueError("protein measurements require coordinates and an observed mask")
     source_coordinates = prepare_geometry(adata.obsm["spatial"], registration)
     protein_components = _column(adata.obs, "tissue_component_id").astype(str)
+    for component in protein_components:
+        _identifier(component, "protein tissue_component_id")
     source_ids = tuple(str(x) for x in adata.var_names)
     if len(set(source_ids)) != len(source_ids):
         raise ValueError("protein marker IDs must be unique")
@@ -181,6 +243,7 @@ def _proteins(manifest, root, reference, cell_ids, coordinates, components):
         raise ValueError("protein quality must be finite at observed measurements")
     if ((quality[observed] < 0) | (quality[observed] > 1)).any():
         raise ValueError("protein quality must lie in [0, 1]")
+    observed = observed & (quality > 0)
     quality = np.where(observed, quality, 0)
     values = np.zeros(raw.shape, dtype=np.float32)
     state_values = np.zeros((len(reference.state_ids), len(marker_ids)), dtype=np.float32)
@@ -210,37 +273,48 @@ def _proteins(manifest, root, reference, cell_ids, coordinates, components):
         pair_ids = tuple(str(x) for x in _column(adata.obs, "paired_he_cell_id"))
         if len(set(pair_ids)) != len(pair_ids) or not set(pair_ids).issubset(cell_ids):
             raise ValueError("protein paired cell IDs must be unique known H&E nucleus IDs")
-        paired_values = np.zeros((len(cell_ids), len(marker_ids)), dtype=np.float32)
-        paired_mask = np.zeros(paired_values.shape, dtype=bool)
-        paired_quality = np.zeros(paired_values.shape, dtype=np.float32)
         lookup = {name: i for i, name in enumerate(cell_ids)}
         for source, name in enumerate(pair_ids):
             target = lookup[name]
             if protein_components[source] != str(components[target]):
                 raise ValueError("same-cell pairing crosses tissue components")
-            paired_values[target], paired_mask[target] = values[source], observed[source]
-            paired_quality[target] = quality[source]
-        values, observed, quality = paired_values, paired_mask, paired_quality
-    else:
-        boundary_filter = _mask_filter(
-            manifest,
-            root,
-            np.concatenate((coordinates, source_coordinates)),
+        operator = ProteinObservationOperator(
+            cell_ids=cell_ids,
+            observation_ids=tuple(f"cell:{name}" for name in pair_ids),
+            rows=np.arange(len(pair_ids), dtype=np.int64),
+            columns=np.asarray([lookup[name] for name in pair_ids], dtype=np.int64),
+            weights=np.ones(len(pair_ids), dtype=np.float32),
         )
-        values, observed, quality = local_protein_evidence(
+        coverage = {
+            "shared_regions": len(pair_ids),
+            "excluded_he_regions": len(cell_ids) - len(pair_ids),
+            "excluded_protein_regions": 0,
+            "unobserved_region_markers": int((~observed).sum()),
+        }
+    else:
+        if "radius_um" in settings:
+            raise ValueError("protein radius_um is obsolete; declare bin_size_um and origin_um")
+        if manifest.get("paths", {}).get("tissue_mask"):
+            with np.load(_path(manifest, root, "tissue_mask"), allow_pickle=False) as raster:
+                split = mask_component_ids(
+                    np.concatenate((coordinates, source_coordinates)),
+                    np.concatenate((components, protein_components)),
+                    raster["mask"],
+                    origin_um=raster["origin_um"],
+                    pixel_size_um=raster["pixel_size_um"],
+                )
+            components, protein_components = split[: len(coordinates)], split[len(coordinates) :]
+        values, observed, quality, operator, coverage = regional_protein_evidence(
+            cell_ids,
             coordinates,
             source_coordinates,
             values,
             observed,
-            radius_um=settings.get("radius_um", 100.0),
+            bin_size_um=settings.get("bin_size_um", 100.0),
+            origin_um=settings.get("origin_um", (0.0, 0.0)),
             quality=quality,
             he_component_ids=components,
             protein_component_ids=protein_components,
-            edge_allowed=(
-                None
-                if boundary_filter is None
-                else lambda he, protein: boundary_filter(he, len(coordinates) + protein)
-            ),
         )
     return ProteinEvidence(
         marker_ids=marker_ids,
@@ -248,7 +322,9 @@ def _proteins(manifest, root, reference, cell_ids, coordinates, components):
         observed=observed,
         state_values=state_values,
         correspondence=correspondence,
+        operator=operator,
         quality=quality,
+        coverage=coverage,
     )
 
 
@@ -426,6 +502,8 @@ def specimen_eligibility(manifest_paths, *, validate_payload=True):
                 row["n_rna_genes"] = len(inputs.reference.gene_ids)
                 row["n_he_nuclei"] = len(inputs.cell_ids)
                 row["n_reference_states"] = len(inputs.reference.state_ids)
+                if inputs.proteins is not None:
+                    row["protein_coverage"] = inputs.proteins.coverage
                 row["prediction_eligible"] = True
         except (ValueError, OSError, KeyError, ImportError, TypeError) as exc:
             row["reasons"].append(str(exc))

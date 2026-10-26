@@ -26,6 +26,20 @@ def create_fixture(directory: str | Path) -> list[Path]:
         patient = f"SYNTHETIC_P{p}"
         folder = root / patient
         folder.mkdir()
+        matching = {
+            "patient_id": patient,
+            "sampling_episode_id": "episode",
+            "lesion_id": "lesion",
+            "represented_region_id": "region",
+            "core_id": "core",
+            "section_id": "he_section",
+            "specimen_id": patient + "_specimen",
+        }
+        protein_identity = {
+            **matching,
+            "section_id": "protein_serial_section",
+            "specimen_id": patient + "_protein_section",
+        }
         cell_ids = [f"{patient}_nucleus_{i}" for i in range(12)]
         coordinates = np.column_stack((np.repeat([20, 120, 220, 320], 3), np.tile([20, 40, 60], 4)))
         pq.write_table(
@@ -66,7 +80,11 @@ def create_fixture(directory: str | Path) -> list[Path]:
         proteins = ad.AnnData(
             X=np.column_stack((np.linspace(1, 9, 12), np.linspace(9, 1, 12))).astype(np.float32),
             obs=pd.DataFrame(
-                {"tissue_component_id": ["tissue"] * 12}, index=[f"protein_{i}" for i in range(12)]
+                {
+                    "tissue_component_id": ["tissue"] * 12,
+                    **{field: [value] * 12 for field, value in protein_identity.items()},
+                },
+                index=[f"protein_{i}" for i in range(12)],
             ),
             var=pd.DataFrame(index=["MARKER_A", "MARKER_B"]),
         )
@@ -82,6 +100,8 @@ def create_fixture(directory: str | Path) -> list[Path]:
             "affine": np.eye(3).tolist(),
             "correspondence": "serial_section",
             "uncertainty_um": 5.0,
+            "source_identity": protein_identity,
+            "target_identity": matching,
         }
         (folder / "registration.json").write_text(json.dumps(registration, indent=2) + "\n")
         observations = [f"bin:{i}:0" for i in range(4)]
@@ -104,22 +124,15 @@ def create_fixture(directory: str | Path) -> list[Path]:
             columns=np.arange(12),
             weights=np.ones(12),
         )
-        matching = {
-            "patient_id": patient,
-            "sampling_episode_id": "episode",
-            "lesion_id": "lesion",
-            "represented_region_id": "region",
-            "core_id": "core",
-            "section_id": "section",
-        }
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "synthetic": True,
             "patient_id": patient,
             "specimen_id": patient + "_specimen",
             "matching": {
                 "query": {**matching, "assay": "H&E"},
                 "reference": {**matching, "assay": "snRNA-seq", "section_id": "rna_aliquot"},
+                "protein": {**protein_identity, "assay": "multiplex_IF"},
                 "reference_independent_of_spatial_targets": True,
                 "evidence": "synthetic integration fixture; no biological matching assertion",
             },
@@ -148,7 +161,8 @@ def create_fixture(directory: str | Path) -> list[Path]:
                 "library_size": 10000,
             },
             "proteins": {
-                "radius_um": 100,
+                "bin_size_um": 100,
+                "origin_um": [0, 0],
                 "marker_table": [
                     {
                         "marker_id": "MARKER_A",
@@ -179,6 +193,7 @@ def create_fixture(directory: str | Path) -> list[Path]:
         "state_gene_ids": genes,
         "gene_ids": genes,
         "supervised_gene_ids": genes[:2],
+        "normalization_gene_ids": genes,
         "hidden_dim": 8,
         "residual_rank": 2,
     }

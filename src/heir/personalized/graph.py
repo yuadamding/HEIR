@@ -139,7 +139,8 @@ def compute_messages(
 ) -> torch.Tensor:
     """Return N x 2P messages, with identical input features in both branches.
 
-    ``assignment`` excludes the unsupported component. For each program, the
+    ``assignment`` is conditional on the known states and each row sums to one;
+    unsupported-reference probability must not weight message contributions. For each program, the
     generic branch has (mean incoming ligand, receiver receptor); the LR branch
     replaces the first feature by their directed product. Means use the same
     candidate-specific radius and edge weights. Contact candidates must carry
@@ -151,6 +152,12 @@ def compute_messages(
         raise ValueError("message mode must be lr or generic")
     if assignment.shape != (graph.n_cells, len(reference.state_ids)):
         raise ValueError("assignment and graph/reference dimensions differ")
+    if (
+        not torch.isfinite(assignment).all()
+        or torch.any(assignment < 0)
+        or not torch.allclose(assignment.sum(dim=1), assignment.new_ones(graph.n_cells))
+    ):
+        raise ValueError("messages require conditional known-state probabilities summing to one")
     if not interactions:
         return assignment.new_zeros((graph.n_cells, 0))
     expression = torch.as_tensor(

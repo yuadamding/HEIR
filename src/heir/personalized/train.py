@@ -12,9 +12,9 @@ from typing import Optional, Sequence
 import numpy as np
 import torch
 
-from .evaluate import aligned_observations
+from .evaluate import aligned_observations, normalized_observations
 from .model import ModelConfig, PersonalizedModel
-from .observation import ObservationOperator, normalized_log_expression
+from .observation import ObservationOperator
 from .schema import PredictionInputs, SpatialTargets
 
 
@@ -91,7 +91,7 @@ class FittedModel:
             directory / "feature_transform.npz", mean=self.feature_mean, scale=self.feature_scale
         )
         metadata = {
-            "schema": "heir.personalized.bundle.v1",
+            "schema": "heir.personalized.bundle.v2",
             "model_config": self.model.config.to_dict(),
             "training_patient_ids": list(self.training_patient_ids),
             "history": self.history,
@@ -126,8 +126,11 @@ class FittedModel:
             ):
                 raise ValueError("inference bundle integrity mismatch")
         metadata = json.loads((directory / "bundle.json").read_text())
-        if metadata["schema"] != "heir.personalized.bundle.v1":
-            raise ValueError("unsupported inference bundle schema")
+        if metadata["schema"] != "heir.personalized.bundle.v2":
+            raise ValueError(
+                "unsupported inference bundle schema; retrain legacy bundles with fixed "
+                "normalization and conditional reference transfer"
+            )
         model = PersonalizedModel(ModelConfig.from_dict(metadata["model_config"]))
         with np.load(directory / "weights.npz", allow_pickle=False) as weights:
             model.load_state_dict({key: torch.from_numpy(weights[key].copy()) for key in weights})
@@ -197,6 +200,8 @@ def fit(
             )
         if baseline.preparation != (preparation or {}):
             raise ValueError("context baseline preparation settings differ")
+        if baseline.model.config.normalization_gene_ids != model_config.normalization_gene_ids:
+            raise ValueError("context baseline normalization panel differs")
         model.initialize_fixed_mapper(baseline.model)
         mean, scale = baseline.feature_mean.copy(), baseline.feature_scale.copy()
     else:
@@ -214,6 +219,7 @@ def fit(
             digest.update(value.detach().cpu().numpy().tobytes())
         fitted.training_config["baseline_model_sha256"] = digest.hexdigest()
     prepared = [replace(s, inputs=fitted.transform(s.inputs)) for s in samples]
+    _validate_training_normalization(model, prepared)
     optimizer = torch.optim.Adam(
         [p for p in model.parameters() if p.requires_grad], lr=settings.learning_rate
     )
@@ -227,31 +233,26 @@ def fit(
         }
         for sample in prepared:
             prediction = model(sample.inputs)
-            predicted, truth, mask = aligned_observations(
+            predicted, truth, mask = normalized_observations(
                 prediction,
                 sample.targets,
                 sample.observation,
                 model_config.supervised_gene_ids,
+                normalization_gene_ids=model_config.normalization_gene_ids,
             )
             if not mask.any():
                 raise ValueError("training specimen has no observed supervised values")
-            error = (
-                normalized_log_expression(predicted, mask) - normalized_log_expression(truth, mask)
-            ).square()
+            error = (predicted - truth).square()
             # Equal weight per measured gene; differing availability cannot dominate.
             counts = mask.sum(0)
             gene_losses = (error * mask).sum(0) / counts.clamp_min(1)
             loss = gene_losses[counts > 0].mean()
             loss = loss + settings.protein_weight * model.protein_loss(sample.inputs, prediction)
             if model_config.variant != "he":
-                q = prediction.assignment[:, 1:].mean(0)
-                q = q / q.sum().clamp_min(1e-12)
-                prior = torch.as_tensor(
+                abundance = _abundance_penalty(
+                    prediction.conditional_assignment,
                     sample.inputs.reference.proportions,
-                    dtype=q.dtype,
-                    device=q.device,
                 )
-                abundance = (q * (q.clamp_min(1e-12).log() - prior.clamp_min(1e-12).log())).sum()
                 loss = loss + settings.abundance_weight * abundance
             loss = loss + settings.residual_weight * prediction.log_correction.square().mean()
             if not torch.isfinite(loss):
@@ -264,6 +265,58 @@ def fit(
     fitted.optimizer_state = optimizer.state_dict()
     model.eval()
     return fitted
+
+
+def _validate_training_normalization(model: PersonalizedModel, samples: Sequence[TrainingSample]):
+    """Reject effective one-gene ratios even when the configured panel has more IDs.
+
+    Sparse individual regions are valid. Each supervised denominator gene needs
+    at least one observed training region where both measured and initially
+    predicted companion-gene mass are positive, so its ratio can carry a signal.
+    """
+    panel = model.config.normalization_gene_ids
+    required = set(model.config.supervised_gene_ids) & set(panel)
+    supported = set()
+    with torch.no_grad():
+        for sample in samples:
+            prediction = model(sample.inputs)
+            # Also validate complete, positive denominator coverage before any update.
+            normalized_observations(
+                prediction,
+                sample.targets,
+                sample.observation,
+                model.config.supervised_gene_ids,
+                normalization_gene_ids=panel,
+            )
+            predicted, truth, mask = aligned_observations(
+                prediction,
+                sample.targets,
+                sample.observation,
+                panel,
+            )
+            for gene in required:
+                index = panel.index(gene)
+                companions = [j for j in range(len(panel)) if j != index]
+                usable = (
+                    mask[:, index]
+                    & (truth[:, companions].sum(1) > 0)
+                    & (predicted[:, companions].sum(1) > 0)
+                )
+                if usable.any():
+                    supported.add(gene)
+    missing = required - supported
+    if missing:
+        raise ValueError(
+            "degenerate normalization for supervised genes without positive measured and "
+            f"predicted companion-gene mass in a common training region: {sorted(missing)}"
+        )
+
+
+def _abundance_penalty(conditional_assignment: torch.Tensor, proportions: np.ndarray):
+    """Specimen composition of conditional states, independent of support mass."""
+    q = conditional_assignment.mean(0)
+    prior = torch.as_tensor(proportions, dtype=q.dtype, device=q.device)
+    return (q * (q.clamp_min(1e-12).log() - prior.clamp_min(1e-12).log())).sum()
 
 
 def read_fold_roles(path: str | Path, outer_fold: int) -> dict[str, str]:

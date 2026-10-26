@@ -16,6 +16,11 @@
     "GENE_A",
     "GENE_B"
   ],
+  "normalization_gene_ids": [
+    "GENE_A",
+    "GENE_B",
+    "GENE_C"
+  ],
   "hidden_dim": 8,
   "residual_rank": 2
 }

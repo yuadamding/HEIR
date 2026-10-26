@@ -1,4 +1,4 @@
-"""Physical-coordinate transforms and local protein evidence.
+"""Physical-coordinate transforms and shared protein observation regions.
 
 Serial sections are never assigned by nearest-cell identity. Supplied affine
 registration is reused; registration estimation is deliberately outside this adapter.
@@ -114,78 +114,112 @@ def tissue_mask_edge_filter(coordinates, mask, *, origin_um, pixel_size_um):
     return allowed
 
 
-def local_protein_evidence(
+def mask_component_ids(coordinates, component_ids, mask, *, origin_um, pixel_size_um):
+    """Split declared components by connected mask islands; reject unsupported points."""
+    from scipy.ndimage import label
+
+    coordinates = coordinates_um(coordinates, units="um")
+    # Reuse the raster contract, including outside-mask rejection at each point.
+    supported = tissue_mask_edge_filter(
+        coordinates, mask, origin_um=origin_um, pixel_size_um=pixel_size_um
+    )
+    labels, _ = label(mask)
+    pixels = np.floor((coordinates - np.asarray(origin_um)) / np.asarray(pixel_size_um)).astype(
+        np.int64
+    )
+    if len(component_ids) != len(coordinates):
+        raise ValueError("tissue component axes differ")
+    if any(not supported(i, i) for i in range(len(coordinates))):
+        raise ValueError("protein/H&E coordinates outside the declared tissue mask")
+    return tuple(
+        (str(component), int(labels[y, x])) for component, (x, y) in zip(component_ids, pixels)
+    )
+
+
+def regional_protein_evidence(
+    cell_ids,
     he_coordinates_um,
     protein_coordinates_um,
     values,
     observed,
     *,
-    radius_um=100.0,
+    bin_size_um=100.0,
+    origin_um=(0.0, 0.0),
     quality=None,
-    he_component_ids=None,
-    protein_component_ids=None,
-    edge_allowed=None,
+    he_component_ids,
+    protein_component_ids,
 ):
-    """Quality-weighted local means with measured-versus-missing masks.
+    """Build a shared, component-specific geometry operator and uniform protein means.
 
-    Spatial hashing bounds candidate lookup; no dense H&E-by-protein distance
-    matrix is constructed. Components exclude evidence across tissue islands.
+    Both assays use the same fixed physical bins, independently of the model's
+    communication graph. A region-marker is observed only if every source
+    measurement in that region has positive-confidence evidence. Missingness
+    therefore never changes a marker's geometric averaging kernel. Confidence
+    is averaged separately from intensity and remains an absolute loss weight.
     """
+    import json
+
+    from .schema import ProteinObservationOperator
+
     he = coordinates_um(he_coordinates_um, units="um")
     protein = coordinates_um(protein_coordinates_um, units="um")
-    values = np.asarray(values, dtype=float)
-    observed = np.asarray(observed)
+    values, observed = np.asarray(values, dtype=float), np.asarray(observed)
     if values.ndim != 2 or values.shape[0] != len(protein) or observed.shape != values.shape:
         raise ValueError("protein coordinate, value, and mask axes differ")
     if observed.dtype != bool:
         raise ValueError("protein observed mask must be boolean")
-    if not np.isfinite(radius_um) or radius_um <= 0:
-        raise ValueError("protein radius_um must be positive")
     if not np.isfinite(values[observed]).all() or (values[observed] < 0).any():
         raise ValueError("observed protein intensities must be finite and nonnegative")
-    if quality is None:
-        quality = np.ones(values.shape)
-    quality = np.asarray(quality, dtype=float)
+    quality = np.ones(values.shape) if quality is None else np.asarray(quality, dtype=float)
     if quality.shape != values.shape or not np.isfinite(quality[observed]).all():
         raise ValueError("protein quality must be finite at observed measurements")
     if ((quality[observed] < 0) | (quality[observed] > 1)).any():
         raise ValueError("protein quality must lie in [0, 1]")
-    if (he_component_ids is None) != (protein_component_ids is None):
-        raise ValueError("both H&E and protein tissue component IDs are required together")
-    if he_component_ids is None:
-        he_component_ids, protein_component_ids = ["all"] * len(he), ["all"] * len(protein)
+    if len(cell_ids) != len(he):
+        raise ValueError("H&E cell ID and coordinate axes differ")
     if len(he_component_ids) != len(he) or len(protein_component_ids) != len(protein):
         raise ValueError("tissue component axes differ")
-    buckets = {}
-    for i, (point, component) in enumerate(zip(protein, protein_component_ids)):
-        xy = np.floor(point / radius_um).astype(int)
-        buckets.setdefault((str(component), *xy), []).append(i)
-    result = np.zeros((len(he), values.shape[1]), dtype=np.float32)
+
+    def groups(points, components):
+        result = {}
+        bins = region_bins(points, bin_size_um=bin_size_um, origin_um=origin_um)
+        for i, (component, region) in enumerate(zip(components, bins)):
+            # JSON encoding avoids collisions between arbitrary component names.
+            key = json.dumps([component, region], separators=(",", ":"))
+            result.setdefault(key, []).append(i)
+        return result
+
+    he_groups, protein_groups = groups(he, he_component_ids), groups(protein, protein_component_ids)
+    regions = tuple(sorted(he_groups.keys() & protein_groups.keys()))
+    if not regions:
+        raise ValueError("protein and H&E have no shared tissue-region coverage")
+    result = np.zeros((len(regions), values.shape[1]), dtype=np.float32)
     mask = np.zeros(result.shape, dtype=bool)
     confidence = np.zeros(result.shape, dtype=np.float32)
-    clean = np.where(observed, values, 0)
-    quality = np.where(observed, quality, 0)
-    for i, (point, component) in enumerate(zip(he, he_component_ids)):
-        xy = np.floor(point / radius_um).astype(int)
-        candidates = []
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                candidates.extend(buckets.get((str(component), xy[0] + dx, xy[1] + dy), ()))
-        if not candidates:
-            continue
-        candidates = np.asarray(candidates, dtype=int)
-        distance = np.linalg.norm(protein[candidates] - point, axis=1)
-        selected = candidates[distance <= radius_um]
-        if edge_allowed is not None:
-            selected = np.asarray([j for j in selected if edge_allowed(i, j)], dtype=int)
-        weights = quality[selected]
-        denominator = weights.sum(0)
-        present = denominator > 0
-        mask[i] = present
-        result[i, present] = (clean[selected] * weights).sum(0)[present] / denominator[present]
-        measured_count = observed[selected].sum(0)
-        confidence[i, present] = denominator[present] / measured_count[present]
-    return result, mask, confidence
+    rows, columns, weights = [], [], []
+    for row, region in enumerate(regions):
+        cells, sources = he_groups[region], protein_groups[region]
+        rows.extend([row] * len(cells))
+        columns.extend(cells)
+        weights.extend([1.0 / len(cells)] * len(cells))
+        present = (observed[sources] & (quality[sources] > 0)).all(axis=0)
+        mask[row] = present
+        result[row, present] = values[np.ix_(sources, present)].mean(axis=0)
+        confidence[row, present] = quality[np.ix_(sources, present)].mean(axis=0)
+    operator = ProteinObservationOperator(
+        cell_ids=tuple(cell_ids),
+        observation_ids=regions,
+        rows=np.asarray(rows, dtype=np.int64),
+        columns=np.asarray(columns, dtype=np.int64),
+        weights=np.asarray(weights, dtype=np.float32),
+    )
+    coverage = {
+        "shared_regions": len(regions),
+        "excluded_he_regions": len(he_groups.keys() - protein_groups.keys()),
+        "excluded_protein_regions": len(protein_groups.keys() - he_groups.keys()),
+        "unobserved_region_markers": int((~mask).sum()),
+    }
+    return result, mask, confidence, operator, coverage
 
 
 def write_overlay(

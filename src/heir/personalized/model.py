@@ -14,8 +14,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .graph import LRInteraction, compute_messages, neighborhood_average
-from .schema import Prediction, PredictionInputs, SpatialGraph
+from .graph import LRInteraction, compute_messages
+from .schema import Prediction, PredictionInputs
 
 VARIANTS = (
     "he",
@@ -34,6 +34,7 @@ class ModelConfig:
     state_dim: int
     gene_ids: tuple[str, ...]
     supervised_gene_ids: tuple[str, ...]
+    normalization_gene_ids: tuple[str, ...] = ()
     state_gene_ids: tuple[str, ...] = ()
     hidden_dim: int = 32
     residual_rank: int = 16
@@ -45,7 +46,7 @@ class ModelConfig:
     lr_interactions: tuple[LRInteraction, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("gene_ids", "supervised_gene_ids", "state_gene_ids"):
+        for name in ("gene_ids", "supervised_gene_ids", "normalization_gene_ids", "state_gene_ids"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         interactions = tuple(
             LRInteraction(**item) if isinstance(item, dict) else item
@@ -62,6 +63,16 @@ class ModelConfig:
             raise ValueError("supervised gene IDs must be unique")
         if not set(self.supervised_gene_ids) <= set(self.gene_ids):
             raise ValueError("supervised genes must belong to the output gene axis")
+        if (
+            len(self.normalization_gene_ids) < 2
+            or len(set(self.normalization_gene_ids)) != len(self.normalization_gene_ids)
+            or not set(self.normalization_gene_ids) <= set(self.gene_ids)
+        ):
+            raise ValueError("normalization_gene_ids must name at least two unique output genes")
+        if self.variant == "he" and not set(self.normalization_gene_ids) <= set(
+            self.supervised_gene_ids
+        ):
+            raise ValueError("H&E-only normalization genes must be supervised/predicted genes")
         for name in ("feature_dim", "state_dim", "hidden_dim", "residual_rank"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -91,20 +102,6 @@ class ModelConfig:
         return cls(**dict(values))
 
 
-def _local_transpose(values: torch.Tensor, graph: SpatialGraph) -> torch.Tensor:
-    """Apply the transpose of the include-self incoming average operator."""
-
-    senders = torch.as_tensor(graph.senders, device=values.device, dtype=torch.long)
-    receivers = torch.as_tensor(graph.receivers, device=values.device, dtype=torch.long)
-    weights = torch.as_tensor(graph.weights, device=values.device, dtype=values.dtype)
-    total = torch.ones_like(values[:, :1])
-    total.index_add_(0, receivers, weights[:, None])
-    normalized = values / total
-    output = normalized.clone()
-    output.index_add_(0, senders, normalized[receivers] * weights[:, None])
-    return output
-
-
 class PersonalizedModel(nn.Module):
     """Trainable morphology compatibility, optional context, and bounded decoder.
 
@@ -122,6 +119,11 @@ class PersonalizedModel(nn.Module):
         self.image_mapper = nn.Sequential(nn.Linear(config.feature_dim, h), nn.Tanh())
         self.state_mapper = nn.Sequential(nn.Linear(config.state_dim, h), nn.Tanh())
         self.unsupported_head = nn.Linear(h, 1)
+        # There is no qualified support objective yet. This frozen diagnostic
+        # must never become a trainable weight on cellular RNA contribution.
+        nn.init.zeros_(self.unsupported_head.weight)
+        nn.init.zeros_(self.unsupported_head.bias)
+        self.unsupported_head.requires_grad_(False)
         self.protein_log_strength = nn.Parameter(torch.tensor(0.0))
         self.decoder_image = nn.Sequential(nn.Linear(config.feature_dim, h), nn.Tanh())
         self.baseline_head = nn.Linear(h, len(config.gene_ids))
@@ -179,49 +181,42 @@ class PersonalizedModel(nn.Module):
         protein = inputs.proteins
         if protein is None:
             return None
-        mask = self._tensor(protein.observed)
+        observed = self._tensor(protein.observed)
+        confidence = observed
         # Fill before subtraction: NaN * 0 is still NaN.
         values = self._tensor(np.where(protein.observed, protein.values, 0.0))
         if protein.quality is not None:
-            mask = mask * self._tensor(protein.quality)
-        return values, mask, self._tensor(protein.state_values)
+            confidence = confidence * self._tensor(protein.quality)
+        return values, observed, confidence, self._tensor(protein.state_values)
 
     def _protein_logits(self, logits: torch.Tensor, inputs: PredictionInputs) -> torch.Tensor:
         arrays = self._protein_arrays(inputs)
         if arrays is None or not self.uses_proteins:
             return logits
-        values, mask, states = arrays
+        values, observed, confidence, states = arrays
         strength = self.protein_log_strength.exp().clamp(max=10.0)
-        if inputs.proteins.correspondence == "same_cell":
-            # Expand the quadratic algebraically, avoiding an N x K x M tensor.
-            cost = (values.square() * mask).sum(dim=1, keepdim=True)
-            cost = cost + mask @ states.square().T - 2 * (values * mask) @ states.T
-            cost = cost.clamp_min(0) / mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            adjustment = -(strength * cost).clamp(max=5.0)
-        else:
-            if inputs.graph is None:
-                raise ValueError("soft/serial/region protein evidence requires a spatial graph")
-            q = logits.softmax(dim=1)[:, 1:]
-            mixture = neighborhood_average(q @ states, inputs.graph, include_self=True)
-            discrepancy = (mixture - values) * mask / mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            cost = _local_transpose(discrepancy, inputs.graph) @ states.T
-            adjustment = (-strength * cost).clamp(-1.0, 1.0)
+        operator = inputs.proteins.operator
+        # Compute conditional probabilities directly: dividing joint probabilities
+        # by support loses all signal when a large unsupported logit underflows.
+        conditional = logits[:, 1:].softmax(dim=1)
+        mixture = operator.aggregate(conditional @ states)
+        discrepancy = (
+            (mixture - values) * confidence / observed.sum(dim=1, keepdim=True).clamp_min(1.0)
+        )
+        cost = operator.transpose(discrepancy) @ states.T
+        adjustment = -torch.tanh(strength * cost)
         # Unsupported has no fabricated state marker template.
         return logits + torch.cat((torch.zeros_like(logits[:, :1]), adjustment), dim=1)
 
     def protein_loss(self, inputs: PredictionInputs, prediction: Prediction) -> torch.Tensor:
-        """Masked local-mixture protein discrepancy; RNA-to-protein scale is upstream."""
+        """Confidence-weighted discrepancy on the declared protein regions."""
 
         arrays = self._protein_arrays(inputs)
         if arrays is None or not self.uses_proteins:
             return prediction.expression.sum() * 0.0
-        values, mask, states = arrays
-        mixture = prediction.assignment[:, 1:] @ states
-        if inputs.proteins.correspondence != "same_cell":
-            if inputs.graph is None:
-                raise ValueError("soft/serial/region protein evidence requires a spatial graph")
-            mixture = neighborhood_average(mixture, inputs.graph, include_self=True)
-        return ((mixture - values).square() * mask).sum() / mask.sum().clamp_min(1.0)
+        values, observed, confidence, states = arrays
+        mixture = inputs.proteins.operator.aggregate(prediction.conditional_assignment @ states)
+        return ((mixture - values).square() * confidence).sum() / observed.sum().clamp_min(1.0)
 
     def forward(self, inputs: PredictionInputs) -> Prediction:
         """No target-ST argument is accepted during either training or inference."""
@@ -240,6 +235,7 @@ class PersonalizedModel(nn.Module):
         if config.variant == "he":
             # Neither RNA values, state IDs, nor proteins enter the H&E baseline.
             assignment = x.new_ones((n, 1))
+            conditional = x.new_zeros((n, 0))
             transfer = x.new_zeros((n, len(config.gene_ids)))
             delta = torch.zeros_like(transfer)
             expression = F.softplus(self.baseline_head(decoder_features)) * self.supervised_mask
@@ -270,6 +266,7 @@ class PersonalizedModel(nn.Module):
             logits = torch.cat((self.unsupported_head(image_features), compatible), dim=1)
             logits = self._protein_logits(logits, inputs)
             assignment = logits.softmax(dim=1)
+            conditional = logits[:, 1:].softmax(dim=1)
             context = config.variant.startswith(("generic_", "lr_"))
             messages = x.new_zeros((n, 2 * len(config.lr_interactions)))
             if context:
@@ -280,7 +277,7 @@ class PersonalizedModel(nn.Module):
                     for _ in range(config.refinement_steps):
                         messages = compute_messages(
                             inputs.graph,
-                            assignment[:, 1:],
+                            conditional,
                             reference,
                             config.lr_interactions,
                             mode=mode,
@@ -293,9 +290,10 @@ class PersonalizedModel(nn.Module):
                             (torch.zeros_like(logits[:, :1]), update), dim=1
                         )
                         assignment = logits.softmax(dim=1)
+                        conditional = logits[:, 1:].softmax(dim=1)
                 messages = compute_messages(
                     inputs.graph,
-                    assignment[:, 1:],
+                    conditional,
                     reference,
                     config.lr_interactions,
                     mode=mode,
@@ -303,7 +301,7 @@ class PersonalizedModel(nn.Module):
             ordered_expression = self._tensor(reference.expression)[
                 :, [gene_index[gene] for gene in config.gene_ids]
             ]
-            transfer = assignment[:, 1:] @ ordered_expression
+            transfer = conditional @ ordered_expression
             factors = self.residual_cell(
                 torch.cat((decoder_features, torch.log1p(messages)), dim=1)
             )
@@ -327,6 +325,7 @@ class PersonalizedModel(nn.Module):
             state_ids=state_ids,
             coordinates_um=self._tensor(inputs.coordinates_um),
             assignment=assignment,
+            conditional_assignment=conditional,
             transfer=transfer,
             log_correction=delta,
             expression=expression,
@@ -337,4 +336,8 @@ class PersonalizedModel(nn.Module):
             independently_evaluated_genes=torch.zeros_like(self.supervised_mask),
             specimen_id=inputs.specimen_id,
             patient_id=inputs.patient_id,
+            reference_support_calibrated=False,
+            unsupported_policy=(
+                "he_only" if config.variant == "he" else "conditional_reference_unvalidated"
+            ),
         )

@@ -62,18 +62,77 @@ class RNAReference:
 
 
 @dataclass(frozen=True)
+class ProteinObservationOperator:
+    """Declared protein regions by H&E cells, independent of communication edges.
+
+    Each sparse row is a positive, normalized mean over its represented cells.
+    A same-cell correspondence uses one unit-weight entry per measured cell.
+    """
+
+    cell_ids: tuple[str, ...]
+    observation_ids: tuple[str, ...]
+    rows: np.ndarray
+    columns: np.ndarray
+    weights: np.ndarray
+
+    def __post_init__(self):
+        identifiers(self.cell_ids, "protein operator cell_ids")
+        identifiers(self.observation_ids, "protein operator observation_ids")
+        e = len(self.rows)
+        for name, size in (
+            ("rows", len(self.observation_ids)),
+            ("columns", len(self.cell_ids)),
+        ):
+            values = np.asarray(getattr(self, name))
+            if values.shape != (e,) or values.dtype.kind not in "iu":
+                raise ValueError(f"protein operator {name} must be a one-dimensional integer array")
+            if np.any(values < 0) or np.any(values >= size):
+                raise ValueError(f"protein operator {name} index out of bounds")
+        array(self.weights, (e,), "protein operator weights", nonnegative=True)
+        if np.any(np.asarray(self.weights) <= 0):
+            raise ValueError("protein operator weights must be positive")
+        totals = np.bincount(self.rows, weights=self.weights, minlength=len(self.observation_ids))
+        if not np.allclose(totals, 1.0):
+            raise ValueError("every protein operator row must sum to one")
+        if len(set(zip(self.rows, self.columns))) != e:
+            raise ValueError("protein operator contains duplicate row/column entries")
+
+    def aggregate(self, values: torch.Tensor) -> torch.Tensor:
+        if values.ndim != 2 or values.shape[0] != len(self.cell_ids):
+            raise ValueError("protein operator input must follow its cell axis")
+        rows = torch.as_tensor(self.rows, device=values.device, dtype=torch.long)
+        columns = torch.as_tensor(self.columns, device=values.device, dtype=torch.long)
+        weights = torch.as_tensor(self.weights, device=values.device, dtype=values.dtype)
+        output = values.new_zeros((len(self.observation_ids), values.shape[1]))
+        return output.index_add(0, rows, values[columns] * weights[:, None])
+
+    def transpose(self, values: torch.Tensor) -> torch.Tensor:
+        if values.ndim != 2 or values.shape[0] != len(self.observation_ids):
+            raise ValueError("protein operator transpose input must follow its observation axis")
+        rows = torch.as_tensor(self.rows, device=values.device, dtype=torch.long)
+        columns = torch.as_tensor(self.columns, device=values.device, dtype=torch.long)
+        weights = torch.as_tensor(self.weights, device=values.device, dtype=values.dtype)
+        output = values.new_zeros((len(self.cell_ids), values.shape[1]))
+        return output.index_add(0, columns, values[rows] * weights[:, None])
+
+
+@dataclass(frozen=True)
 class ProteinEvidence:
     marker_ids: tuple[str, ...]
     values: np.ndarray
     observed: np.ndarray
     state_values: np.ndarray
     correspondence: str
+    operator: ProteinObservationOperator
     quality: Optional[np.ndarray] = None
+    coverage: Optional[dict[str, int]] = None
 
     def __post_init__(self):
         identifiers(self.marker_ids, "marker_ids")
         if np.ndim(self.values) != 2 or np.shape(self.values)[1] != len(self.marker_ids):
             raise ValueError("protein values must be locations by markers")
+        if np.shape(self.values)[0] != len(self.operator.observation_ids):
+            raise ValueError("protein values must follow the protein operator observation axis")
         mask = np.asarray(self.observed)
         if mask.dtype != bool or mask.shape != np.shape(self.values):
             raise ValueError("protein observed must be a boolean mask matching values")
@@ -96,10 +155,27 @@ class ProteinEvidence:
             "region",
         }:
             raise ValueError("unknown protein correspondence")
+        if self.correspondence == "same_cell":
+            if len(self.operator.rows) != len(self.operator.observation_ids) or len(
+                set(self.operator.columns)
+            ) != len(self.operator.columns):
+                raise ValueError("same-cell proteins require one unique mapped H&E cell per row")
         if self.quality is not None:
             array(self.quality, mask.shape, "protein quality", nonnegative=True)
             if np.any(self.quality > 1):
                 raise ValueError("protein quality must be in [0, 1]")
+        if self.coverage is not None and (
+            not isinstance(self.coverage, dict)
+            or any(
+                not isinstance(key, str)
+                or not key
+                or isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                for key, value in self.coverage.items()
+            )
+        ):
+            raise ValueError("protein coverage must contain named nonnegative integer counts")
 
 
 @dataclass(frozen=True)
@@ -148,8 +224,8 @@ class PredictionInputs:
             raise ValueError("image_features must have a nonempty feature axis")
         array(self.image_features, (n, np.shape(self.image_features)[1]), "image_features")
         if self.proteins is not None:
-            if self.proteins.values.shape[0] != n:
-                raise ValueError("protein evidence must be aligned to H&E locations")
+            if self.proteins.operator.cell_ids != self.cell_ids:
+                raise ValueError("protein operator must use the ordered H&E cell IDs")
             if self.proteins.state_values.shape[0] != len(self.reference.state_ids):
                 raise ValueError("protein state evidence must be aligned to reference states")
         if self.graph is not None and self.graph.n_cells != n:
@@ -195,6 +271,7 @@ class Prediction:
     state_ids: tuple[str, ...]
     coordinates_um: torch.Tensor
     assignment: torch.Tensor
+    conditional_assignment: torch.Tensor
     transfer: torch.Tensor
     log_correction: torch.Tensor
     expression: torch.Tensor
@@ -206,6 +283,8 @@ class Prediction:
     expression_scale: str = "relative"
     specimen_id: str = ""
     patient_id: str = ""
+    reference_support_calibrated: bool = False
+    unsupported_policy: str = "conditional_reference_unvalidated"
 
     @property
     def expression_adjustment(self) -> torch.Tensor:
