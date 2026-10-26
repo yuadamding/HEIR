@@ -149,6 +149,11 @@ pilots are retained; same-biopsy pilots do not measure generalization. The earli
 proposal and panel extensions remain separate, unexecuted protocols. New runs require new
 output paths and corresponding protocol bindings; existing results are never overwritten.
 
+The [completed seed-0 comparison](docs/personalized_development.md#version-09-completed-backbone-comparison)
+retains all 75 cohort fits. Protein inputs affect predictions, but their average correlation
+increment is small under both backbones; matched RNA does not improve mean correlation over
+the generic-reference control. These results do not establish three-modality personalization.
+
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:
 

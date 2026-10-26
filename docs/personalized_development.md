@@ -1148,3 +1148,79 @@ No independently qualified 200-pixel geometry was recovered. The requested joint
 therefore uses historical 100-pixel regions as exploratory development. A later 200-pixel run
 requires explicit new membership, raw RNA/protein aggregation, and new image features or a
 declared pooling representation. Prediction grids must remain independent of ST support masks.
+
+## Version 0.9 completed backbone comparison
+
+All 75 seed-0 cohort fits completed with 100 epochs each: 40 for H-optimus-1, including the
+five shared RP fits, and 35 for UNI2-h. The five patient folds test each of the 13 patients once.
+The six relevant H-optimus-1 pilots were reused from the preserved 14-fit pilot; six UNI2-h
+pilots completed the requested comparison on 313-932 and 514-6760. Neither pilot estimates
+generalization. All large inputs, weights, bundles and outputs remain outside the repository at
+`/storage/HE_GPT/HEIR-cohort-runs/v090-joint`.
+
+Both local checkpoints were verified and remained frozen. UNI2-h features cover the same
+6,580 historical regions as the reused H-optimus-1 cache. Geometry, RNA and protein payload
+hashes match between preparations, while encoder and feature identities differ as required.
+Repeated UNI2-h extraction and independently instantiated models on identical normalized
+tensors agree exactly. The historical tensor resize and official PIL resize are not identical;
+the numerical comparison and initial failed stricter parity attempt are preserved.
+
+The table uses equal-patient means of equal-replicate median gene-wise Spearman correlations.
+All paired arms use identical target rows and eligibility. Target-constant CD8A in one 853
+replicate is excluded from correlation in every arm; the fixed nine-gene normalization and
+MSE panel remain unchanged. This is not the v0.8 strict-all-nine measurement headline.
+
+| Arm | H-optimus-1 rho | UNI2-h rho | H-optimus-1 MSE | UNI2-h MSE |
+|---|---:|---:|---:|---:|
+| H | 0.053601 | 0.059412 | 18.544405 | 18.226328 |
+| HR | 0.080332 | 0.071085 | 13.916262 | 13.554572 |
+| HP | 0.044856 | 0.062142 | 15.810092 | 14.842735 |
+| RP, shared | 0.035178 | 0.035178 | 11.963978 | 11.963978 |
+| HRP | 0.085328 | 0.071634 | 12.569325 | 13.430993 |
+| HRP generic reference | 0.086484 | 0.083599 | 14.172011 | 13.990930 |
+| HRP constant reference | 0.020699 | 0.056689 | 12.628625 | 12.451921 |
+| Separately trained transfer only | 0.096016 | 0.070373 | 12.745710 | 13.434523 |
+
+The retained v0.6 H/HR/HRP reference scores are respectively rho 0.055075/0.073911/0.074176
+and MSE 15.651509/12.529798/12.545161. All 4,625 evaluation rows across 13 patients match
+exactly in counts, masks, geometry, panels and scoring; all 39 legacy scores reproduce on
+the v0.9 targets. These historical references are not matched for capacity, objective,
+optimization or checkpoint selection and cannot isolate the effect of the new architecture.
+
+Adding proteins to HR increases average rho by 0.004995 with H-optimus-1 and 0.000548 with
+UNI2-h; seven of 13 patients improve in each. H-optimus-1 total MSE improves by 1.346937,
+but centered MSE worsens by 0.276943, so its error reduction comes from lower level bias.
+UNI2-h total and centered MSE improve by 0.123578 and 0.128973. The CD8A/MKI67 group rho
+declines by 0.006669 and 0.007998, while the other-seven group improves by 0.009794 and
+0.009147. These small differences do not establish within-type reconstruction.
+
+Matched RNA does not improve mean rho over generic RNA under either backbone: differences
+are -0.001157 and -0.011965. H-optimus-1 has nine positive patient contrasts but a negative
+mean, indicating heterogeneity. HRP improves rho over shared RP while worsening total MSE.
+H-optimus-1 has higher HRP rho, while UNI2-h improves H/HP rho and HRP centered error;
+there is no uniform backbone winner across arms and endpoints.
+
+Fixed-model protein permutation changes assignments and lowers rho by 0.003134 and
+0.004404; making proteins unavailable lowers it by 0.003849 and 0.007137. Image permutation
+lowers rho by 0.085919 and 0.060958. Protein pathways are active, but that alone does not
+establish useful protein localization. Validation selects correction-disabled warmup checkpoints
+for three of five H-optimus-1 HRP fits and four of five UNI2-h HRP fits. Post-fit correction
+removal slightly improves mean rho; it remains distinct from the separately trained control.
+
+The studies bind source commit `c6c7e3260935b452ff23ca90b55f7743a058b752` and matrix SHA-256
+`6d9230e327278d3dfdc132862deb0e5d76674bd1a20b17f632c6b1f231d8680a`.
+Engineering validation passed 437 CPU tests, lint/format, lock verification and package build.
+Artifact audits cover all 75 bundles and 416 prediction exports. UNI2-h passes 51,365 checks.
+The initial H-optimus-1 audit flags eight of 52,246 checks at its stricter 3e-7 simplex tolerance;
+the maximum float32 sum error is 3.576e-7, within the existing serialization contract. Both that
+failed audit and a supplemental numerical review are retained. Saved predictions, scores,
+training-only transforms, folds and checkpoint selections reproduce without refitting.
+
+Complete patient/replicate tables, error decomposition, interventions, marker coverage and
+assignment diagnostics are in `v090-joint/backbone-comparison`; `interpretation.md` gives the
+full analysis and evidence links. Joint inference is operational; robust three-modality benefit,
+calibrated cell fractions and independently validated state placement remain unestablished.
+Physical calibration and file-level biological correspondence remain unresolved.
+The predeclared deferral of further seeds, panel fits and image/target-resolution extensions
+stands. Retain this comparison and resolve measurement correspondence before making stronger
+localization claims or advancing communication refinement.
