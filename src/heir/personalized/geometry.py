@@ -1,0 +1,250 @@
+"""Physical-coordinate transforms and local protein evidence.
+
+Serial sections are never assigned by nearest-cell identity. Supplied affine
+registration is reused; registration estimation is deliberately outside this adapter.
+"""
+
+from __future__ import annotations
+
+import html
+from pathlib import Path
+
+import numpy as np
+
+
+def coordinates_um(coordinates, *, units: str, micrometres_per_pixel=None):
+    values = np.asarray(coordinates, dtype=float)
+    if values.ndim != 2 or values.shape[1] != 2 or not np.isfinite(values).all():
+        raise ValueError("coordinates must be finite N-by-2 values")
+    if units == "um":
+        return values
+    if units != "pixel":
+        raise ValueError("coordinate units must be um or pixel")
+    scale = np.asarray(micrometres_per_pixel, dtype=float)
+    if scale.size not in (1, 2) or not np.isfinite(scale).all() or (scale <= 0).any():
+        raise ValueError("pixel coordinates require positive physical pixel scales")
+    return values * scale
+
+
+def prepare_geometry(coordinates, registration: dict, *, source_frame="protein"):
+    """Map source physical coordinates into the H&E micrometre frame.
+
+    Matrix convention is column-vector source-to-target: ``target = M @
+    [x_um, y_um, 1]``. Pixel conversion precedes the physical affine transform.
+    """
+    if registration.get("source_frame") != source_frame:
+        raise ValueError("registration source_frame differs from requested coordinates")
+    if registration.get("target_frame") != "he" or registration.get("target_units") != "um":
+        raise ValueError("registration must target the H&E micrometre frame")
+    if registration.get("direction") != "source_to_target":
+        raise ValueError("registration direction must explicitly be source_to_target")
+    matrix = np.asarray(registration.get("affine"), dtype=float)
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        raise ValueError("registration affine must be a finite 3-by-3 matrix")
+    if not np.allclose(matrix[2], [0, 0, 1]) or abs(np.linalg.det(matrix[:2, :2])) < 1e-12:
+        raise ValueError("registration must be an invertible affine transform")
+    uncertainty = registration.get("uncertainty_um")
+    if uncertainty is None or not np.isfinite(uncertainty) or uncertainty < 0:
+        raise ValueError("registration requires nonnegative uncertainty_um")
+    physical = coordinates_um(
+        coordinates,
+        units=registration.get("source_units"),
+        micrometres_per_pixel=registration.get("micrometres_per_pixel"),
+    )
+    homogeneous = np.column_stack((physical, np.ones(len(physical))))
+    return (homogeneous @ matrix.T)[:, :2]
+
+
+def region_bins(coordinates, *, bin_size_um=100.0, origin_um=(0.0, 0.0)):
+    """Return reproducible global bin IDs, never an inferred cell correspondence."""
+    coordinates = coordinates_um(coordinates, units="um")
+    if not np.isfinite(bin_size_um) or bin_size_um <= 0:
+        raise ValueError("bin_size_um must be positive")
+    origin = np.asarray(origin_um, dtype=float)
+    if origin.shape != (2,) or not np.isfinite(origin).all():
+        raise ValueError("bin origin must be a finite physical coordinate")
+    indices = np.floor((coordinates - origin) / bin_size_um).astype(np.int64)
+    return tuple(f"bin:{i}:{j}" for i, j in indices)
+
+
+def tissue_mask_edge_filter(coordinates, mask, *, origin_um, pixel_size_um):
+    """Return an edge predicate that excludes segments crossing a tissue-mask gap.
+
+    The Boolean raster is indexed ``mask[y, x]``. Every interval between pixel
+    boundary crossings is checked, including endpoints; a coarse sampling stride
+    cannot jump over a thin gap. Outside-mask space is unsupported.
+    """
+    coordinates = coordinates_um(coordinates, units="um")
+    mask = np.asarray(mask)
+    origin, scale = np.asarray(origin_um, dtype=float), np.asarray(pixel_size_um, dtype=float)
+    if mask.ndim != 2 or min(mask.shape) == 0 or mask.dtype != bool:
+        raise ValueError("tissue mask must be a nonempty two-dimensional Boolean raster")
+    if origin.shape != (2,) or scale.shape != (2,):
+        raise ValueError("mask origin_um and pixel_size_um require x/y pairs")
+    if not np.isfinite(origin).all() or not np.isfinite(scale).all() or (scale <= 0).any():
+        raise ValueError("mask coordinates require finite origin and positive physical pixel size")
+    pixels = (coordinates - origin) / scale
+    cache = {}
+
+    def allowed(sender, receiver):
+        key = tuple(sorted((int(sender), int(receiver))))
+        if key in cache:
+            return cache[key]
+        start, end = pixels[sender], pixels[receiver]
+        delta = end - start
+        crossings = [0.0, 1.0]
+        for axis in range(2):
+            if delta[axis] != 0:
+                lower, upper = sorted((start[axis], end[axis]))
+                boundaries = np.arange(np.floor(lower) + 1, np.ceil(upper))
+                crossings.extend(((boundaries - start[axis]) / delta[axis]).tolist())
+        crossings = np.unique(crossings)
+        locations = np.concatenate(([0.0, 1.0], (crossings[:-1] + crossings[1:]) / 2))
+        visited = np.floor(start + locations[:, None] * delta).astype(np.int64)
+        valid = (
+            (visited[:, 0] >= 0)
+            & (visited[:, 0] < mask.shape[1])
+            & (visited[:, 1] >= 0)
+            & (visited[:, 1] < mask.shape[0])
+        )
+        result = bool(valid.all() and mask[visited[:, 1], visited[:, 0]].all())
+        cache[key] = result
+        return result
+
+    return allowed
+
+
+def local_protein_evidence(
+    he_coordinates_um,
+    protein_coordinates_um,
+    values,
+    observed,
+    *,
+    radius_um=100.0,
+    quality=None,
+    he_component_ids=None,
+    protein_component_ids=None,
+    edge_allowed=None,
+):
+    """Quality-weighted local means with measured-versus-missing masks.
+
+    Spatial hashing bounds candidate lookup; no dense H&E-by-protein distance
+    matrix is constructed. Components exclude evidence across tissue islands.
+    """
+    he = coordinates_um(he_coordinates_um, units="um")
+    protein = coordinates_um(protein_coordinates_um, units="um")
+    values = np.asarray(values, dtype=float)
+    observed = np.asarray(observed)
+    if values.ndim != 2 or values.shape[0] != len(protein) or observed.shape != values.shape:
+        raise ValueError("protein coordinate, value, and mask axes differ")
+    if observed.dtype != bool:
+        raise ValueError("protein observed mask must be boolean")
+    if not np.isfinite(radius_um) or radius_um <= 0:
+        raise ValueError("protein radius_um must be positive")
+    if not np.isfinite(values[observed]).all() or (values[observed] < 0).any():
+        raise ValueError("observed protein intensities must be finite and nonnegative")
+    if quality is None:
+        quality = np.ones(values.shape)
+    quality = np.asarray(quality, dtype=float)
+    if quality.shape != values.shape or not np.isfinite(quality[observed]).all():
+        raise ValueError("protein quality must be finite at observed measurements")
+    if ((quality[observed] < 0) | (quality[observed] > 1)).any():
+        raise ValueError("protein quality must lie in [0, 1]")
+    if (he_component_ids is None) != (protein_component_ids is None):
+        raise ValueError("both H&E and protein tissue component IDs are required together")
+    if he_component_ids is None:
+        he_component_ids, protein_component_ids = ["all"] * len(he), ["all"] * len(protein)
+    if len(he_component_ids) != len(he) or len(protein_component_ids) != len(protein):
+        raise ValueError("tissue component axes differ")
+    buckets = {}
+    for i, (point, component) in enumerate(zip(protein, protein_component_ids)):
+        xy = np.floor(point / radius_um).astype(int)
+        buckets.setdefault((str(component), *xy), []).append(i)
+    result = np.zeros((len(he), values.shape[1]), dtype=np.float32)
+    mask = np.zeros(result.shape, dtype=bool)
+    confidence = np.zeros(result.shape, dtype=np.float32)
+    clean = np.where(observed, values, 0)
+    quality = np.where(observed, quality, 0)
+    for i, (point, component) in enumerate(zip(he, he_component_ids)):
+        xy = np.floor(point / radius_um).astype(int)
+        candidates = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                candidates.extend(buckets.get((str(component), xy[0] + dx, xy[1] + dy), ()))
+        if not candidates:
+            continue
+        candidates = np.asarray(candidates, dtype=int)
+        distance = np.linalg.norm(protein[candidates] - point, axis=1)
+        selected = candidates[distance <= radius_um]
+        if edge_allowed is not None:
+            selected = np.asarray([j for j in selected if edge_allowed(i, j)], dtype=int)
+        weights = quality[selected]
+        denominator = weights.sum(0)
+        present = denominator > 0
+        mask[i] = present
+        result[i, present] = (clean[selected] * weights).sum(0)[present] / denominator[present]
+        measured_count = observed[selected].sum(0)
+        confidence[i, present] = denominator[present] / measured_count[present]
+    return result, mask, confidence
+
+
+def write_overlay(
+    path,
+    he_coordinates_um,
+    *,
+    protein_coordinates_um=None,
+    spatial_coordinates_um=None,
+    bin_size_um=100.0,
+    he_image_href=None,
+    image_bounds_um=None,
+    title="H&E nuclei, protein and spatial RNA coverage",
+):
+    """Write an inspectable SVG in physical units, with an optional H&E raster.
+
+    Spatial RNA coordinates are visualization-only arguments; prediction never
+    invokes this function with targets. Without a raster this is a geometry
+    plot, not evidence that image registration has been visually qualified.
+    """
+    he = coordinates_um(he_coordinates_um, units="um")
+    layers = [(he, "#333333", "H&E nuclei")]
+    for values, color, label in (
+        (protein_coordinates_um, "#1976d2", "Protein measurements"),
+        (spatial_coordinates_um, "#d84315", "Spatial RNA observations"),
+    ):
+        if values is not None:
+            layers.append((coordinates_um(values, units="um"), color, label))
+    nonempty = [values for values, _, _ in layers if len(values)]
+    if not nonempty:
+        raise ValueError("overlay requires coordinates")
+    if not np.isfinite(bin_size_um) or bin_size_um <= 0:
+        raise ValueError("bin_size_um must be positive")
+    points = np.concatenate(nonempty)
+    lower = np.floor(points.min(0) / bin_size_um) * bin_size_um
+    upper = (np.floor(points.max(0) / bin_size_um) + 1) * bin_size_um
+    width, height = upper - lower
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{lower[0]} {lower[1]} '
+        f'{width} {height}" width="1000" role="img">',
+        f"<title>{html.escape(title)}</title>",
+        f"<desc>{html.escape(', '.join(label for _, _, label in layers))}; "
+        f"grid {bin_size_um:g} micrometres. Registration requires visual review.</desc>",
+        f'<rect x="{lower[0]}" y="{lower[1]}" width="{width}" height="{height}" fill="white"/>',
+    ]
+    if he_image_href is not None:
+        bounds = np.asarray(image_bounds_um, dtype=float)
+        if bounds.shape != (4,) or not np.isfinite(bounds).all() or (bounds[2:] <= 0).any():
+            raise ValueError("H&E raster requires physical x, y, width, height bounds")
+        parts.append(
+            f'<image href="{html.escape(str(he_image_href), quote=True)}" x="{bounds[0]}" '
+            f'y="{bounds[1]}" width="{bounds[2]}" height="{bounds[3]}" opacity="0.6"/>'
+        )
+    for x in np.arange(lower[0], upper[0] + bin_size_um / 2, bin_size_um):
+        parts.append(f'<path d="M {x} {lower[1]} V {upper[1]}" stroke="#bbb" stroke-width="0.5"/>')
+    for y in np.arange(lower[1], upper[1] + bin_size_um / 2, bin_size_um):
+        parts.append(f'<path d="M {lower[0]} {y} H {upper[0]}" stroke="#bbb" stroke-width="0.5"/>')
+    for values, color, label in layers:
+        parts.append(f'<g fill="{color}" opacity="0.65"><title>{label}</title>')
+        parts.extend(f'<circle cx="{x}" cy="{y}" r="2"/>' for x, y in values)
+        parts.append("</g>")
+    parts.append("</svg>")
+    Path(path).write_text("\n".join(parts) + "\n", encoding="utf-8")

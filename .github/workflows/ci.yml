@@ -13,60 +13,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
-      - run: uv sync --frozen --extra dev --python 3.11
+      - run: uv sync --frozen --extra dev --extra htapp --extra encoders --python 3.11
       - run: uv run ruff format --check .
       - run: uv run ruff check .
-
-  core:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --extra dev --python ${{ matrix.python-version }}
-      - name: Run core and statistical tests
-        run: >-
-          uv run pytest -q
-          tests/test_experiment_manifest.py
-          tests/test_morphology_ridge.py
-          tests/test_reference_specificity.py
-
-  hescape:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --extra dev --extra hescape --python 3.11
-      - name: Run HESCAPE synthetic source tests
-        run: uv run pytest -q tests/test_hescape_regional_source.py
-
-  hest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: true
-      - run: uv sync --frozen --extra dev --extra hest --python 3.11
-      - name: Run HEST synthetic source and end-to-end tests
-        run: uv run pytest -q tests/test_hest_xenium_cell_source.py
+      - run: uv run pytest -q

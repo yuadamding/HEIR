@@ -1,0 +1,70 @@
+{
+  "schema": "heir.personalized.comparison-plan.v1",
+  "scientifically_qualified": false,
+  "variants": {
+    "he": {
+      "variant": "he",
+      "assignment_refinement": false,
+      "requires_fitted_protein_baseline": false
+    },
+    "he_rna": {
+      "variant": "he_rna",
+      "assignment_refinement": false,
+      "requires_fitted_protein_baseline": false
+    },
+    "he_rna_protein": {
+      "variant": "he_rna_protein",
+      "assignment_refinement": false,
+      "requires_fitted_protein_baseline": false
+    },
+    "generic_fixed": {
+      "variant": "generic_fixed",
+      "assignment_refinement": false,
+      "requires_fitted_protein_baseline": true
+    },
+    "lr_fixed": {
+      "variant": "lr_fixed",
+      "assignment_refinement": false,
+      "requires_fitted_protein_baseline": true
+    },
+    "generic_refined": {
+      "variant": "generic_refined",
+      "assignment_refinement": true,
+      "requires_fitted_protein_baseline": true
+    },
+    "lr_refined": {
+      "variant": "lr_refined",
+      "assignment_refinement": true,
+      "requires_fitted_protein_baseline": true
+    }
+  },
+  "contrasts": [
+    [
+      "he_rna_protein",
+      "he_rna"
+    ],
+    [
+      "lr_fixed",
+      "generic_fixed"
+    ],
+    [
+      "lr_refined",
+      "generic_refined"
+    ],
+    [
+      "lr_refined",
+      "lr_fixed"
+    ]
+  ],
+  "shared_requirements": [
+    "patient folds",
+    "evaluation genes and regions",
+    "image feature cache",
+    "matched RNA inputs",
+    "protein masks and calibration",
+    "spatial edges and receptive field",
+    "molecular features and LR resource",
+    "optimization budget"
+  ],
+  "transfer_only_diagnostic": "heir predict --transfer-only"
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "patient_id": "REPLACE_PATIENT_ID",
+  "specimen_id": "REPLACE_SPECIMEN_ID",
+  "matching": {
+    "query": {
+      "patient_id": "REPLACE_QUERY_PATIENT_ID",
+      "sampling_episode_id": "REPLACE_QUERY_SAMPLING_EPISODE_ID",
+      "lesion_id": "REPLACE_QUERY_LESION_ID",
+      "represented_region_id": "REPLACE_QUERY_REPRESENTED_REGION_ID",
+      "core_id": "REPLACE_QUERY_CORE_ID",
+      "section_id": "REPLACE_QUERY_SECTION_ID",
+      "assay": "H&E"
+    },
+    "reference": {
+      "patient_id": "REPLACE_REFERENCE_PATIENT_ID",
+      "sampling_episode_id": "REPLACE_REFERENCE_SAMPLING_EPISODE_ID",
+      "lesion_id": "REPLACE_REFERENCE_LESION_ID",
+      "represented_region_id": "REPLACE_REFERENCE_REPRESENTED_REGION_ID",
+      "core_id": "REPLACE_REFERENCE_CORE_ID",
+      "section_id": "REPLACE_REFERENCE_SECTION_ID",
+      "assay": "snRNA-seq"
+    },
+    "reference_independent_of_spatial_targets": true,
+    "evidence": "REPLACE_WITH_METADATA_EVIDENCE"
+  },
+  "paths": {
+    "cells": "cells.parquet",
+    "image_features": "image_features.npz",
+    "rna": "rna.h5ad",
+    "proteins": "proteins.h5ad",
+    "registration": "registration.json",
+    "spatial_targets": "spatial_targets.h5ad",
+    "observation": "observation.npz"
+  },
+  "feature_provenance": {
+    "encoder_name": "REPLACE_WITH_FROZEN_ENCODER",
+    "checkpoint_sha256": "REPLACE_WITH_CHECKPOINT_SHA256",
+    "frozen": true,
+    "contains_spatial_rna_derived_features": false,
+    "crop_scales_um": [
+      32,
+      112
+    ]
+  },
+  "reference": {
+    "counts_source": "obsm",
+    "broad_type_column": "broad_type",
+    "annotation_provenance": "matched_dissociated_rna",
+    "embedding_gene_ids": [
+      "GENE_A",
+      "GENE_B",
+      "GENE_C"
+    ],
+    "max_states": 4,
+    "library_size": 10000
+  },
+  "proteins": {
+    "radius_um": 100,
+    "marker_table": [
+      {
+        "marker_id": "MARKER_A",
+        "gene_id": "GENE_A",
+        "interpretation": "identity",
+        "intensity_half_saturation": 5,
+        "rna_half_saturation": 3000
+      },
+      {
+        "marker_id": "MARKER_B",
+        "gene_id": "GENE_B",
+        "interpretation": "total_receptor",
+        "intensity_half_saturation": 5,
+        "rna_half_saturation": 3000
+      }
+    ]
+  },
+  "graph": {
+    "radius_um": 120,
+    "max_neighbors": 8
+  },
+  "targets": {
+    "coordinate_units": "um",
+    "expression_scale": "nonnegative_linear"
+  }
+}

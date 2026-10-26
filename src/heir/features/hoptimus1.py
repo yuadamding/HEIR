@@ -17,7 +17,7 @@ class HOptimus1Encoder(TorchPatchEncoder):
             import timm
             import torch
         except ImportError as error:  # pragma: no cover
-            raise RuntimeError("install HEIR with the hest optional dependencies") from error
+            raise RuntimeError("install HEIR with the encoders optional dependencies") from error
         if not manifest.available:
             raise ValueError("H-optimus-1 is inaccessible: %s" % manifest.status_reason)
         if manifest.repository != HOPTIMUS1_REPOSITORY or manifest.implementation != "timm_local":

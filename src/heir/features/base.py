@@ -293,8 +293,9 @@ class TorchPatchEncoder:
             )
         tensor = (tensor - self._mean) / self._std
         use_amp = self._device.type == "cuda"
-        with torch.inference_mode(), torch.autocast(
-            device_type=self._device.type, dtype=torch.float16, enabled=use_amp
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type=self._device.type, dtype=torch.float16, enabled=use_amp),
         ):
             output = self._pool(self._model(tensor))
         if output.ndim != 2 or output.shape[1] != self.feature_width:

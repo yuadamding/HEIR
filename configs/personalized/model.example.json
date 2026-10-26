@@ -1,0 +1,21 @@
+{
+  "variant": "he_rna_protein",
+  "feature_dim": 4,
+  "state_dim": 3,
+  "state_gene_ids": [
+    "GENE_A",
+    "GENE_B",
+    "GENE_C"
+  ],
+  "gene_ids": [
+    "GENE_A",
+    "GENE_B",
+    "GENE_C"
+  ],
+  "supervised_gene_ids": [
+    "GENE_A",
+    "GENE_B"
+  ],
+  "hidden_dim": 8,
+  "residual_rank": 2
+}

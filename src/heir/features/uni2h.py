@@ -18,7 +18,7 @@ class UNI2HEncoder(TorchPatchEncoder):
             import timm
             import torch
         except ImportError as error:  # pragma: no cover
-            raise RuntimeError("install HEIR with the hest optional dependencies") from error
+            raise RuntimeError("install HEIR with the encoders optional dependencies") from error
         expected = {
             "availability": "available",
             "implementation": "uni2h_timm",

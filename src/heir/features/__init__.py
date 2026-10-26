@@ -22,6 +22,7 @@ def create_frozen_encoder(
         return H0MiniEncoder(model_dir, manifest, device)
     raise ValueError("encoder manifest does not select a supported local adapter")
 
+
 __all__ = [
     "EncoderManifest",
     "FrozenPatchEncoder",
