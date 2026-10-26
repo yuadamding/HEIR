@@ -258,8 +258,8 @@ def test_joint_learns_complementary_image_and_protein_signal_on_unseen_regions()
     assert errors["HRP"] < 0.1 * min(errors["HR"], errors["RP"]), errors
 
 
-def test_matched_rna_resolves_specimens_ambiguous_from_image_and_protein_alone():
-    """Independent molecular output profiles vary despite identical regional H/P.
+def test_three_modalities_resolve_complementary_ambiguities_on_one_common_fixture():
+    """Every two-modality arm lacks information on the same held-out specimens.
 
     Descriptor genes identify two common states; a specimen's RNA expression
     profile changes one outcome independently of those descriptors. Held-out
@@ -298,15 +298,15 @@ def test_matched_rna_resolves_specimens_ambiguous_from_image_and_protein_alone()
         specimen(f"test{i}", f, np.array([-0.8, -0.1, 0.1, 0.8])) for i, f in enumerate((0.5, 2.0))
     ]
     errors = {}
-    for modalities in ("HRP", "HP"):
+    for modalities in ("HRP", "HR", "HP", "RP"):
         config = JointModelConfig(
-            1,
+            1 if "H" in modalities else 0,
             2 if "R" in modalities else 0,
             ("g0", "g1"),
             ("g0", "g1"),
             ("g0", "g1"),
             state_gene_ids=("d0", "d1") if "R" in modalities else (),
-            marker_ids=("m",),
+            marker_ids=("m",) if "P" in modalities else (),
             modalities=tuple(modalities),
             image_encoder_manifest_sha256=FIXTURE_BACKBONE if "H" in modalities else None,
             hidden_dim=8,
@@ -316,7 +316,11 @@ def test_matched_rna_resolves_specimens_ambiguous_from_image_and_protein_alone()
             return replace(
                 sample,
                 inputs=replace(
-                    sample.inputs, reference=sample.inputs.reference if "R" in modalities else None
+                    sample.inputs,
+                    image_features=sample.inputs.image_features if "H" in modalities else None,
+                    image_encoder_manifest_sha256=FIXTURE_BACKBONE if "H" in modalities else None,
+                    reference=sample.inputs.reference if "R" in modalities else None,
+                    protein_features=sample.inputs.protein_features if "P" in modalities else None,
                 ),
             )
 
@@ -340,7 +344,8 @@ def test_matched_rna_resolves_specimens_ambiguous_from_image_and_protein_alone()
                 normalization_gene_ids=config.normalization_gene_ids,
             )
             errors[modalities].append(float((p - y).square().mean()))
-    assert np.mean(errors["HRP"]) < 0.1 * np.mean(errors["HP"]), errors
+    for comparator in ("HR", "HP", "RP"):
+        assert np.mean(errors["HRP"]) < 0.1 * np.mean(errors[comparator]), errors
 
 
 def test_validation_features_do_not_fit_training_transforms_or_updates(monkeypatch):

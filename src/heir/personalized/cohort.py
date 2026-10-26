@@ -353,7 +353,11 @@ def prepare_joint_inputs(
     H and HP do not read independent RNA. P describes measured antibody features
     and does not need an RNA template. H requires an existing frozen image cache.
     """
-    from .protein_features import aggregate_protein_features, qualify_marker_panel
+    from .protein_features import (
+        aggregate_protein_features,
+        make_protein_correspondence,
+        qualify_marker_panel,
+    )
 
     modalities = tuple(modalities)
     if (
@@ -475,6 +479,20 @@ def prepare_joint_inputs(
                 "measurement": "retained_raw_cell_intensities_obsm_counts",
                 "panel": qualification,
             }
+            correspondence = make_protein_correspondence(
+                grid,
+                original_ids,
+                xy,
+                replicates,
+                {
+                    "patient_id": entry["patient_id"],
+                    "specimen_id": entry["specimen_id"],
+                    "working_path": sources["protein"]["working_path"],
+                    "sha256": sources["protein"]["sha256"],
+                    "he_working_path": sources["he"]["working_path"],
+                    "he_sha256": sources["he"]["sha256"],
+                },
+            )
             proteins = aggregate_protein_features(
                 grid,
                 values,
@@ -483,6 +501,7 @@ def prepare_joint_inputs(
                 tuple(record["marker_id"] for record in qualified),
                 cofactor=protein_cofactor,
                 metadata=protein_metadata,
+                correspondence=correspondence,
             )
         protein_metadata = proteins.metadata
         consumed.append("protein")

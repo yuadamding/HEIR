@@ -1224,3 +1224,75 @@ Physical calibration and file-level biological correspondence remain unresolved.
 The predeclared deferral of further seeds, panel fits and image/target-resolution extensions
 stands. Retain this comparison and resolve measurement correspondence before making stronger
 localization claims or advancing communication refinement.
+
+## Version 0.10 HEIR-Joint controls
+
+HEIR-Joint uses morphology and measured spatial proteins to query the specimen's matched
+RNA reference. The current dot-product mapper already implements hierarchical attention:
+its learned query projections and shared molecular encoder form the bilinear compatibility
+function. Separate key projections would change its parameterization, not introduce a missing
+reference-attention mechanism. Legacy models, v0.9 bundles and completed studies retain
+their original meaning.
+
+```mermaid
+flowchart LR
+    H[H&E crops] --> F[Frozen pathology encoder]
+    F --> Q[Trainable spatial query]
+    P[Measured proteins] --> AP[Protein-to-region correspondence]
+    AP --> Q
+    R[Matched RNA] --> S[Types, states and measured profiles]
+    Q --> A[Soft type and within-type assignment]
+    S --> A
+    A --> T[Reference transfer]
+    S --> T
+    T --> D[Bounded multimodal correction]
+    Q --> D
+    S --> D
+    D --> X[Relative regional expression]
+```
+
+Target ST remains outside this prediction graph. Its separate observation operator aggregates
+predictions before fixed-panel normalization for training and evaluation. Neither ST expression
+nor ST support selects prediction regions, protein registration or image crops.
+
+New protein preparations retain an explicit, hash-bound source-cell-to-region correspondence
+alongside the existing summaries. It records source IDs, registered coordinates, replicate labels,
+region membership and geometry/source identity, including excluded cells. This is a record of
+the executed regional assignment; it does not qualify same-cell or same-section correspondence.
+The numerical protein summary payload and older preparation loading remain compatible.
+
+Diagnostic sidecars expose ordered broad-type weights, within-type weights and complete state
+mixtures, with type/state/region axes. Within-type probabilities are computed directly, avoiding
+division by a possibly underflowed type weight. RNA support counts and output-gene variances
+are descriptive reference statistics. Protein availability and valid-cell counts are coverage
+statistics. None is a calibrated probability of biological correctness; conditional reference
+support and unresolved registration retain their existing uncalibrated labels.
+
+New experiments explicitly set `correction_initialization: zero`. Older configurations retain
+`legacy_random`, preserving their initial-condition contract and saved predictions. The decoder
+remains rank 2, bounded at 0.5, and disabled for unsupervised genes. Its final output starts at
+zero while retaining a trainable pathway after the 30-epoch transfer warmup.
+
+The MLP comparator replaces only the two query/reference compatibility scorers. It preserves
+the type/state hierarchy, measured reference transfer, fusion, decoder and variable reference
+axes. With latent width 32, its assignment scorers have 2,080 parameters versus attention's
+2,048; the protocol permits at most 2% assignment and 1% full-model parameter difference.
+Shared modules start with identical weights under the same seed. This compares two shallow
+reference-conditioned mappers, not an ensemble of independent modality predictors.
+
+The availability/coverage-only control retains marker masks and valid-cell counts while
+zeroing both intensity-summary channels throughout the predictor. Its name does not imply
+that coverage is biologically neutral. The original protein-vector permutation remains intact;
+a separate intensity-only permutation holds masks and counts fixed. Common-coverage scores
+use the original input support for every arm and intervention: at least one qualified marker
+must be observed in every positive-weight prediction region contributing to an ST observation.
+All-region scores remain separate, and the coverage rule never changes prediction inputs.
+
+The incremental protocol fixes three arms (`HRP`, `HRP_mlp`, `HRP_coverage_only`) for each
+backbone over the existing five patient folds, seed 0: 30 cohort fits. All use zero initialization,
+100 epochs, the same loss weights and validation selection, and no train-plus-validation refit.
+The complete v0.9 modality comparison remains a historical reference; its random decoder
+initialization is not silently treated as a matched baseline for the new MLP experiment.
+Further seeds, panels, image context, target resolution and communication fits remain deferred.
+The frozen protocol is `configs/personalized/joint_controls_study.json`; new outputs belong in
+`/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls`.

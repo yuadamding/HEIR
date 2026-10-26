@@ -1,0 +1,35 @@
+{
+  "schema": "heir.joint_patient_study.v1",
+  "extension_label": "joint_controls_seed0_uni2h",
+  "backbone_id": "uni2h",
+  "matrix_protocol": "joint_controls_study.json",
+  "matrix_protocol_sha256": "d383e8acb9e6586f5d457e0dc5185a1e3df49ad6f7fc26b104a69839a9680e3e",
+  "model_config_sha256": "1351a157bed3fe5580977b82a31c8a2c5b24206dbe2f3b7fd3a57df3b099fe04",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_arms": [
+    "HRP"
+  ],
+  "control_arms": [
+    "HRP_mlp",
+    "HRP_coverage_only"
+  ],
+  "seeds": [
+    0
+  ],
+  "control_seeds": [
+    0
+  ],
+  "planned_fits": 15,
+  "test_prediction_before_target_loading": true,
+  "no_train_validation_refit": true,
+  "selection": "validation_spatial_correlation_then_centered_error_then_total_mse",
+  "prior_cohort_exposure": true,
+  "scientific_qualification": false,
+  "no_further_seed_panel_or_context_runs_in_this_revision": true
+}

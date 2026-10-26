@@ -16,7 +16,13 @@ from typing import Sequence
 import numpy as np
 
 from .regions import point_to_grid
-from .schema import JointInputs, RegionalProteinFeatures, RNAReference, identifiers
+from .schema import (
+    JointInputs,
+    ProteinRegionCorrespondence,
+    RegionalProteinFeatures,
+    RNAReference,
+    identifiers,
+)
 
 _FIVE = (("CD4", "CD4"), ("CD8", "CD8A"), ("CD45", "PTPRC"), ("CD31", "PECAM1"), ("Ki67", "MKI67"))
 # These published aliases do not establish a complete biological target mapping.
@@ -232,6 +238,74 @@ def _consensus(mean, q90, observed, counts):
     )
 
 
+def make_protein_correspondence(grid, observation_ids, coordinates, replicate_ids, source_identity):
+    """Declare A^P membership from permitted source geometry, never spatial RNA."""
+    from .region_features import grid_identity
+
+    return ProteinRegionCorrespondence(
+        region_ids=grid.region_ids,
+        observation_ids=tuple(observation_ids),
+        coordinates=np.asarray(coordinates, dtype=np.float64),
+        replicate_ids=tuple(map(str, replicate_ids)),
+        region_indices=point_to_grid(grid, coordinates).astype(np.int32),
+        coordinate_units=grid.settings["coordinate_units"],
+        geometry_sha256=grid_identity(grid),
+        source_identity=dict(source_identity),
+    )
+
+
+def validate_protein_correspondence(correspondence, grid):
+    """Check recorded source membership against the exact saved H&E geometry."""
+    from .region_features import grid_identity
+
+    if (
+        correspondence.region_ids != grid.region_ids
+        or correspondence.coordinate_units != grid.settings["coordinate_units"]
+        or correspondence.geometry_sha256 != grid_identity(grid)
+        or not np.array_equal(
+            correspondence.region_indices, point_to_grid(grid, correspondence.coordinates)
+        )
+    ):
+        raise ValueError("protein correspondence differs from its declared H&E geometry")
+
+
+def replay_protein_features(
+    grid,
+    values,
+    observation_ids,
+    marker_ids,
+    correspondence,
+    *,
+    cofactor=100.0,
+    metadata=None,
+):
+    """Reproduce summaries from named raw observations and persisted A^P membership.
+
+    The raw intensity matrix remains in its bound original source. This helper
+    joins its observation axis explicitly; it does not substitute gene aliases,
+    load spatial RNA, or infer absent source observations as biological zero.
+    """
+    ids = tuple(observation_ids)
+    identifiers(ids, "raw protein replay observation IDs")
+    if set(ids) != set(correspondence.observation_ids):
+        raise ValueError("protein replay requires the complete original source observation axis")
+    values = np.asarray(values)
+    if values.ndim != 2 or values.shape[0] != len(ids):
+        raise ValueError("protein replay matrix must follow its declared observation axis")
+    lookup = {name: i for i, name in enumerate(ids)}
+    rows = [lookup[name] for name in correspondence.observation_ids]
+    return aggregate_protein_features(
+        grid,
+        values[rows],
+        correspondence.coordinates,
+        correspondence.replicate_ids,
+        marker_ids,
+        cofactor=cofactor,
+        metadata=metadata,
+        correspondence=correspondence,
+    )
+
+
 def aggregate_protein_features(
     grid,
     values,
@@ -241,6 +315,7 @@ def aggregate_protein_features(
     *,
     cofactor=100.0,
     metadata=None,
+    correspondence=None,
 ):
     """Transform each valid raw cell then pool directly in the requested grid.
 
@@ -267,7 +342,16 @@ def aggregate_protein_features(
     shape = (len(replicates), len(grid.region_ids), len(marker_ids))
     means, quantiles = np.zeros(shape), np.zeros(shape)
     counts = np.zeros(shape, dtype=np.int64)
-    mapped = point_to_grid(grid, coordinates)
+    if correspondence is None:
+        mapped = point_to_grid(grid, coordinates)
+    else:
+        validate_protein_correspondence(correspondence, grid)
+        if (
+            not np.array_equal(coordinates, correspondence.coordinates)
+            or tuple(labels) != correspondence.replicate_ids
+        ):
+            raise ValueError("raw protein coordinates or replicates differ from correspondence")
+        mapped = correspondence.region_indices
     valid = np.isfinite(values)
     transformed = np.arcsinh(np.where(valid, values, 0) / cofactor)
     for r, replicate in enumerate(replicates):
@@ -313,6 +397,7 @@ def aggregate_protein_features(
         replicate_valid_counts=counts,
         replicate_disagreement=disagreement,
         metadata=record,
+        correspondence=correspondence,
     )
 
 
@@ -430,7 +515,7 @@ class ProteinFeatureScaler:
         return cls(**{field.name: tuple(data[field.name]) for field in fields(cls)})
 
 
-def permute_protein_features(features: RegionalProteinFeatures, seed=0):
+def _permuted_protein_features(features, seed, *, permute_counts):
     """Fixed-model intervention: shuffle full marker/count rows within availability.
 
     Source replicate identities and masks stay fixed. All protein-valued paths,
@@ -457,11 +542,9 @@ def permute_protein_features(features: RegionalProteinFeatures, seed=0):
             if any(pattern) and len(rows) > 1:
                 order[rows] = rng.permutation(rows)
                 movable += len(rows)
-        output_mean[r], output_q90[r], output_counts[r] = (
-            mean[r, order],
-            q90[r, order],
-            counts[r, order],
-        )
+        output_mean[r], output_q90[r] = mean[r, order], q90[r, order]
+        if permute_counts:
+            output_counts[r] = counts[r, order]
         permutations[label] = order.tolist()
     consensus = _consensus(output_mean, output_q90, observed, output_counts)
     details = {
@@ -470,7 +553,7 @@ def permute_protein_features(features: RegionalProteinFeatures, seed=0):
         "kind": "fixed_model_prediction_intervention",
         "movable_replicate_region_rows": movable,
         "permutations": permutations,
-        "counts_permuted_with_intensities": True,
+        "counts_permuted_with_intensities": permute_counts,
     }
     updates = dict(
         zip(("mean", "q90", "observed", "valid_counts", "replicate_disagreement"), consensus)
@@ -481,8 +564,22 @@ def permute_protein_features(features: RegionalProteinFeatures, seed=0):
             replicate_q90=output_q90,
             replicate_valid_counts=output_counts,
         )
+    if not permute_counts:
+        updates["valid_counts"] = np.asarray(features.valid_counts).copy()
+    if features.correspondence is not None:
+        details["correspondence_role"] = "original_source_geometry_before_intervention"
     updates["metadata"] = {**features.metadata, "permutation": details}
     return replace(features, **updates), details
+
+
+def permute_protein_features(features: RegionalProteinFeatures, seed=0):
+    """Legacy fixed-model shuffle of intensities and source counts together."""
+    return _permuted_protein_features(features, seed, permute_counts=True)
+
+
+def permute_protein_intensities(features: RegionalProteinFeatures, seed=0):
+    """Shuffle measured summaries while preserving each location's masks/counts."""
+    return _permuted_protein_features(features, seed, permute_counts=False)
 
 
 def _sha(path):
@@ -499,8 +596,39 @@ def _write_npz(directory, name, arrays, payloads):
     payloads[name] = {"file": path.name, "sha256": _sha(path)}
 
 
+def _validate_prepared_correspondence(inputs, provenance):
+    correspondence = (
+        inputs.protein_features.correspondence if inputs.protein_features is not None else None
+    )
+    if correspondence is None:
+        return
+    from .cohort import _axis_provenance, _restore_grid
+
+    try:
+        grid = _restore_grid(inputs, provenance)
+        source = provenance["sources"]["protein"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "protein correspondence requires saved grid and source provenance"
+        ) from error
+    validate_protein_correspondence(correspondence, grid)
+    if any(
+        source[key] != correspondence.source_identity[key] for key in ("working_path", "sha256")
+    ):
+        raise ValueError("protein correspondence differs from the declared input source")
+    if any(
+        provenance["sources"]["he"][key] != correspondence.source_identity.get(f"he_{key}")
+        for key in ("working_path", "sha256")
+    ):
+        raise ValueError("protein correspondence differs from the declared H&E image frame")
+    axis = inputs.protein_features.metadata.get("source_observation_axis")
+    if axis is not None and axis != _axis_provenance(correspondence.observation_ids):
+        raise ValueError("protein correspondence differs from its original observation axis")
+
+
 def save_joint_inputs(inputs: JointInputs, directory, provenance):
     """Create a target-free bundle with independent, hash-bound modality files."""
+    _validate_prepared_correspondence(inputs, provenance)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
     payloads = {}
@@ -531,6 +659,26 @@ def save_joint_inputs(inputs: JointInputs, directory, provenance):
             "replicate_labels": list(features.replicate_labels),
             "metadata": features.metadata,
         }
+        if features.correspondence is not None:
+            correspondence = features.correspondence
+            _write_npz(
+                directory,
+                "protein_correspondence",
+                {
+                    "observation_ids": np.asarray(correspondence.observation_ids, dtype=str),
+                    "coordinates": correspondence.coordinates,
+                    "replicate_ids": np.asarray(correspondence.replicate_ids, dtype=str),
+                    "region_indices": correspondence.region_indices,
+                },
+                payloads,
+            )
+            protein_metadata["correspondence"] = {
+                "schema": "heir.protein_region_correspondence.v1",
+                "coordinate_units": correspondence.coordinate_units,
+                "geometry_sha256": correspondence.geometry_sha256,
+                "source_identity": correspondence.source_identity,
+                "qualification": correspondence.qualification,
+            }
     record = {
         "schema": "heir.joint_inputs.v1",
         "image_encoder_manifest_sha256": inputs.image_encoder_manifest_sha256,
@@ -598,11 +746,43 @@ def load_joint_inputs(directory, *, modalities=("H", "R", "P")):
     if "P" in modalities and "protein" in record["payloads"]:
         values = read("protein")
         info = record["protein"]
+        correspondence = None
+        descriptor = info.get("correspondence")
+        if (descriptor is not None) != ("protein_correspondence" in record["payloads"]):
+            raise ValueError("protein correspondence metadata and payload declarations differ")
+        if descriptor is not None:
+            if descriptor.get("schema") != "heir.protein_region_correspondence.v1":
+                raise ValueError("unsupported protein correspondence schema")
+            mapping = read("protein_correspondence")
+            if set(mapping) != {
+                "observation_ids",
+                "coordinates",
+                "replicate_ids",
+                "region_indices",
+            }:
+                raise ValueError("protein correspondence requires the exact named array contract")
+            correspondence = ProteinRegionCorrespondence(
+                region_ids=tuple(record["cell_ids"]),
+                observation_ids=tuple(map(str, mapping["observation_ids"])),
+                coordinates=mapping["coordinates"],
+                replicate_ids=tuple(map(str, mapping["replicate_ids"])),
+                region_indices=mapping["region_indices"],
+                **{
+                    key: descriptor[key]
+                    for key in (
+                        "coordinate_units",
+                        "geometry_sha256",
+                        "source_identity",
+                        "qualification",
+                    )
+                },
+            )
         protein = RegionalProteinFeatures(
             region_ids=tuple(record["cell_ids"]),
             marker_ids=tuple(info["marker_ids"]),
             replicate_labels=tuple(info["replicate_labels"]),
             metadata=info["metadata"],
+            correspondence=correspondence,
             **values,
         )
     inputs = JointInputs(
@@ -617,4 +797,5 @@ def load_joint_inputs(directory, *, modalities=("H", "R", "P")):
         prediction_unit=record["prediction_unit"],
         coordinate_units=record["coordinate_units"],
     )
+    _validate_prepared_correspondence(inputs, record["provenance"])
     return inputs, record["provenance"]

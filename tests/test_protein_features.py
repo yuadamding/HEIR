@@ -1,6 +1,7 @@
 """Measured proteins and genuine modality separation for the joint model."""
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,8 +17,11 @@ from heir.personalized.protein_features import (
     ProteinFeatureScaler,
     aggregate_protein_features,
     load_joint_inputs,
+    make_protein_correspondence,
     permute_protein_features,
+    permute_protein_intensities,
     qualify_marker_panel,
+    replay_protein_features,
     save_joint_inputs,
 )
 from heir.personalized.region_features import write_feature_cache
@@ -337,3 +341,144 @@ def test_declared_marker_axis_keeps_absent_channels_masked(published_cohort):
     selected = provenance["protein"]["panel"]["qualified_features"]
     assert selected[0]["measurement_available"] is False
     assert selected[0]["biological_feature_qualified"] is True
+
+
+def test_correspondence_replays_raw_named_observations_and_preserves_exclusions():
+    grid = _grid()
+    values = np.array([[0.0, np.nan], [3, 5], [8, 4], [-2, 8], [20, 40]])
+    xy = np.array([[1, 1], [2, 1], [11, 1], [1, 1], [100, 100]])
+    replicates = ("1", "1", "1", "2", "2")
+    ids = tuple(f"original:{i}" for i in range(len(values)))
+    mapping = make_protein_correspondence(
+        grid,
+        ids,
+        xy,
+        replicates,
+        {
+            "patient_id": "train",
+            "specimen_id": "train:biopsy",
+            "working_path": "codex.h5ad",
+            "sha256": "a" * 64,
+        },
+    )
+    np.testing.assert_array_equal(mapping.region_indices, [0, 0, 1, 0, -1])
+    assert mapping.observation_ids == ids and mapping.replicate_ids == replicates
+    assert mapping.coordinate_units == "registered_pixel"
+    assert mapping.qualification == "published_coarse_registration_unvalidated"
+    original = aggregate_protein_features(grid, values, xy, replicates, ("A", "B"), cofactor=1)
+    mapped = aggregate_protein_features(
+        grid, values, xy, replicates, ("A", "B"), cofactor=1, correspondence=mapping
+    )
+    order = [4, 1, 3, 0, 2]
+    replayed = replay_protein_features(
+        grid, values[order], tuple(ids[i] for i in order), ("A", "B"), mapping, cofactor=1
+    )
+    for name in (
+        "mean",
+        "q90",
+        "observed",
+        "valid_counts",
+        "replicate_mean",
+        "replicate_q90",
+        "replicate_observed",
+        "replicate_valid_counts",
+        "replicate_disagreement",
+    ):
+        np.testing.assert_array_equal(getattr(original, name), getattr(mapped, name))
+        np.testing.assert_array_equal(getattr(original, name), getattr(replayed, name))
+    assert replayed.metadata["excluded_source_cells"] == 1
+    with pytest.raises(ValueError, match="complete original"):
+        replay_protein_features(grid, values[:-1], ids[:-1], ("A", "B"), mapping)
+    broken = replace(mapping, region_indices=np.array([1, 0, 1, 0, -1]))
+    with pytest.raises(ValueError, match="declared H&E geometry"):
+        replay_protein_features(grid, values, ids, ("A", "B"), broken)
+    with pytest.raises(ValueError, match="patient, specimen"):
+        _sample(mapped, patient="another_patient")
+
+
+def test_correspondence_bundle_roundtrip_is_optional_and_keeps_numeric_payload_identical(
+    frozen_cohort, tmp_path
+):
+    root, options = frozen_cohort
+    inputs, provenance = cohort.prepare_joint_inputs(root, "313-932", **options)
+    mapping = inputs.protein_features.correspondence
+    assert len(mapping.observation_ids) == 4
+    assert mapping.source_identity["sha256"] == provenance["sources"]["protein"]["sha256"]
+    modern, legacy = tmp_path / "mapped", tmp_path / "unmapped"
+    record = save_joint_inputs(inputs, modern, provenance)
+    unmapped = replace(
+        inputs, protein_features=replace(inputs.protein_features, correspondence=None)
+    )
+    old_record = save_joint_inputs(unmapped, legacy, provenance)
+    assert record["payloads"]["protein"]["sha256"] == old_record["payloads"]["protein"]["sha256"]
+    assert (modern / "protein.npz").read_bytes() == (legacy / "protein.npz").read_bytes()
+    restored, _ = load_joint_inputs(modern, modalities=("P",))
+    restored_mapping = restored.protein_features.correspondence
+    assert restored_mapping.observation_ids == mapping.observation_ids
+    assert restored_mapping.source_identity == mapping.source_identity
+    np.testing.assert_array_equal(restored_mapping.region_indices, mapping.region_indices)
+    np.testing.assert_array_equal(restored_mapping.coordinates, mapping.coordinates)
+    old, _ = load_joint_inputs(legacy, modalities=("P",))
+    assert old.protein_features.correspondence is None
+    # A^P is not an H/R input: an absent correspondence payload cannot prevent
+    # loading those arms, while a requested P input must check its file hash.
+    (modern / "protein_correspondence.npz").unlink()
+    image, _ = load_joint_inputs(modern, modalities=("H",))
+    assert image.protein_features is None
+    with pytest.raises(ValueError, match="protein_correspondence payload missing"):
+        load_joint_inputs(modern, modalities=("P",))
+
+
+def test_saved_correspondence_rejects_changed_mapping_even_with_updated_file_hash(
+    frozen_cohort, tmp_path
+):
+    root, options = frozen_cohort
+    inputs, provenance = cohort.prepare_joint_inputs(root, "313-932", **options)
+    directory = tmp_path / "corrupt_map"
+    record = save_joint_inputs(inputs, directory, provenance)
+    path = directory / "protein_correspondence.npz"
+    with np.load(path, allow_pickle=False) as archive:
+        values = {name: archive[name] for name in archive.files}
+    values["region_indices"][0] = 1
+    np.savez_compressed(path, **values)
+    record["payloads"]["protein_correspondence"]["sha256"] = hashlib.sha256(
+        path.read_bytes()
+    ).hexdigest()
+    (directory / "metadata.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="declared H&E geometry"):
+        load_joint_inputs(directory, modalities=("P",))
+
+
+def test_correspondence_binds_he_image_frame_even_when_geometry_matches(frozen_cohort, tmp_path):
+    root, options = frozen_cohort
+    inputs, provenance = cohort.prepare_joint_inputs(root, "313-932", **options)
+    directory = tmp_path / "changed_he_frame"
+    record = save_joint_inputs(inputs, directory, provenance)
+    record["provenance"]["sources"]["he"]["sha256"] = "b" * 64
+    (directory / "metadata.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="declared H&E image frame"):
+        load_joint_inputs(directory, modalities=("P",))
+
+
+def test_intensity_only_permutation_preserves_original_local_coverage():
+    grid = _grid(5)
+    xy, values, replicates = [], [], []
+    for r in range(2):
+        for i, coordinate in enumerate(grid.coordinates):
+            for cell in range(i + 1):
+                xy.append(coordinate)
+                values.append([10 * r + i + cell, np.nan if i % 2 else 20 * r + i + cell])
+                replicates.append(str(r))
+    original = aggregate_protein_features(grid, values, xy, replicates, ("A", "B"))
+    changed, metadata = permute_protein_intensities(original, seed=7)
+    legacy, legacy_metadata = permute_protein_features(original, seed=7)
+    for name in ("observed", "valid_counts", "replicate_observed", "replicate_valid_counts"):
+        np.testing.assert_array_equal(getattr(changed, name), getattr(original, name))
+    assert not np.array_equal(changed.mean, original.mean)
+    assert not np.array_equal(changed.q90, original.q90)
+    assert not np.array_equal(legacy.valid_counts, original.valid_counts)
+    assert metadata["counts_permuted_with_intensities"] is False
+    assert legacy_metadata["counts_permuted_with_intensities"] is True
+    for r, label in enumerate(original.replicate_labels):
+        order = metadata["permutations"][label]
+        np.testing.assert_array_equal(changed.replicate_mean[r], original.replicate_mean[r, order])

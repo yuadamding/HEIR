@@ -33,6 +33,9 @@ class JointModelConfig:
     assignment_mode: str = "learned"
     transfer_only: bool = False
     image_encoder_manifest_sha256: str | None = None
+    assignment_network: str = "dot_product"
+    correction_initialization: str = "legacy_random"
+    protein_signal: str = "measured"
 
     def __post_init__(self):
         for name in (
@@ -96,6 +99,16 @@ class JointModelConfig:
             raise ValueError("unknown joint assignment mode")
         if not isinstance(self.transfer_only, bool):
             raise ValueError("transfer_only must be boolean")
+        if self.assignment_network not in {"dot_product", "pairwise_mlp"}:
+            raise ValueError("unknown joint assignment network")
+        if self.assignment_network != "dot_product" and "R" not in self.modalities:
+            raise ValueError("pairwise assignment requires an RNA reference")
+        if self.correction_initialization not in {"legacy_random", "zero"}:
+            raise ValueError("unknown correction initialization")
+        if self.protein_signal not in {"measured", "coverage_only"}:
+            raise ValueError("unknown protein signal")
+        if self.protein_signal != "measured" and "P" not in self.modalities:
+            raise ValueError("coverage-only protein signal requires the protein modality")
 
     def to_dict(self):
         return asdict(self)
@@ -142,15 +155,33 @@ class JointModel(nn.Module):
                 torch.empty(len(config.gene_ids), config.residual_rank)
             )
             nn.init.normal_(self.correction_gene, std=0.02)
+            if config.correction_initialization == "zero":
+                nn.init.zeros_(self.correction_gene)
         else:
             self.register_parameter("correction_gene", None)
         self.register_buffer(
             "supervised_mask",
             torch.tensor([gene in config.supervised_gene_ids for gene in config.gene_ids]),
         )
+        # Construct every shared legacy layer first, consuming the same random
+        # draws for all networks. Only the compatibility modules differ at a
+        # common seed; old dot-product bundles retain exactly their weight keys.
+        if config.assignment_network == "pairwise_mlp":
+            self.type_query = self.state_query = None
+            middle = max(1, width // 2)
+            self.type_compatibility = nn.Sequential(
+                nn.Linear(2 * width, middle, bias=False),
+                nn.Tanh(),
+                nn.Linear(middle, 1, bias=False),
+            )
+            self.state_compatibility = nn.Sequential(
+                nn.Linear(2 * width, middle, bias=False),
+                nn.Tanh(),
+                nn.Linear(middle, 1, bias=False),
+            )
         if config.assignment_mode == "constant_reference":
-            self.type_query.requires_grad_(False)
-            self.state_query.requires_grad_(False)
+            for module in self._assignment_modules():
+                module.requires_grad_(False)
         if config.transfer_only:
             self.correction.requires_grad_(False)
             self.correction_gene.requires_grad_(False)
@@ -176,6 +207,27 @@ class JointModel(nn.Module):
         ):
             raise ValueError("image feature dimension differs from joint model")
 
+    def _assignment_modules(self):
+        if self.state_encoder is None:
+            return ()
+        if self.config.assignment_network == "pairwise_mlp":
+            return self.type_compatibility, self.state_compatibility
+        return self.type_query, self.state_query
+
+    def _compatibility(self, query, states, *, broad_type):
+        if self.config.assignment_network == "dot_product":
+            module = self.type_query if broad_type else self.state_query
+            return module(query) @ states.T / self.config.hidden_dim**0.5
+        module = self.type_compatibility if broad_type else self.state_compatibility
+        pairs = torch.cat(
+            (
+                query[:, None, :].expand(-1, len(states), -1),
+                states[None, :, :].expand(len(query), -1, -1),
+            ),
+            dim=2,
+        )
+        return module(pairs).squeeze(-1)
+
     def _forward(self, inputs, *, correction_enabled=True):
         self._validate_inputs(inputs)
         config, n = self.config, len(inputs.cell_ids)
@@ -200,6 +252,8 @@ class JointModel(nn.Module):
                 mean = np.where(observed, np.asarray(protein.mean)[:, columns], 0.0)
                 q90 = np.where(observed, np.asarray(protein.q90)[:, columns], 0.0)
                 counts = np.where(observed, np.asarray(protein.valid_counts)[:, columns], 0.0)
+            if config.protein_signal == "coverage_only":
+                mean, q90 = np.zeros_like(mean), np.zeros_like(q90)
             mask, count = self._tensor(observed), self._tensor(np.log1p(counts))
             coverage = torch.cat((mask, count), dim=1)
             p = self.protein_encoder(
@@ -208,7 +262,19 @@ class JointModel(nn.Module):
             available = mask.any(1, keepdim=True)
             p = torch.where(available, p, self.missing_protein.expand(n, -1))
         z = self.fusion(torch.cat((h, p, h * p, coverage), dim=1))
-        diagnostics = {"image_embedding": h, "protein_embedding": p, "fused_embedding": z}
+        diagnostics = {
+            "diagnostic_schema": "heir.joint.diagnostics.v2",
+            "region_ids": inputs.cell_ids,
+            "image_embedding": h,
+            "protein_embedding": p,
+            "fused_embedding": z,
+        }
+        if self.protein_encoder is not None:
+            diagnostics.update(
+                protein_marker_ids=config.marker_ids,
+                protein_observed=observed,
+                protein_valid_counts=counts,
+            )
         if self.state_encoder is None:
             transfer = zeros.new_zeros((n, len(config.gene_ids)))
             delta = torch.zeros_like(transfer)
@@ -249,18 +315,31 @@ class JointModel(nn.Module):
                 )
                 type_features.append((r[group] * weights[:, None]).sum(0))
             rt = torch.stack(type_features)
+            within_columns = [None] * len(reference.state_ids)
             if config.assignment_mode == "constant_reference":
                 q = proportions.expand(n, -1)
                 pi = torch.stack([q[:, group].sum(1) for group in groups], dim=1)
+                for group in groups:
+                    weights = proportions[group]
+                    weights = (
+                        weights / weights.sum()
+                        if weights.sum() > 0
+                        else torch.ones_like(weights) / len(weights)
+                    )
+                    for local, column in enumerate(torch.where(group)[0].tolist()):
+                        within_columns[column] = weights[local].expand(n)
             else:
-                pi = (self.type_query(z) @ rt.T / config.hidden_dim**0.5).softmax(1)
-                logits = self.state_query(z) @ r.T / config.hidden_dim**0.5
+                pi = self._compatibility(z, rt, broad_type=True).softmax(1)
+                logits = self._compatibility(z, r, broad_type=False)
                 columns = [None] * len(reference.state_ids)
                 for index, group in enumerate(groups):
-                    within = logits[:, group].softmax(1) * pi[:, index : index + 1]
+                    omega = logits[:, group].softmax(1)
+                    within = omega * pi[:, index : index + 1]
                     for local, column in enumerate(torch.where(group)[0].tolist()):
                         columns[column] = within[:, local]
+                        within_columns[column] = omega[:, local]
                 q = torch.stack(columns, dim=1)
+            omega = torch.stack(within_columns, dim=1)
             b = self._tensor(reference.expression)[:, [gene_lookup[g] for g in config.gene_ids]]
             transfer = q @ b
             u = q @ r
@@ -280,6 +359,16 @@ class JointModel(nn.Module):
             diagnostics.update(
                 type_ids=type_ids,
                 type_mixture=pi,
+                state_ids=reference.state_ids,
+                state_types=reference.state_types,
+                within_type_mixture=omega,
+                state_mixture=q,
+                reference_gene_ids=config.gene_ids,
+                reference_cell_counts=np.asarray(reference.cell_counts),
+                reference_proportions=np.asarray(reference.proportions),
+                reference_variance=np.asarray(reference.variance)[
+                    :, [gene_lookup[g] for g in config.gene_ids]
+                ],
                 state_embedding=r,
                 assigned_rna_embedding=u,
                 specimen_rna_embedding=summary,
@@ -336,4 +425,15 @@ class JointModel(nn.Module):
             count -= omitted * self.config.residual_rank
         if self.direct_head is not None:
             count -= omitted * (self.config.hidden_dim + 1)
+        if self.config.protein_signal == "coverage_only":
+            count -= 2 * len(self.config.marker_ids) * width
         return count
+
+    def assignment_trainable_parameter_count(self):
+        """Active compatibility weights, excluding shared modality encoders."""
+        return sum(
+            parameter.numel()
+            for module in self._assignment_modules()
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        )

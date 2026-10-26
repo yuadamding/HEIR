@@ -31,6 +31,10 @@ Version 0.9 adds a separate joint model with learned protein features, hierarchi
 assignment, and a multimodal correction, plus source-coordinate replay. Legacy bundles retain
 their original meaning. Joint experiments use the historical 100-pixel view as exploratory
 development; coordinate replay does not qualify biological alignment.
+Version 0.10 makes the joint hierarchy and protein correspondence explicit in exports, adds
+zero-initialized correction, and compares attention with a parameter-comparable reference
+MLP and an availability/coverage-only control. See the
+[HEIR-Joint architecture and control protocol](docs/personalized_development.md#version-010-heir-joint-controls).
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 

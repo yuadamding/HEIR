@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from .cohort import DEFAULT_PROTEIN_MARKERS, discover_cohort, prepare_joint_inputs
-from .cohort_cli import comparison_scores, qualified_targets, replicate_scores
+from .cohort_cli import _subset, comparison_scores, qualified_targets, replicate_scores
 from .error_decomposition import error_decomposition
 from .joint_model import JointModelConfig
 from .protein_features import load_joint_inputs, save_joint_inputs
@@ -29,7 +29,9 @@ from .train import FittedJointModel, TrainingSample, fit_joint
 
 PRINCIPAL_ARMS = ("H", "HR", "HP", "RP", "HRP", "HRP_generic")
 CONTROL_ARMS = ("HRP_constant_reference", "HRP_transfer_only")
+EXTENSION_CONTROL_ARMS = ("HRP_mlp", "HRP_coverage_only")
 INTERVENTIONS = ("protein_unavailable", "protein_permuted", "image_permuted", "correction_removed")
+_COVERAGE = "common_original_protein_coverage"
 _SCORE = "mean_replicate_median_gene_spearman"
 
 
@@ -85,6 +87,21 @@ def _configuration(path):
             raise ValueError("joint frozen backbone/configuration identity mismatch")
     if config["preparation"]["region_size"] != 100 and not config.get("extension_label"):
         raise ValueError("nonhistorical joint geometry requires an explicit extension label")
+    if config.get("controls_revision") is not None:
+        if (
+            config["controls_revision"] != "v010"
+            or config.get("common_protein_coverage") is not True
+            or config.get("additional_interventions") != ["protein_intensity_permuted"]
+            or config.get("assignment_parameter_relative_tolerance") != 0.02
+            or config.get("full_model_parameter_relative_tolerance") != 0.01
+            or model.assignment_network != "dot_product"
+            or model.protein_signal != "measured"
+            or model.correction_initialization != "zero"
+            or config.get("outcome_selection") is not None
+        ):
+            raise ValueError("unsupported matched joint control experiment")
+    elif config.get("additional_interventions") or config.get("common_protein_coverage"):
+        raise ValueError("new coverage/intervention reporting requires a declared control revision")
     selection = config.get("outcome_selection")
     if selection is not None:
         if (
@@ -112,11 +129,13 @@ def fit_schedule(protocol, seeds=None):
     if seed_axis != tuple(protocol["seeds"]) or len(set(seed_axis)) != len(seed_axis):
         raise ValueError("requested seeds differ from the declared study seed inventory")
     if any(a not in PRINCIPAL_ARMS for a in principal) or any(
-        a not in CONTROL_ARMS for a in controls
+        a not in CONTROL_ARMS + EXTENSION_CONTROL_ARMS for a in controls
     ):
         raise ValueError("unknown joint study arm")
     if len(set(principal + controls)) != len(principal + controls):
         raise ValueError("duplicate joint study arms")
+    if any(a in EXTENSION_CONTROL_ARMS for a in controls) and not protocol.get("extension_label"):
+        raise ValueError("additional joint controls require an explicit extension protocol")
     if not protocol.get("extension_label") and (
         principal != PRINCIPAL_ARMS
         or controls != CONTROL_ARMS
@@ -134,7 +153,7 @@ def fit_schedule(protocol, seeds=None):
 
 
 def _arm_config(base, arm):
-    if arm not in PRINCIPAL_ARMS + CONTROL_ARMS:
+    if arm not in PRINCIPAL_ARMS + CONTROL_ARMS + EXTENSION_CONTROL_ARMS:
         raise ValueError("unknown joint arm")
     modalities = tuple(c for c in "HRP" if c in arm.split("_")[0])
     return replace(
@@ -149,7 +168,38 @@ def _arm_config(base, arm):
         marker_ids=base.marker_ids if "P" in modalities else (),
         assignment_mode="constant_reference" if arm == "HRP_constant_reference" else "learned",
         transfer_only=arm == "HRP_transfer_only",
+        assignment_network="pairwise_mlp" if arm == "HRP_mlp" else base.assignment_network,
+        protein_signal="coverage_only" if arm == "HRP_coverage_only" else base.protein_signal,
     )
+
+
+def _interventions(config):
+    return (*INTERVENTIONS, *config.get("additional_interventions", []))
+
+
+def _parameter_comparison(base, config):
+    """Check declared active capacities before fitting, without changing the RNG stream."""
+    from .joint_model import JointModel
+
+    with torch.random.fork_rng():
+        counts = {}
+        for arm in ("HRP", *EXTENSION_CONTROL_ARMS):
+            model = JointModel(_arm_config(base, arm))
+            counts[arm] = {
+                "active_trainable_parameters": model.active_trainable_parameter_count(),
+                "assignment_trainable_parameters": model.assignment_trainable_parameter_count(),
+            }
+    reference = counts["HRP"]
+    for arm in EXTENSION_CONTROL_ARMS:
+        for field, setting in (
+            ("active_trainable_parameters", "full_model_parameter_relative_tolerance"),
+            ("assignment_trainable_parameters", "assignment_parameter_relative_tolerance"),
+        ):
+            fraction = abs(counts[arm][field] - reference[field]) / reference[field]
+            if fraction > config[setting]:
+                raise ValueError("joint control exceeds its declared parameter tolerance")
+            counts[arm]["relative_difference_" + field] = fraction
+    return counts
 
 
 def typed_training_reference(inputs, *, gene_ids, embedding_gene_ids, max_states=32):
@@ -379,7 +429,7 @@ def _assignment_rows(prediction, inputs, identifiers):
     ]
 
 
-def _score_export(path, target, model, identifiers, overlap=None):
+def _score_export(path, target, model, identifiers, overlap=None, *, suffix="", support=None):
     prediction, _ = load_prediction(path)
     targets, operator, groups, _ = target
     report = comparison_scores(
@@ -426,8 +476,37 @@ def _score_export(path, target, model, identifiers, overlap=None):
         for r in report["replicate_scores"]
     ]
     report["prediction_sha256"] = _sha(path)
-    _write(path.with_suffix(".scores.json"), report)
-    _write(path.with_suffix(".decomposition.json"), decomposition)
+    if support is not None:
+        report["coverage_support"] = support
+        if support["replicates_without_covered_observations"]:
+            panels = [report] + [
+                group["scores"]
+                for group in report["outcome_groups"].values()
+                if group["scores"] is not None
+            ]
+            for panel in panels:
+                for key in (_SCORE, "normalized_log_mse", "squared_bias", "centered_mse"):
+                    if key in panel:
+                        panel[key + "_covered_replicate_diagnostic"] = panel[key]
+                        panel[key] = None
+                panel["headline_status"] = "no_common_protein_coverage_in_some_replicates"
+                panel["replicate_scores"].extend(
+                    _empty_coverage_replicate(group, panel["evaluation_gene_ids"])
+                    for group in support["replicates_without_covered_observations"]
+                )
+                panel["replicate_scores"].sort(key=lambda row: row["assay_replicate"])
+            report["target_gene_eligibility"].extend(
+                {
+                    "assay_replicate": group,
+                    "genes": [
+                        {"gene_id": g, "n_regions": 0, "target_exclusion": "insufficient_regions"}
+                        for g in model.gene_ids
+                    ],
+                }
+                for group in support["replicates_without_covered_observations"]
+            )
+    _write(path.with_suffix(suffix + ".scores.json"), report)
+    _write(path.with_suffix(suffix + ".decomposition.json"), decomposition)
     rows = []
     for panel, panel_report in [("all", report)] + [
         (name, value["scores"])
@@ -451,6 +530,89 @@ def _score_export(path, target, model, identifiers, overlap=None):
     return report, rows, [{**identifiers, **row} for row in decomposition["per_gene"]]
 
 
+def _coverage_target(target, inputs):
+    """Condition evaluation on original input coverage, never on measured RNA values."""
+    targets, operator, groups, metadata = target
+    protein = inputs.protein_features
+    covered = (
+        np.asarray(protein.observed).any(axis=1)
+        if protein is not None
+        else np.zeros(len(inputs.cell_ids), dtype=bool)
+    )
+    lookup = dict(zip(inputs.cell_ids, covered))
+    if set(lookup) != set(operator.cell_ids):
+        raise ValueError("protein coverage and target operator region axes differ")
+    positive = np.asarray(operator.weights) > 0
+    contributing = np.asarray([lookup[key] for key in operator.cell_ids])[
+        operator.columns[positive]
+    ]
+    selected = np.bincount(operator.rows[positive], minlength=len(targets.observation_ids)) > 0
+    np.logical_and.at(selected, operator.rows[positive], contributing)
+    retained_groups = tuple(group for group, retain in zip(groups, selected) if retain)
+    support = {
+        "criterion": "at_least_one_qualified_marker_in_every_positive_operator_contributor",
+        "coverage_source": "original_unintervened_protein_availability",
+        "target_expression_used_for_coverage": False,
+        "covered_prediction_regions": int(covered.sum()),
+        "covered_prediction_region_ids": [
+            key for key, retain in zip(inputs.cell_ids, covered) if retain
+        ],
+        "total_prediction_regions": len(covered),
+        "evaluation_observation_ids": [
+            key for key, retain in zip(targets.observation_ids, selected) if retain
+        ],
+        "excluded_observation_ids": [
+            key for key, retain in zip(targets.observation_ids, selected) if not retain
+        ],
+        "replicates_without_covered_observations": sorted(set(groups) - set(retained_groups)),
+        "original_replicate_ids": sorted(set(groups)),
+    }
+    if not selected.any():
+        return None, support
+    subset, mapping = _subset(targets, operator, selected)
+    return (subset, mapping, retained_groups, metadata), support
+
+
+def _empty_coverage_replicate(group, genes):
+    return {
+        "assay_replicate": group,
+        "median_gene_spearman": None,
+        "normalized_log_mse": None,
+        "headline_status": "no_common_original_protein_coverage",
+        "gene_scores": [
+            {
+                "gene_id": gene,
+                "n_regions": 0,
+                "spearman": None,
+                "undefined_reason": "insufficient_regions",
+            }
+            for gene in genes
+        ],
+    }
+
+
+def _empty_coverage_report(export, model, support):
+    return {
+        **{k: v for k, v in export.items() if k != "path"},
+        "prediction_sha256": _sha(export["path"]),
+        "evaluation_gene_ids": list(model.gene_ids),
+        "normalization_gene_ids": list(model.normalization_gene_ids),
+        "evaluation_observation_ids": [],
+        "target_gene_eligibility": [],
+        "replicate_scores": [
+            _empty_coverage_replicate(group, model.gene_ids)
+            for group in support["original_replicate_ids"]
+        ],
+        "outcome_groups": {},
+        "coverage_support": support,
+        "headline_status": "no_common_original_protein_coverage",
+        _SCORE: None,
+        "normalized_log_mse": None,
+        "squared_bias": None,
+        "centered_mse": None,
+    }
+
+
 def summarize_joint(reports):
     """Average seeds within biological patient before any across-patient contrast."""
     support = {}
@@ -470,6 +632,8 @@ def summarize_joint(reports):
                 "target_gene_eligibility",
             )
         }
+        if "coverage_support" in report:
+            contract["coverage_support"] = report["coverage_support"]
         if identity in support and contract != support[identity]:
             raise ValueError("joint comparisons require identical target rows and gene eligibility")
         support[identity] = contract
@@ -500,7 +664,7 @@ def summarize_joint(reports):
     contrasts = []
     if "HRP" in arms:
         left = {r["patient_id"]: r for r in arms["HRP"]["patients"]}
-        for comparator in ("HR", "HP", "RP", "HRP_generic"):
+        for comparator in ("HR", "HP", "RP", "HRP_generic", *EXTENSION_CONTROL_ARMS):
             if comparator not in arms:
                 continue
             right = {r["patient_id"]: r for r in arms[comparator]["patients"]}
@@ -598,12 +762,12 @@ def _export_fitted(fitted, inputs, provenance, path, identifiers):
     return prediction
 
 
-def _intervened_inputs(inputs, seed):
+def _intervened_inputs(inputs, seed, additional=()):
     from .protein_features import permute_protein_features
 
     shuffled, permutation = permute_protein_features(inputs.protein_features, seed=seed)
     image_order = np.random.default_rng(seed + 1).permutation(len(inputs.cell_ids))
-    return {
+    interventions = {
         "protein_unavailable": (
             replace(inputs, protein_features=None),
             {"all_protein_paths": True},
@@ -614,6 +778,15 @@ def _intervened_inputs(inputs, seed):
             {"image_source_row": image_order.tolist(), "coordinates_preserved": True},
         ),
     }
+    if "protein_intensity_permuted" in additional:
+        from .protein_features import permute_protein_intensities
+
+        changed, details = permute_protein_intensities(inputs.protein_features, seed=seed)
+        interventions["protein_intensity_permuted"] = (
+            replace(inputs, protein_features=changed),
+            details,
+        )
+    return interventions
 
 
 def _fit_and_export(
@@ -688,6 +861,7 @@ def _fit_and_export(
             "selected_checkpoint": fitted.selection,
             "test_targets_loaded": pilot,
             "held_out_test": not pilot,
+            "active_trainable_parameters": fitted.model.active_trainable_parameter_count(),
         },
     )
     exports, assignments, coverage = [], [], []
@@ -724,7 +898,9 @@ def _fit_and_export(
             )
             exports.append({"path": str(transfer_path), **ids, "component": "transfer"})
         if arm == "HRP":
-            for name, (altered, intervention) in _intervened_inputs(inputs, seed + 7100).items():
+            for name, (altered, intervention) in _intervened_inputs(
+                inputs, seed + 7100, config.get("additional_interventions", ())
+            ).items():
                 intervention_path = path.with_name(path.stem + f".{name}.npz")
                 current_ids = {**ids, "component": name}
                 _export_fitted(fitted, altered, provenance, intervention_path, current_ids)
@@ -774,12 +950,80 @@ def _evaluate_exports(exports, targets, model, overlap=None):
     return reports, rows, errors
 
 
+def _evaluate_coverage_exports(prepared, exports, targets, model, overlap=None):
+    """Score every arm and intervention on the same original protein-covered rows."""
+    restricted = {}
+    for biopsy, target in targets.items():
+        inputs, _ = _inputs(prepared, biopsy, "HRP")
+        restricted[biopsy] = _coverage_target(target, inputs)
+    reports, rows, errors = [], [], []
+    for export in exports:
+        target, support = restricted[export["biopsy_id"]]
+        path = Path(export["path"])
+        if target is None:
+            report = _empty_coverage_report(export, model, support)
+            _write(path.with_suffix(".common-coverage.scores.json"), report)
+            score_rows = [
+                {
+                    **{k: v for k, v in export.items() if k != "path"},
+                    "assay_replicate": group,
+                    "outcome_panel": "all",
+                    "spearman": None,
+                    "normalized_log_mse": None,
+                    "headline_status": report["headline_status"],
+                    "evaluation_gene_ids": list(model.gene_ids),
+                }
+                for group in support["original_replicate_ids"]
+            ]
+            error_rows = []
+        else:
+            report, score_rows, error_rows = _score_export(
+                path,
+                target,
+                model,
+                {k: v for k, v in export.items() if k != "path"},
+                overlap,
+                suffix=".common-coverage",
+                support=support,
+            )
+        reports.append(report)
+        rows.extend({"evaluation_support": _COVERAGE, **r} for r in score_rows)
+        errors.extend({"evaluation_support": _COVERAGE, **r} for r in error_rows)
+    return reports, rows, errors
+
+
 def _complete_run(
-    output, reports, score_rows, error_rows, assignments, coverage, exports, metadata
+    output,
+    reports,
+    score_rows,
+    error_rows,
+    assignments,
+    coverage,
+    exports,
+    metadata,
+    *,
+    coverage_results=None,
 ):
     summary = {"schema": "heir.joint_study_result.v1", **metadata, **summarize_joint(reports)}
     transferred = [{**r, "component": "full"} for r in reports if r["component"] == "transfer"]
     summary["postfit_transfer"] = summarize_joint(transferred)["arms"] if transferred else {}
+    if coverage_results is not None:
+        covered_reports, covered_rows, covered_errors = coverage_results
+        covered_summary = summarize_joint(covered_reports)
+        covered_transfer = [
+            {**r, "component": "full"} for r in covered_reports if r["component"] == "transfer"
+        ]
+        covered_summary["postfit_transfer"] = (
+            summarize_joint(covered_transfer)["arms"] if covered_transfer else {}
+        )
+        covered_summary["evaluation_support"] = _COVERAGE
+        covered_summary["coverage_by_biopsy"] = {
+            r["biopsy_id"]: r["coverage_support"] for r in covered_reports
+        }
+        summary[_COVERAGE] = covered_summary
+        _tsv(output / "common_coverage_patient_scores.tsv", covered_rows)
+        _tsv(output / "common_coverage_error_decomposition.tsv", covered_errors)
+        _tsv(output / "common_coverage_paired_contrasts.tsv", covered_summary["paired_contrasts"])
     _write(output / "summary.json", summary)
     _write(output / "exports.json", exports)
     _tsv(output / "patient_scores.tsv", score_rows)
@@ -793,23 +1037,30 @@ def _complete_run(
         for e in exports
         if e["arm"] == "HRP"
     }
-    originals = {
-        (r["biopsy_id"], r["seed"]): r
-        for r in reports
+    intervention_reports = [("all_target_eligible", r) for r in reports]
+    if coverage_results is not None:
+        intervention_reports.extend((_COVERAGE, r) for r in coverage_results[0])
+    original_by_support = {
+        (support, r["biopsy_id"], r["seed"]): r
+        for support, r in intervention_reports
         if r["arm"] == "HRP" and r["component"] == "full"
     }
-    for report in reports:
+    for support, report in intervention_reports:
         if (
             not report.get("prediction_available", True)
             or report["arm"] != "HRP"
-            or report["component"] not in ("full", *INTERVENTIONS)
+            or report["component"] not in ("full", *INTERVENTIONS, "protein_intensity_permuted")
         ):
             continue
-        original = originals[(report["biopsy_id"], report["seed"])]
+        original = original_by_support[(support, report["biopsy_id"], report["seed"])]
         row = {
             k: report[k]
             for k in ("patient_id", "specimen_id", "biopsy_id", "seed", "outer_fold", "component")
         }
+        row["evaluation_support"] = support
+        row["evaluation_observation_ids"] = report["evaluation_observation_ids"]
+        if support == _COVERAGE:
+            row["coverage_criterion"] = report["coverage_support"]["criterion"]
         for key in (_SCORE, "normalized_log_mse", "squared_bias", "centered_mse"):
             a, b = report[key], original[key]
             row[key] = a
@@ -820,11 +1071,34 @@ def _complete_run(
         altered, _ = load_prediction(
             export_paths[(report["biopsy_id"], report["seed"], report["component"])]
         )
-        row["mean_absolute_log1p_linear_expression_change"] = float(
-            (torch.log1p(altered.expression) - torch.log1p(base_prediction.expression)).abs().mean()
+        selected = torch.ones(len(base_prediction.cell_ids), dtype=torch.bool)
+        if support == _COVERAGE:
+            ids = set(report["coverage_support"]["covered_prediction_region_ids"])
+            selected = torch.tensor([key in ids for key in base_prediction.cell_ids])
+        row["change_summary_prediction_regions"] = int(selected.sum())
+        row["mean_absolute_log1p_linear_expression_change"] = (
+            float(
+                (
+                    torch.log1p(altered.expression[selected])
+                    - torch.log1p(base_prediction.expression[selected])
+                )
+                .abs()
+                .mean()
+            )
+            if selected.any()
+            else None
         )
-        row["mean_absolute_reference_mixture_change"] = float(
-            (altered.conditional_assignment - base_prediction.conditional_assignment).abs().mean()
+        row["mean_absolute_reference_mixture_change"] = (
+            float(
+                (
+                    altered.conditional_assignment[selected]
+                    - base_prediction.conditional_assignment[selected]
+                )
+                .abs()
+                .mean()
+            )
+            if selected.any()
+            else None
         )
         row["intervention_scope"] = "fixed_model_all_modality_dependent_paths"
         intervention_rows.append(row)
@@ -879,7 +1153,7 @@ def pilot_joint(prepared, biopsies, config_path, output):
     if (
         not pilot_arms
         or len(set(pilot_arms)) != len(pilot_arms)
-        or any(a not in PRINCIPAL_ARMS + CONTROL_ARMS for a in pilot_arms)
+        or any(a not in PRINCIPAL_ARMS + CONTROL_ARMS + EXTENSION_CONTROL_ARMS for a in pilot_arms)
     ):
         raise ValueError("joint pilot requires an explicit unique valid arm inventory")
     biopsies = tuple(biopsies)
@@ -1084,6 +1358,8 @@ def unevaluable_reports(metadata, biopsies, planned_fits, model, reason):
 
 def _backbone_matrix(path):
     matrix = json.loads(Path(path).read_text())
+    if matrix.get("schema") == "heir.joint_controls_matrix.v1":
+        return _controls_matrix(path, matrix)
     if (
         matrix.get("schema") != "heir.joint_backbone_matrix.v1"
         or set(matrix.get("backbones", {})) != {"hoptimus1", "uni2h"}
@@ -1135,6 +1411,53 @@ def _backbone_matrix(path):
     return matrix
 
 
+def _controls_matrix(path, matrix):
+    if (
+        set(matrix.get("backbones", {})) != {"hoptimus1", "uni2h"}
+        or matrix.get("seeds") != [0]
+        or matrix.get("outer_folds") != [0, 1, 2, 3, 4]
+        or matrix.get("principal_fits") != 10
+        or matrix.get("mechanistic_fits") != 20
+        or matrix.get("total_fits") != 30
+        or matrix.get("shared_RP_source") is not None
+        or matrix.get("paired_backbone_arms") != ["HRP", *EXTENSION_CONTROL_ARMS]
+        or matrix.get("correction_initialization") != "zero"
+        or matrix.get("further_seeds_in_this_revision") != []
+        or matrix.get("panel_or_context_extensions_in_this_revision") is not False
+        or matrix.get("decision_frozen_before_first_heldout_result") is not True
+        or matrix.get("additional_seed_17_42_fits_authorized") is not False
+        or matrix.get("expanded_or_broader_panels_scored") is not False
+    ):
+        raise ValueError("unsupported matched 30-fit joint control matrix")
+    comparable, encoders = [], []
+    for name, declaration in matrix["backbones"].items():
+        source = Path(path).parent / declaration["experiment_config"]
+        config, model = _configuration(source)
+        if (
+            declaration["principal_arms"] != ["HRP"]
+            or declaration["control_arms"] != list(EXTENSION_CONTROL_ARMS)
+            or declaration["planned_fits"] != 15
+            or _sha(source) != declaration["experiment_config_sha256"]
+            or config.get("controls_revision") != "v010"
+            or config["image_backbone"]["backbone_id"] != name
+            or model.feature_dim != 1536
+        ):
+            raise ValueError("joint control matrix changes the bound model or fit contract")
+        shared = _compatible_experiment_config(config, model)
+        shared["preparation"] = {
+            k: v
+            for k, v in shared["preparation"].items()
+            if k not in ("feature_cache_dir", "feature_encoder_manifest_sha256")
+        }
+        shared["model"].pop("image_encoder_manifest_sha256")
+        comparable.append(shared)
+        encoders.append(model.image_encoder_manifest_sha256)
+        _parameter_comparison(model, config)
+    if comparable[0] != comparable[1] or len(set(encoders)) != 2:
+        raise ValueError("joint control backbones must share all nonimage settings")
+    return matrix
+
+
 def _compatible_experiment_config(config, model):
     # Narrative/backbone declarations and the explicitly revised pilot inventory
     # do not change the shared training experiment. All other fields must match.
@@ -1181,6 +1504,11 @@ def _study_configuration(prepared, config_path):
         config, base = candidate, model
     if protocol["model_config_sha256"] != _sha(source_config):
         raise ValueError("joint study protocol differs from prepared model configuration")
+    if config.get("controls_revision"):
+        for biopsy in metadata["biopsies"]:
+            inputs, _ = _inputs(prepared, biopsy, "HRP")
+            if getattr(inputs.protein_features, "correspondence", None) is None:
+                raise ValueError("new joint controls require explicit protein correspondence")
     return metadata, config, base, protocol, source_config
 
 
@@ -1204,6 +1532,8 @@ def study_joint(prepared, config_path, folds_path, seeds, output):
         (output / name).write_bytes(Path(source).read_bytes())
     _write(output / "fit_plan.json", schedule)
     input_inventory = _input_inventory(prepared, metadata)
+    if config.get("controls_revision"):
+        _write(output / "parameter_comparison.json", _parameter_comparison(base, config))
     package = Path(__file__).resolve().parent
     _write(
         output / "identity.json",
@@ -1222,6 +1552,7 @@ def study_joint(prepared, config_path, folds_path, seeds, output):
         },
     )
     all_reports, all_scores, all_errors, assignments, coverage, all_exports = [], [], [], [], [], []
+    common_reports, common_rows, common_errors = [], [], []
     actual_fits, exclusions = 0, []
     for fold, roles in folds.items():
         directory = output / f"fold-{fold}"
@@ -1355,6 +1686,13 @@ def study_joint(prepared, config_path, folds_path, seeds, output):
         all_scores.extend(scores)
         all_errors.extend(errors)
         all_exports.extend(exports)
+        if config.get("common_protein_coverage"):
+            common = _evaluate_coverage_exports(
+                prepared, exports, test_targets, fold_model, _outcome_overlap(metadata)
+            )
+            common_reports.extend(common[0])
+            common_rows.extend(common[1])
+            common_errors.extend(common[2])
     _check_input_inventory(prepared, metadata, input_inventory)
     return _complete_run(
         output,
@@ -1376,6 +1714,9 @@ def study_joint(prepared, config_path, folds_path, seeds, output):
             "backbone_id": protocol.get("backbone_id"),
             "matrix_protocol_sha256": protocol.get("matrix_protocol_sha256"),
         },
+        coverage_results=(common_reports, common_rows, common_errors)
+        if config.get("common_protein_coverage")
+        else None,
     )
 
 
@@ -1403,6 +1744,16 @@ def diagnose_joint(prepared, study, output):
         "marker_coverage.tsv",
         "report.md",
         "summary.json",
+    )
+    names += tuple(
+        name
+        for name in (
+            "common_coverage_patient_scores.tsv",
+            "common_coverage_error_decomposition.tsv",
+            "common_coverage_paired_contrasts.tsv",
+            "parameter_comparison.json",
+        )
+        if (study / name).is_file()
     )
     for name in names:
         (output / name).write_bytes((study / name).read_bytes())
@@ -1438,6 +1789,14 @@ def _matching_backbone_inputs(matrix, identities):
             b: json.loads((prepared / "inputs" / b / "metadata.json").read_text())
             for b in metadata["biopsies"]
         }
+        if matrix["schema"] == "heir.joint_controls_matrix.v1":
+            for biopsy, record in records.items():
+                entry = record["payloads"].get("protein_correspondence")
+                if entry is None:
+                    raise ValueError("control comparison lacks explicit protein correspondence")
+                path = prepared / "inputs" / biopsy / entry["file"]
+                if path.name != entry["file"] or _sha(path) != entry["sha256"]:
+                    raise ValueError("protein correspondence payload integrity mismatch")
         inputs[backbone] = (records, model.image_encoder_manifest_sha256)
     left, right = inputs["hoptimus1"][0], inputs["uni2h"][0]
     if set(left) != set(right) or inputs["hoptimus1"][1] == inputs["uni2h"][1]:
@@ -1453,7 +1812,10 @@ def _matching_backbone_inputs(matrix, identities):
         ):
             if a[name] != b[name]:
                 raise ValueError("backbone geometry or patient identity differs")
-        for payload in ("geometry", "reference", "protein"):
+        payloads = ("geometry", "reference", "protein")
+        if matrix["schema"] == "heir.joint_controls_matrix.v1":
+            payloads += ("protein_correspondence",)
+        for payload in payloads:
             if a["payloads"][payload]["sha256"] != b["payloads"][payload]["sha256"]:
                 raise ValueError("backbone comparisons must share exact geometry, RNA and protein")
         for name in ("marker_ids", "replicate_labels"):
@@ -1469,8 +1831,9 @@ def _matching_backbone_inputs(matrix, identities):
 
 
 def compare_backbones(hoptimus_study, uni2_study, config_path, output):
-    """Combine the frozen 75-fit design; reuse RP without manufacturing extra fits."""
+    """Combine a frozen backbone matrix, preserving its exact fit and export inventory."""
     matrix = _backbone_matrix(config_path)
+    controls = matrix["schema"] == "heir.joint_controls_matrix.v1"
     paths = {"hoptimus1": Path(hoptimus_study), "uni2h": Path(uni2_study)}
     reports, identities, summaries = {}, {}, {}
     for backbone, directory in paths.items():
@@ -1478,6 +1841,7 @@ def compare_backbones(hoptimus_study, uni2_study, config_path, output):
         protocol = json.loads((directory / "protocol.json").read_text())
         identity = json.loads((directory / "identity.json").read_text())
         summary = json.loads((directory / "summary.json").read_text())
+        experiment = json.loads((directory / "config.json").read_text())
         planned = fit_schedule(protocol, [0])
         prepared_metadata, _, _ = _prepared(declared["prepared_directory"])
         if _sha(directory / "folds.csv") != identity["folds_sha256"]:
@@ -1507,7 +1871,7 @@ def compare_backbones(hoptimus_study, uni2_study, config_path, output):
             if "R" in fit["arm"].split("_")[0] and fit["arm"] != "HRP_transfer_only":
                 components.append("transfer")
             if fit["arm"] == "HRP":
-                components.extend(INTERVENTIONS)
+                components.extend(_interventions(experiment))
             for biopsy, source in prepared_metadata["biopsies"].items():
                 if folds[fit["outer_fold"]][source["patient_id"]] == "test":
                     expected.update(
@@ -1558,7 +1922,7 @@ def compare_backbones(hoptimus_study, uni2_study, config_path, output):
         [{**r, "arm": f"{backbone}:{r['arm']}"} for backbone, rows in reports.items() for r in rows]
     )
     shared_rp = [r for r in reports["hoptimus1"] if r["arm"] == "RP"]
-    if not shared_rp or any(r["arm"] == "RP" for r in reports["uni2h"]):
+    if not controls and (not shared_rp or any(r["arm"] == "RP" for r in reports["uni2h"])):
         raise ValueError("RP must be fitted exactly once in the shared comparator substudy")
     by_backbone = {
         name: summarize_joint(
@@ -1592,13 +1956,20 @@ def compare_backbones(hoptimus_study, uni2_study, config_path, output):
         backbone_summary[arm] = aggregate
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    for name in (
+    table_names = (
         "patient_scores",
         "error_decomposition",
         "modality_interventions",
         "assignment_diagnostics",
         "marker_coverage",
-    ):
+    )
+    if controls:
+        table_names += (
+            "common_coverage_patient_scores",
+            "common_coverage_error_decomposition",
+            "common_coverage_paired_contrasts",
+        )
+    for name in table_names:
         rows = [
             {"backbone": "shared_RP" if r.get("arm") == "RP" else backbone, **r}
             for backbone, directory in paths.items()
@@ -1608,13 +1979,15 @@ def compare_backbones(hoptimus_study, uni2_study, config_path, output):
     _tsv(output / "paired_contrasts.tsv", paired)
     _tsv(output / "backbone_contrasts.tsv", backbone_rows)
     result = {
-        "schema": "heir.joint_backbone_matrix_result.v1",
+        "schema": "heir.joint_controls_matrix_result.v1"
+        if controls
+        else "heir.joint_backbone_matrix_result.v1",
         "matrix_sha256": _sha(config_path),
-        "principal_fit_count": 55,
-        "mechanistic_fit_count": 20,
-        "total_fit_count": 75,
+        "principal_fit_count": matrix["principal_fits"],
+        "mechanistic_fit_count": matrix["mechanistic_fits"],
+        "total_fit_count": matrix["total_fits"],
         "seeds": [0],
-        "shared_RP_fit_count": 5,
+        "shared_RP_fit_count": 0 if controls else 5,
         "shared_RP_refitted_for_UNI2h": False,
         "backbones": by_backbone,
         "paired_backbone_summary": backbone_summary,
@@ -1632,12 +2005,56 @@ def compare_backbones(hoptimus_study, uni2_study, config_path, output):
             for b, p in paths.items()
         },
     }
+    if controls:
+        common = {}
+        for backbone, directory in paths.items():
+            rows = [
+                json.loads(Path(e["path"]).with_suffix(".common-coverage.scores.json").read_text())
+                for e in json.loads((directory / "exports.json").read_text())
+            ]
+            original_lookup = {
+                tuple(r[k] for k in ("biopsy_id", "outer_fold", "arm", "seed", "component")): r
+                for r in reports[backbone]
+            }
+            for report in rows:
+                key = tuple(
+                    report[k] for k in ("biopsy_id", "outer_fold", "arm", "seed", "component")
+                )
+                matching_report = original_lookup.get(key)
+                if matching_report is None or any(
+                    report[k] != matching_report[k]
+                    for k in ("prediction_sha256", "patient_id", "specimen_id")
+                ):
+                    raise ValueError("common-coverage prediction integrity mismatch")
+            common[backbone] = rows
+        summarize_joint(
+            [{**r, "arm": f"{b}:{r['arm']}"} for b, rows in common.items() for r in rows]
+        )
+        result[_COVERAGE] = {b: summarize_joint(rows) for b, rows in common.items()}
+        for backbone, rows in common.items():
+            transfer = [{**r, "component": "full"} for r in rows if r["component"] == "transfer"]
+            result[_COVERAGE][backbone]["postfit_transfer"] = (
+                summarize_joint(transfer)["arms"] if transfer else {}
+            )
+        result["parameter_comparison"] = {
+            b: json.loads((p / "parameter_comparison.json").read_text()) for b, p in paths.items()
+        }
+        for backbone, directory in paths.items():
+            config, model = _configuration(directory / "config.json")
+            if result["parameter_comparison"][backbone] != _parameter_comparison(model, config):
+                raise ValueError("saved parameter comparison differs from the declared models")
     _write(output / "summary.json", result)
     lines = [
         "Frozen-backbone joint comparison",
         "",
-        "55 principal fits and 20 separately identified mechanistic fits, all seed 0.",
-        "RP is one shared five-fold comparator. H-optimus-1 and UNI2-h use identical "
+        f"{matrix['principal_fits']} principal fits and {matrix['mechanistic_fits']} "
+        "separately identified mechanistic fits, all seed 0.",
+        (
+            "New zero-initialized attention, compatibility-MLP and coverage-only fits. "
+            if controls
+            else "RP is one shared five-fold comparator. "
+        )
+        + "H-optimus-1 and UNI2-h use identical "
         "regional geometry and molecular inputs, with their own declared preprocessing.",
         "",
         "Arm | UNI2-h minus H-optimus-1 spatial correlation | MSE difference",

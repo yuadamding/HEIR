@@ -1,0 +1,59 @@
+{
+  "schema": "heir.joint_controls_matrix.v1",
+  "backbones": {
+    "hoptimus1": {
+      "experiment_config": "joint_controls_hoptimus1.json",
+      "experiment_config_sha256": "bfde593bb8a3bb773cbdcdc115bbca227ea44ca0f010f4ce520c2105ea7a1bb0",
+      "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/hoptimus1-prepared",
+      "principal_arms": [
+        "HRP"
+      ],
+      "control_arms": [
+        "HRP_mlp",
+        "HRP_coverage_only"
+      ],
+      "planned_fits": 15
+    },
+    "uni2h": {
+      "experiment_config": "joint_controls_uni2h.json",
+      "experiment_config_sha256": "1351a157bed3fe5580977b82a31c8a2c5b24206dbe2f3b7fd3a57df3b099fe04",
+      "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/uni2h-prepared",
+      "principal_arms": [
+        "HRP"
+      ],
+      "control_arms": [
+        "HRP_mlp",
+        "HRP_coverage_only"
+      ],
+      "planned_fits": 15
+    }
+  },
+  "seeds": [
+    0
+  ],
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_fits": 10,
+  "mechanistic_fits": 20,
+  "total_fits": 30,
+  "shared_RP_source": null,
+  "paired_backbone_arms": [
+    "HRP",
+    "HRP_mlp",
+    "HRP_coverage_only"
+  ],
+  "further_seeds_in_this_revision": [],
+  "panel_or_context_extensions_in_this_revision": false,
+  "decision_frozen_before_first_heldout_result": true,
+  "additional_seed_17_42_fits_authorized": false,
+  "expanded_or_broader_panels_scored": false,
+  "independent_confirmation": false,
+  "scientific_qualification": false,
+  "correction_initialization": "zero",
+  "historical_v090_comparison": "retained_reference_only_no_refitting_or_overwriting"
+}

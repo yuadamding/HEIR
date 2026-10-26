@@ -83,6 +83,67 @@ class RNAReference:
 
 
 @dataclass(frozen=True)
+class ProteinRegionCorrespondence:
+    """Original protein source observations mapped to declared prediction regions.
+
+    Every retained source observation remains on this axis, including excluded
+    observations with region index -1. This geometric membership is not a claim
+    of same-cell correspondence or a linear operator for nonlinear quantiles.
+    """
+
+    region_ids: tuple[str, ...]
+    observation_ids: tuple[str, ...]
+    coordinates: np.ndarray
+    replicate_ids: tuple[str, ...]
+    region_indices: np.ndarray
+    coordinate_units: str
+    geometry_sha256: str
+    source_identity: dict
+    qualification: str = "published_coarse_registration_unvalidated"
+
+    def __post_init__(self):
+        identifiers(self.region_ids, "protein correspondence region IDs")
+        identifiers(self.observation_ids, "protein correspondence observation IDs")
+        n = len(self.observation_ids)
+        array(self.coordinates, (n, 2), "protein correspondence coordinates")
+        if len(self.replicate_ids) != n or any(
+            not isinstance(value, str) or not value.strip() for value in self.replicate_ids
+        ):
+            raise ValueError("protein correspondence replicates must name every source observation")
+        indices = np.asarray(self.region_indices)
+        if (
+            indices.shape != (n,)
+            or indices.dtype.kind not in "iu"
+            or np.any(indices < -1)
+            or np.any(indices >= len(self.region_ids))
+        ):
+            raise ValueError("protein correspondence region indices must be in [-1, n_regions)")
+        spatial_metadata("tissue_region", self.coordinate_units)
+        if not isinstance(self.source_identity, dict):
+            raise ValueError("protein correspondence source identity must be a dictionary")
+        for label, digest in (
+            ("geometry", self.geometry_sha256),
+            ("source", self.source_identity.get("sha256")),
+        ):
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+            ):
+                raise ValueError(f"protein correspondence {label} requires a lowercase SHA-256")
+        if any(
+            not isinstance(self.source_identity.get(key), str)
+            or not self.source_identity[key].strip()
+            for key in ("patient_id", "specimen_id", "working_path")
+        ):
+            raise ValueError(
+                "protein correspondence requires patient, specimen and source identities"
+            )
+        if self.qualification != "published_coarse_registration_unvalidated":
+            raise ValueError("protein correspondence does not establish qualified registration")
+
+
+@dataclass(frozen=True)
 class RegionalProteinFeatures:
     """Measured regional proteins, without an RNA template or biological equality.
 
@@ -104,6 +165,7 @@ class RegionalProteinFeatures:
     replicate_valid_counts: Optional[np.ndarray] = None
     replicate_disagreement: Optional[np.ndarray] = None
     metadata: dict = field(default_factory=dict)
+    correspondence: Optional[ProteinRegionCorrespondence] = None
 
     def __post_init__(self):
         identifiers(self.region_ids, "protein region_ids")
@@ -152,6 +214,11 @@ class RegionalProteinFeatures:
                 raise ValueError("observed protein disagreement must be finite and nonnegative")
         if not isinstance(self.metadata, dict):
             raise ValueError("protein feature metadata must be a dictionary")
+        if self.correspondence is not None:
+            if self.correspondence.region_ids != self.region_ids:
+                raise ValueError("protein correspondence must use the feature region axis")
+            if set(self.correspondence.replicate_ids) != set(self.replicate_labels):
+                raise ValueError("protein correspondence must preserve every source replicate")
 
 
 @dataclass(frozen=True)
@@ -187,6 +254,17 @@ class JointInputs:
             raise ValueError("joint reference must be an RNAReference")
         if self.protein_features is not None and self.protein_features.region_ids != self.cell_ids:
             raise ValueError("joint protein features must follow the ordered prediction regions")
+        correspondence = (
+            self.protein_features.correspondence if self.protein_features is not None else None
+        )
+        if correspondence is not None and (
+            correspondence.coordinate_units != self.coordinate_units
+            or correspondence.source_identity["patient_id"] != self.patient_id
+            or correspondence.source_identity["specimen_id"] != self.specimen_id
+        ):
+            raise ValueError(
+                "joint protein correspondence patient, specimen or coordinate units differ"
+            )
 
     @property
     def coordinates(self) -> np.ndarray:
