@@ -110,6 +110,9 @@ remain in `src/heir/features/`. Historical study implementations are retained in
 | `inspection.py` | H&E and assay overlays with exact coverage and exclusion tables |
 | `diagnostics.py` | Fixed-fit correction, protein intervention, coverage, and replicate diagnostics |
 | `study.py` | Frozen patient folds, validation selection, training-only reference control, and paired patient reporting |
+| `error_decomposition.py` | Fixed-scale mean-bias and centered-error decomposition with evaluator weights |
+| `consistency.py` | Cohort replicate coverage/consistency and actual protein-pathway diagnostics |
+| `reconstruction.py` / `capability.py` | Target-informed simplex reference fits and a separate bound capability analysis |
 
 ### Small-workflow commands
 
@@ -762,6 +765,164 @@ fixed-mixture persistence, transfer-only gradients, active capacity counts, prot
 patient-role isolation, validation selection, generic-reference integrity/reload, and complete
 prediction export before test-target access. Generated artifacts remain under
 `/storage/HE_GPT/HEIR-cohort-runs/v060-controls`, outside the compact repository.
+
+### Version 0.7 capability analysis
+
+Version 0.6 is retained as the completed internal contribution study. Its six full arms and four
+post-fit transfer exports are unchanged. Version 0.7 analyzes those outputs under a separate
+[capability protocol](../configs/personalized/capability.json), bound to the completed study's
+summary, identity, configuration, folds, protocol, and metadata review. It retains the original
+nine-gene outcome/normalization basis and evaluation rows.
+
+`cohort-capability` prepares the original hashed inputs and targets and checks them against saved
+provenance and coverage. It replays the fitted protein predictions and matched-RNA transfer before
+using the rehydrated references. Generic references are loaded from the corresponding original
+training-patient bundles. No new H&E mapper, correction model, protein model, or encoder is fitted.
+
+For each patient, replicate, and gene, error is decomposed on the existing normalized log scale:
+`MSE = squared mean error + mean squared centered error`. The bias component averages squared
+gene/replicate biases; it is not the square of a pooled mean across genes. Population standard
+deviations describe predicted versus observed variability, and a constant observed endpoint has
+an explicitly undefined standard-deviation ratio. Observed entries determine the within-replicate
+gene weights, followed by equal replicates, specimens, and patients as in the completed study.
+Float64 diagnostic moments of the existing normalized values reconcile with the evaluator's
+float32 MSE up to reduction rounding.
+
+Cohort consistency compares each available pair on its shared eligible H&E regions. It retains
+gene-level agreement/error, exposure, bead counts, tissue occupancy, complete usable CODEX coverage,
+and all ten saved paths' performance on those exact rows. A single source replicate, a replicate
+with no eligible rows, and disjoint coverage have separate statuses. scRNA/snRNA and biopsy-site
+grouping use the previously recorded metadata and remain descriptive with thirteen patients.
+The protein analysis measures state-marker template variation and captures the actual fitted
+protein-logit update. Both raw and within-region-centered logit magnitudes are reported because a
+common logit shift does not change the state softmax. Fixed-weight zero-confidence and spatial
+permutation interventions extend the pilot pathway check across the thirteen outer test patients.
+
+Reference reconstruction deliberately uses measured spatial targets. Each source replicate is
+fitted independently under its matched reference and its original fold's generic reference.
+Every region gets a nonnegative simplex mixture `q`, with linear expression `qB`, no H&E mapper,
+and zero expression correction. The fixed procedure uses float64 CPU Adam, two RNA-only initial
+mixtures (uniform and reference proportions), 1,000 steps each, and learning rate 0.05. Each
+region retains its best observed objective across starts and iterates, including initialization.
+The saved numeric artifacts bind state/gene/observation axes, `q`, `B`, linear/normalized expression,
+initial and selected losses, and selected starts/steps. These are finite-budget local fits;
+convergence is not asserted and their scores are not certified bounds.
+
+For each qualifying replicate pair, the source mixture is reused on shared regions in both
+directions. Evaluation counts never enter that source fit. Direct transfer of the source assay's
+counts through the same fixed normalization supplies an empirical assay-informed comparison.
+Pairs need at least three shared eligible regions. These are exploratory comparisons on the
+published registered pixel canvas; section identity, physical calibration, and precise alignment
+remain unqualified. Neither a target-informed within-replicate score nor a cross-replicate result
+becomes a new held-out H&E prediction result. The prespecified v0.6 comparisons are not replaced
+by a favorable diagnostic.
+
+The completed thirteen-patient analysis reconciles all ten original MSEs within `3.71e-7`.
+The principal error components are:
+
+| Saved prediction | Squared level bias | Centered error | Total MSE | Predicted/observed SD ratio |
+| --- | ---: | ---: | ---: | ---: |
+| H&E | 7.8082 | 7.8433 | 15.6515 | 0.5171 |
+| Matched RNA | 5.1313 | 7.3985 | 12.5298 | 0.4277 |
+| RNA plus protein | 5.1529 | 7.3923 | 12.5452 | 0.4260 |
+| Constant mixture plus correction | 5.0778 | 6.9718 | 12.0496 | 0.1703 |
+| Generic reference | 5.0377 | 7.6227 | 12.6604 | 0.5327 |
+| Separately trained transfer | 5.6927 | 7.3806 | 13.0733 | 0.3971 |
+| Matched RNA post-fit transfer | 5.8733 | 7.2679 | 13.1412 | 0.3599 |
+| Generic post-fit transfer | 5.8495 | 7.3806 | 13.2302 | 0.4495 |
+
+The SD column is an evaluator-weighted mean of defined gene/replicate ratios, with 99.57265% of
+weight eligible. HTA1_853 replicate 1 CD8A is constant and remains undefined. RNA's MSE reduction
+relative to H&E decomposes into 2.67694 less bias error and 0.44477 less centered error. Its learned
+correction reduces bias by 0.74200 but increases centered error by 0.13064. Generic correction
+shows the same tradeoff (bias -0.81186, centered error +0.24206). These results support an error
+calibration benefit, not a general correction-driven improvement in spatial reconstruction.
+
+The constant-mixture control has strongly compressed variability. It lowers centered error versus
+matched RNA in all thirteen patients, but its lower total MSE occurs in only five; its cohort mean
+advantage is heterogeneous, including a large bias improvement for HTA1_982. Lower error from a
+smooth prediction is not evidence that spatial variation has been recovered.
+
+Ten patients have two usable spatial replicates. Biopsies 330-1082, 917-4531, and 982-7629 have
+one source replicate and are excluded from paired-assay diagnostics only. Across the ten pairs,
+the median of patient median-gene agreement is 0.13705, ranging from 0.02899 to 0.22343. Nine
+patients have nine defined gene correlations; 853-4381 has eight because of the constant CD8A
+measurement. There are no additional disjoint or eligibility-loss pairs.
+
+| Biopsy | Shared eligible regions | Median defined-gene assay agreement | RNA model on the same regions |
+| --- | ---: | ---: | ---: |
+| 213-6752 | 99 | 0.1194 | 0.1998 |
+| 313-932 | 124 | 0.1385 | 0.0016 |
+| 364-1321 | 64 | 0.1301 | 0.1101 |
+| 514-6760 | 277 | 0.0665 | 0.0801 |
+| 783-4081 | 99 | 0.0290 | 0.0550 |
+| 812-8239 | 144 | 0.1600 | 0.1038 |
+| 853-4381 | 148 | 0.2234 | 0.0823 |
+| 878-7149 | 360 | 0.1931 | 0.1262 |
+| 880-7179 | 278 | 0.1466 | 0.1931 |
+| 997-7789 | 121 | 0.1356 | 0.0780 |
+
+Inconsistency is widespread, while weak mapping also persists in some relatively higher-agreement
+patients. Agreement is not a ceiling and the model/assay score ratio has no established meaning.
+Descriptively, scRNA/snRNA groups contain eight/five patients, with five paired patients each;
+their median pair agreement is 0.13852/0.13557. Their all-eligible RNA-model correlations are
+0.04629/0.11810 and MSEs 14.10256/10.01338. Site and modality are confounded in this small cohort;
+these summaries do not establish an assay or site effect. Exact exposure, bead-count, occupancy,
+and CODEX overlap tables accompany every pair.
+
+Both references can fit substantial structure when given the targets themselves. Across all
+thirteen patients, matched/generic within-replicate reconstruction scores are 0.60168/0.61752,
+with MSE 3.51706/3.90613. These are target-informed fits with 23 source replicates and 46 numerical
+fit artifacts. The more demanding cross-replicate comparison uses 1,714 shared regions across
+ten patients and both directions:
+
+| Comparison on the same ten patients and shared regions | Mean spatial correlation | Mean MSE |
+| --- | ---: | ---: |
+| Saved H&E prediction | 0.08763 | 15.28602 |
+| Saved matched-RNA prediction | 0.10299 | 12.03491 |
+| Saved generic-reference prediction | 0.12097 | 12.08744 |
+| Source-replicate fitted matched-reference mixture | 0.12393 | 9.93421 |
+| Source-replicate fitted generic-reference mixture | 0.13749 | 9.60258 |
+| Direct source-replicate measurement transfer | Undefined | 11.63873 |
+
+Direct transfer has an undefined strict cohort spatial headline because HTA1_853 has a constant
+source CD8A map for a target-evaluable direction. Its mean over the nine defined patients is
+0.12431 as a diagnostic only; that subset does not replace the ten-patient comparison. Within-
+and cross-replicate scores have different patient/region scopes and must not be subtracted as
+if they were a controlled held-out contrast.
+
+The matched reference fits source counts with lower error, while the generic reference has
+slightly better cross-replicate correlation and error. Neither is uniformly superior. The large
+drop from target-informed source fitting to cross-replicate reuse implicates measurement/assay
+consistency and fit specificity alongside the mapper. It does not isolate their causal shares
+or prove a theoretical limit of either reference.
+Best iterates occur at step 1,000 for 4,624/4,625 matched and 4,623/4,625 generic source rows.
+Convergence therefore remains unassessed; these are achieved results at the fixed budget, not
+fully optimized reference capacities. The independent audit verified all 46 fit artifacts and
+106 score records, including simplex constraints, `qB`, normalization, source identities, and
+shared-region directionality, without rerunning optimization.
+
+Across all thirteen fixed protein models, the scored-region centered protein/base-logit RMS ratio
+has median 2.585% (range 0.820–4.133%). Removing confidence changes conditional mixtures by median
+row L1 0.01515; permuting marker values changes them by 0.00387. H&E correction remains exactly
+unchanged for every intervention. Templates are not globally identical: mean marker-template SD
+within patients ranges from 0.0522 to 0.1241, although individual marker/reference combinations
+can be nearly flat. This extends the observed weak pathway influence beyond the pilot without
+asserting that all marker calibration or biological information is absent.
+
+The next justified development priority is measurement definition and qualification: inspect
+exposure, registered overlap, regional aggregation scale, and the narrow normalization panel before
+interpreting small prediction changes. Both references have substantial source-fit capacity, so
+reference representability alone does not explain the result. Mapping remains a candidate
+limitation on more reproducible measurements; it is not isolated by the current data. Protein
+proxy/template calibration and the small effective logit update merit focused review before
+stronger guidance is introduced. No broader gene panel, new mapper search, or neighborhood model
+was run after these diagnostics.
+
+Version 0.7 passes 283 CPU tests, Ruff lint/format, frozen-lock, and wheel/source-build checks.
+The compact report and exact patient-by-gene, consistency, template, reconstruction, and audit
+artifacts are under `/storage/HE_GPT/HEIR-cohort-runs/v070-capability`. The completed v0.6 study,
+source data, retained checkpoints, and historical archive remain unchanged.
 
 Physical calibration, exact section/core matching, registration sensitivity, marker calibration,
 and independent scientific validation remain outstanding.

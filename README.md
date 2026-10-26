@@ -23,6 +23,8 @@ frozen histology caches alongside the RGB control. Pilot comparisons report tran
 separately, including direct protein-marker outcomes versus the other outcomes.
 Version 0.6 adds fixed-model diagnostics, separately fitted transfer and constant-reference
 controls, and a frozen internal patient-held-out study with validation-only rank selection.
+Version 0.7 preserves that study and adds error decomposition, cohort measurement consistency,
+and explicitly target-informed reference reconstruction to diagnose its limitations.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
@@ -81,6 +83,18 @@ The [internal study protocol](configs/personalized/study.json) binds exact confi
 patient folds. Its [workflow and results](docs/personalized_development.md#version-06-contribution-tests)
 retain prior cohort exposure, target consistency, correction effects, and the observed null protein
 increment. Neighborhood comparisons remain subsequent work.
+
+Analyze the completed study under its separately bound capability protocol:
+
+```bash
+uv run heir cohort-capability --root /mnt/seagate/HnE/HTAPP_MBC \
+  --study /storage/HE_GPT/HEIR-cohort-runs/v060-controls/internal-study \
+  --protocol configs/personalized/capability.json --output /tmp/heir-capability
+```
+
+This command fits diagnostic RNA mixtures directly to spatial targets and evaluates shared-region
+replicate transfers. Those reconstructions are target-informed analyses, not new prediction models
+or certified performance bounds. See the [capability report](docs/personalized_development.md#version-07-capability-analysis).
 
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:

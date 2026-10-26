@@ -1,0 +1,72 @@
+{
+  "schema": "heir.reference_capability.v1",
+  "completed_study_commit": "641e87541bcd485c9f652695cc6950dfc12551cb",
+  "study_files_sha256": {
+    "summary.json": "cd10d9ca7b28a14a1816bd9b8eecc52eef7f42df449ceb0d7003407089f719dc",
+    "identity.json": "522a7dd19ac9dfbd9c3d884cfc999c41b936fa5e8c1acdaae5b3d8eba904c43e",
+    "config.json": "75422ac836be0d11850f9f3d08dc4129e814ada6d04009eb9fca9723b61a4c25",
+    "folds.csv": "b08ac3bccb3af7ab77054d27554c1addd6042a584ada774ac13ab3ec9898d881",
+    "protocol.json": "90a2cfdc44d71e86436132127a7438af9107c00988212d88a2e5c2234dafca89",
+    "metadata-review.json": "43e5767d44419e0108789dae1a8974f61332fa3ce582b59a303527cd100e6072"
+  },
+  "patient_metadata_sha256": "025d5dd02ee80322c3ba0e70c93984beddfa349301b12e9e3c876f5bc1bc8839",
+  "outcome_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "normalization_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "reconstruction": {
+    "steps": 1000,
+    "learning_rate": 0.05,
+    "seed": 0,
+    "initializations": [
+      "uniform",
+      "reference_proportions"
+    ],
+    "selection": "lowest_observed_gene_mse_per_region_across_initializations_and_iterates",
+    "constraint": "nonnegative_simplex_via_softmax",
+    "correction": false,
+    "he_mapper": false,
+    "interpretation": "target_informed_reference_reconstruction_not_prediction_or_certified_bound"
+  },
+  "cross_replicate": {
+    "minimum_shared_regions": 3,
+    "directions": "both",
+    "fit": "each_source_replicate_independently",
+    "score": "shared_positive_fixed_panel_exposure_regions",
+    "direct_reference": "source_replicate_measured_counts_normalized_with_same_panel",
+    "registration": "exploratory_published_registered_pixel_overlap_not_qualified_same_cell_alignment"
+  },
+  "protein_diagnostics": {
+    "permutation_seed": 0,
+    "refit": false,
+    "scope": "all_thirteen_outer_test_patients_fixed_fitted_protein_models"
+  },
+  "metadata_groups": [
+    "independent_rna",
+    "biopsy_site"
+  ],
+  "group_interpretation": "descriptive_only_no_subgroup_significance_claim",
+  "main_v060_study_unchanged": true,
+  "new_deployable_model_fitting": false,
+  "target_informed": true,
+  "independent_confirmation": false,
+  "scientific_qualification": false
+}

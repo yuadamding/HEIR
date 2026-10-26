@@ -625,7 +625,18 @@ def study_command(args):
     run_study(args.root, args.config, args.folds, args.protocol, args.output)
 
 
+def capability_command(args):
+    """Separate calibration, measurement consistency, and target-informed reference fitting."""
+    from .capability import run_capability
+
+    run_capability(args.root, args.study, args.protocol, args.output)
+
+
 def add_commands(commands):
+    capability = commands.add_parser("cohort-capability", help=capability_command.__doc__)
+    for name in ("root", "study", "protocol", "output"):
+        capability.add_argument(f"--{name}", required=True)
+    capability.set_defaults(run=capability_command)
     diagnostics = commands.add_parser("cohort-diagnose", help=diagnostics_command.__doc__)
     diagnostics.add_argument("--root", required=True)
     diagnostics.add_argument("--run", dest="run_directory", required=True)
