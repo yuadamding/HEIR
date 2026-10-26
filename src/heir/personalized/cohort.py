@@ -20,7 +20,13 @@ from .graph import build_graph
 from .observation import ObservationOperator
 from .reference import build_reference, extract_raw_counts
 from .regions import RegionGrid, build_region_grid, point_to_grid
-from .schema import PredictionInputs, ProteinEvidence, ProteinObservationOperator, SpatialTargets
+from .schema import (
+    JointInputs,
+    PredictionInputs,
+    ProteinEvidence,
+    ProteinObservationOperator,
+    SpatialTargets,
+)
 
 COHORT_BIOPSIES = (
     "213-6752",
@@ -321,6 +327,213 @@ def _protein_evidence(root, source, reference, grid, protein_cofactor, rna_cofac
         "protein_rna_calibration": "unvalidated_fixed_saturating_proxy",
         "coverage": coverage,
     }
+
+
+def prepare_joint_inputs(
+    root,
+    biopsy_id,
+    *,
+    modalities=("H", "R", "P"),
+    region_size=100,
+    min_tissue_fraction=0.1,
+    embedding_gene_ids=None,
+    gene_ids=None,
+    max_states=32,
+    protein_cofactor=100.0,
+    feature_cache_dir=None,
+    feature_encoder_manifest_sha256=None,
+    marker_panel="five",
+    protein_marker_ids=None,
+    verification_cache=None,
+):
+    """Prepare only the requested prediction modalities; never open spatial RNA.
+
+    All arms share an H&E-derived geometric grid. RP reads the image only to
+    establish that grid and never computes image features or opens their cache.
+    H and HP do not read independent RNA. P describes measured antibody features
+    and does not need an RNA template. H requires an existing frozen image cache.
+    """
+    from .protein_features import aggregate_protein_features, qualify_marker_panel
+
+    modalities = tuple(modalities)
+    if (
+        not modalities
+        or len(set(modalities)) != len(modalities)
+        or not set(modalities) <= {"H", "R", "P"}
+    ):
+        raise ValueError("joint modalities must be unique H/R/P labels")
+    if "H" in modalities and (feature_cache_dir is None or feature_encoder_manifest_sha256 is None):
+        raise ValueError("joint H modality requires frozen feature cache and encoder manifest hash")
+    entry = discover_cohort(root)[biopsy_id]
+    sources = entry["role_sources"]
+    grid = build_region_grid(
+        _verified_source_path(root, sources["he"], verification_cache=verification_cache),
+        bin_size_pixels=region_size,
+        min_tissue_fraction=min_tissue_fraction,
+        compute_features=False,
+    )
+    consumed = ["he"]
+    image, reference, proteins = None, None, None
+    image_metadata, rna_metadata, protein_metadata = None, None, None
+    if "H" in modalities:
+        from .region_features import load_feature_cache
+
+        cache = Path(feature_cache_dir) / f"{biopsy_id}.npz"
+        image, metadata = load_feature_cache(
+            cache,
+            grid,
+            expected_image_sha256=sources["he"]["sha256"],
+            expected_encoder_manifest_sha256=feature_encoder_manifest_sha256,
+        )
+        image_metadata = {
+            "kind": "frozen_histology",
+            "cache_path": str(cache.resolve()),
+            "metadata": metadata,
+            "feature_dim": int(image.shape[1]),
+            "encoder_manifest_sha256": feature_encoder_manifest_sha256,
+            "contains_spatial_rna_derived_features": False,
+        }
+        grid = replace(
+            grid,
+            image_features=image,
+            settings={
+                **grid.settings,
+                "encoder_name": metadata["encoder"]["encoder_id"],
+                "encoder_manifest_sha256": feature_encoder_manifest_sha256,
+            },
+        )
+    if "R" in modalities:
+        panel = _axis(
+            DEFAULT_EMBEDDING_GENES if embedding_gene_ids is None else embedding_gene_ids,
+            "embedding gene panel",
+        )
+        with _read_h5ad(
+            _verified_source_path(root, sources["rna"], verification_cache=verification_cache)
+        ) as adata:
+            counts, genes = extract_raw_counts(adata)
+            original_ids = _axis(adata.obs_names, "RNA observation IDs")
+            replicates = _replicates(adata, sources["rna"])
+            reference = build_reference(
+                counts,
+                genes,
+                adata.obs["cell_type"].astype(str).to_numpy(),
+                embedding_gene_ids=panel,
+                max_states=max_states,
+            )
+        if gene_ids is not None:
+            requested = _axis(gene_ids, "requested RNA gene panel")
+            retained = tuple(dict.fromkeys((*requested, *panel)))
+            if not set(retained) <= set(reference.gene_ids):
+                raise ValueError("requested genes are absent from the independent RNA count axis")
+            columns = [reference.gene_ids.index(g) for g in retained]
+            reference = replace(
+                reference,
+                gene_ids=retained,
+                expression=reference.expression[:, columns],
+                variance=reference.variance[:, columns],
+            )
+        consumed.append("rna")
+        rna_metadata = {
+            "source_observation_axis": _axis_provenance(original_ids),
+            "source_replicates": _counts_by_label(replicates),
+            "annotation_column": "cell_type",
+            "annotation_policy": "published_cohort_curated_rna_only",
+            "annotation_fit_scope": "published_cohort_not_training_fold_fitted",
+            "measurement": "retained_cellbender_qc_counts",
+            "normalization": "full_measured_rna_library_10000",
+            "embedding_gene_ids": list(panel),
+            "gene_ids": list(reference.gene_ids),
+            "max_states": max_states,
+        }
+    if "P" in modalities:
+        with _read_h5ad(
+            _verified_source_path(root, sources["protein"], verification_cache=verification_cache)
+        ) as adata:
+            original_ids = _axis(adata.obs_names, "protein observation IDs")
+            genes = _axis(adata.uns["counts_var"], "protein measured gene axis")
+            qualified, qualification = qualify_marker_panel(
+                Path(root) / "metadata/Table_S5_CODEX_panel_original.tsv",
+                genes,
+                marker_panel,
+                declared_marker_ids=protein_marker_ids,
+            )
+            available = [
+                i for i, record in enumerate(qualified) if record["measurement_id"] in genes
+            ]
+            columns = [genes.index(qualified[i]["measurement_id"]) for i in available]
+            counts = adata.obsm["counts"]
+            if counts.shape != (len(original_ids), len(genes)):
+                raise ValueError("retained protein matrix and its named axes differ")
+            values = np.full((len(original_ids), len(qualified)), np.nan, dtype=np.float64)
+            if available:
+                values[:, available] = _dense(counts[:, columns])
+            replicates = _replicates(adata, sources["protein"])
+            xy = adata.obs[["x", "y"]].to_numpy(dtype=float)
+            protein_metadata = {
+                "source_observation_axis": _axis_provenance(original_ids),
+                "source_replicates": _counts_by_label(replicates),
+                "measurement": "retained_raw_cell_intensities_obsm_counts",
+                "panel": qualification,
+            }
+            proteins = aggregate_protein_features(
+                grid,
+                values,
+                xy,
+                replicates,
+                tuple(record["marker_id"] for record in qualified),
+                cofactor=protein_cofactor,
+                metadata=protein_metadata,
+            )
+        protein_metadata = proteins.metadata
+        consumed.append("protein")
+    inputs = JointInputs(
+        patient_id=entry["patient_id"],
+        specimen_id=entry["specimen_id"],
+        cell_ids=grid.region_ids,
+        coordinates_um=grid.coordinates,
+        image_features=image,
+        image_encoder_manifest_sha256=feature_encoder_manifest_sha256
+        if "H" in modalities
+        else None,
+        reference=reference,
+        protein_features=proteins,
+    )
+    provenance = {
+        "schema": "heir.htapp_biopsy_regions.v1",
+        "model_family": "joint",
+        "biopsy_id": biopsy_id,
+        "patient_id": inputs.patient_id,
+        "specimen_id": inputs.specimen_id,
+        "matching_scope": "published_biopsy",
+        "section_identity": "unknown",
+        "patient_grouping_basis": entry["metadata"]["participant_group_basis"],
+        "prediction_unit": "tissue_region",
+        "coordinate_units": "registered_pixel",
+        "modalities": list(modalities),
+        "consumed_sources": consumed,
+        "source_integrity": "only_consumed_input_payload_sizes_and_sha256_verified",
+        # Declarations allow the independent target loader to bind the same
+        # published biopsy. They do not claim that unused payloads were opened.
+        "sources": {key: sources[key] for key in ("he", "rna", "protein")},
+        "source_declaration_scope": "manifest_identities_including_unconsumed_modalities",
+        "image_features": image_metadata,
+        "rna": rna_metadata,
+        "protein": protein_metadata,
+        "grid": {
+            "settings": grid.settings,
+            "region_ids": list(grid.region_ids),
+            "coordinates": grid.coordinates.tolist(),
+            "bin_keys": grid.bin_keys.tolist(),
+            "tissue_fraction": grid.tissue_fraction.tolist(),
+            "component_ids": list(grid.component_ids),
+        },
+        "registration": {
+            "status": "published_coarse_registration_unvalidated",
+            "physical_calibration": "unresolved",
+            "same_cell_correspondence": False,
+        },
+    }
+    return inputs, provenance
 
 
 def prepare_cohort_inputs(
@@ -671,15 +884,36 @@ def load_measurement_gene_axes(root, biopsy_id, *, verification_cache=None):
 
 
 def load_measurement_substrate(
-    root, biopsy_id, *, base_region_size=100, min_tissue_fraction=0.1, verification_cache=None
+    root,
+    biopsy_id,
+    *,
+    base_region_size=100,
+    min_tissue_fraction=0.1,
+    verification_cache=None,
+    correspondence_path=None,
+    correspondence_sha256=None,
 ):
     """Load raw measurement support without model, reference fitting, or embeddings."""
     from scipy.sparse import csr_matrix
 
     from .measurement import MeasurementSubstrate
 
+    if (correspondence_path is None) != (correspondence_sha256 is None):
+        raise ValueError("source correspondence requires both path and SHA-256")
     verification_cache = {} if verification_cache is None else verification_cache
     entry = discover_cohort(root)[biopsy_id]
+    correspondence = None
+    if correspondence_path is not None:
+        from .correspondence import load_source_correspondence
+
+        correspondence = load_source_correspondence(
+            correspondence_path,
+            expected_sha256=correspondence_sha256,
+            biopsy_id=biopsy_id,
+            patient_id=entry["patient_id"],
+            specimen_id=entry["specimen_id"],
+            sources=entry["role_sources"],
+        )
     sources = {role: entry["role_sources"][role] for role in ("he", "targets", "rna")}
     axes = load_measurement_gene_axes(root, biopsy_id, verification_cache=verification_cache)
     grid = build_region_grid(
@@ -726,6 +960,16 @@ def load_measurement_substrate(
         "total_exposure_basis": "all_retained_spatial_measured_gene_ids",
         "outside_selected_he_regions": int((mapping < 0).sum()),
     }
+    if correspondence is not None:
+        provenance["source_correspondence"] = correspondence
+        if correspondence["exact_relationship_qualified"]:
+            provenance.update(
+                matching_scope="documented_target_core_and_section_crosswalk",
+                replicate_linkage=correspondence["target_linkage"],
+                section_identity="documented_target_section_ids",
+                core_identity=correspondence["target_core_id"] or "documented_separate_cores",
+                linkage_basis="hash_bound_assay_specific_source_crosswalk",
+            )
     return MeasurementSubstrate(
         biopsy_id,
         entry["patient_id"],

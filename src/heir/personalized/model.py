@@ -405,3 +405,22 @@ class PersonalizedModel(nn.Module):
                 "he_only" if config.variant == "he" else "conditional_reference_unvalidated"
             ),
         )
+
+
+def create_model(config, *, family=None):
+    """Explicit family discriminator; legacy configuration semantics are unchanged."""
+    from .joint_model import JointModel, JointModelConfig
+
+    if isinstance(config, JointModelConfig):
+        if family not in (None, "joint"):
+            raise ValueError("model family differs from configuration type")
+        return JointModel(config)
+    if isinstance(config, ModelConfig):
+        if family not in (None, "personalized"):
+            raise ValueError("model family differs from configuration type")
+        return PersonalizedModel(config)
+    if family == "joint":
+        return JointModel(JointModelConfig.from_dict(config))
+    if family == "personalized":
+        return PersonalizedModel(ModelConfig.from_dict(config))
+    raise ValueError("dictionary model configurations require an explicit family")

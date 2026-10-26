@@ -66,6 +66,24 @@ def _panel_exposure(counts, gene_ids, panel):
     return np.asarray(counts[:, [lookup[g] for g in panel]].sum(axis=1)).ravel()
 
 
+def _linkage_fields(provenance):
+    """Propagate source evidence without turning a design statement into exact pairing."""
+    crosswalk = provenance.get("source_correspondence")
+    if crosswalk is None:
+        return {}
+    return {
+        "linkage": crosswalk["target_linkage"],
+        "exact_section_ids": json.dumps(crosswalk["target_section_ids"], sort_keys=True),
+        "core_relationship": crosswalk["target_core_id"] or "unknown",
+        "source_crosswalk_sha256": crosswalk["sha256"],
+        "study_design_relationships": ";".join(crosswalk["study_design_relationships"]),
+        "missing_source_fields": ";".join(
+            sorted({field for record in crosswalk["records"] for field in record["missing_fields"]})
+        ),
+        "evidence": "hash-bound source correspondence; see identity.json and linkage_review.tsv",
+    }
+
+
 def _support_rows(measurement, panels, biopsy, scope, scale, offset):
     total = np.asarray(measurement.counts.sum(axis=1)).ravel()
     nine = _panel_exposure(measurement.counts, measurement.gene_ids, panels["original_nine"])
@@ -342,8 +360,8 @@ def _report(output, summary):
         "",
         "Raw counts are summed over nested bins before fixed-panel normalization. Common support "
         "is defined by bead-occupied H&E-selected 100-pixel bins before expression filtering. "
-        "Intrabin sampled tissue may differ. Physical dimensions and exact section correspondence "
-        "remain unqualified.",
+        "Intrabin sampled tissue may differ. Physical dimensions remain unqualified; "
+        f"the recorded exact section-linkage status is {summary['exact_section_linkage']}.",
         "",
         f"The broader panel contains {summary['normalizer_sizes']['shared_measured']} "
         "ordered gene IDs, "
@@ -481,6 +499,16 @@ def run_measurement(root, study, capability, config_path, output):
         raise ValueError("completed capability summary differs")
     if _sha(root / "metadata/selected_13_biopsies.tsv") != config["patient_metadata_sha256"]:
         raise ValueError("cohort metadata binding differs")
+    correspondence = config.get("source_correspondence")
+    correspondence_options = {}
+    if correspondence is not None:
+        path = Path(config_path).resolve().parent / correspondence["path"]
+        if _sha(path) != correspondence["sha256"]:
+            raise ValueError("measurement source correspondence binding differs")
+        correspondence_options = {
+            "correspondence_path": path,
+            "correspondence_sha256": correspondence["sha256"],
+        }
     cohort, verification = discover_cohort(root), {}
     genes = tuple(config["outcome_gene_ids"])
     axes = {
@@ -514,6 +542,7 @@ def run_measurement(root, study, capability, config_path, output):
             "completed_capability": str(capability.resolve()),
             "gene_axes_and_sources": axes,
             "new_model_fitting": False,
+            "source_correspondence": correspondence,
         },
     )
     previous = json.loads((study / "summary.json").read_text())
@@ -554,6 +583,7 @@ def run_measurement(root, study, capability, config_path, output):
             base_region_size=100,
             min_tissue_fraction=config["min_tissue_fraction"],
             verification_cache=verification,
+            **correspondence_options,
         )
         reps = tuple(sorted(set(substrate.replicates)))
         if len(reps) not in (1, 2):
@@ -610,6 +640,7 @@ def run_measurement(root, study, capability, config_path, output):
                 ),
             )
         )
+        linkage[-1].update(_linkage_fields(substrate.provenance))
         _write(output / "overlays" / f"{biopsy}.json", overlay)
         for scale in config["scales_pixels"]:
             available = (
@@ -755,7 +786,9 @@ def run_measurement(root, study, capability, config_path, output):
         aggregation_conservation=conservation,
         new_model_fitting=False,
         physical_calibration="unknown",
-        exact_section_linkage="unknown",
+        exact_section_linkage="documented_for_all"
+        if all(row["linkage"] != "unknown" for row in linkage)
+        else "unknown_or_partial",
         independent_confirmation=False,
         scientific_qualification=False,
         decision="No measurement recipe is automatically promoted. Review all six conditions, "

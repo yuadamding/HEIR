@@ -47,10 +47,12 @@ def _validate(prediction: Prediction) -> dict[str, np.ndarray]:
         raise ValueError("prediction exports require relative expression")
     if prediction.reference_support_calibrated is not False:
         raise ValueError("reference support is uncalibrated in this prediction schema")
-    expected_policy = (
-        "he_only" if len(prediction.state_ids) == 1 else "conditional_reference_unvalidated"
+    allowed_policies = (
+        {"he_only", "direct_multimodal"}
+        if len(prediction.state_ids) == 1
+        else {"conditional_reference_unvalidated"}
     )
-    if prediction.unsupported_policy != expected_policy:
+    if prediction.unsupported_policy not in allowed_policies:
         raise ValueError("prediction unsupported policy does not match its reference state axis")
     for name in ("patient_id", "specimen_id"):
         value = getattr(prediction, name)

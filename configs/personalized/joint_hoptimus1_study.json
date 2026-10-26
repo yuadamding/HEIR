@@ -1,0 +1,40 @@
+{
+  "schema": "heir.joint_patient_study.v1",
+  "extension_label": "frozen_backbone_seed0_hoptimus1",
+  "backbone_id": "hoptimus1",
+  "matrix_protocol": "joint_backbones_study.json",
+  "matrix_protocol_sha256": "6d9230e327278d3dfdc132862deb0e5d76674bd1a20b17f632c6b1f231d8680a",
+  "model_config_sha256": "3672a875221ef5b0fbdca6ecef1612e3dd937d410ed1e9ce93c54462e13c2f78",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_arms": [
+    "H",
+    "HR",
+    "HP",
+    "RP",
+    "HRP",
+    "HRP_generic"
+  ],
+  "control_arms": [
+    "HRP_constant_reference",
+    "HRP_transfer_only"
+  ],
+  "seeds": [
+    0
+  ],
+  "control_seeds": [
+    0
+  ],
+  "planned_fits": 40,
+  "test_prediction_before_target_loading": true,
+  "no_train_validation_refit": true,
+  "selection": "validation_spatial_correlation_then_centered_error_then_total_mse",
+  "prior_cohort_exposure": true,
+  "scientific_qualification": false,
+  "no_further_seed_panel_or_context_runs_in_this_revision": true
+}

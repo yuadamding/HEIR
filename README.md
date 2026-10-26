@@ -27,6 +27,10 @@ Version 0.7 preserves that study and adds error decomposition, cohort measuremen
 and explicitly target-informed reference reconstruction to diagnose its limitations.
 Version 0.8 fixes reconstruction region-ID alignment and adds a measurement-only screen of
 100/200/400 registered-pixel aggregation, fixed normalization panels, exposure, and displacement.
+Version 0.9 adds a separate joint model with learned protein features, hierarchical RNA-state
+assignment, and a multimodal correction, plus source-coordinate replay. Legacy bundles retain
+their original meaning. Joint experiments use the historical 100-pixel view as exploratory
+development; coordinate replay does not qualify biological alignment.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
@@ -110,6 +114,40 @@ uv run heir cohort-measurement --root /mnt/seagate/HnE/HTAPP_MBC \
 The [measurement configuration](configs/personalized/measurement.json) fixes all six conditions,
 support and eligibility rules, and the pixel displacement stress test. Raw counts are aggregated
 before normalization. See the [measurement report](docs/personalized_development.md#version-08-measurement-qualification).
+
+The current joint comparison uses frozen H-optimus-1 and UNI2-h features on identical crops.
+Use `cohort-features` with each retained manifest and local checkpoint to create its cache.
+Both pretrained weights remain frozen; their 1,536-dimensional outputs feed a trainable
+32-dimensional projection. Model bundles reject features from a different encoder.
+
+With the encoder caches available, prepare inputs separately from target tables and run:
+
+```bash
+DATA=/mnt/seagate/HnE/HTAPP_MBC
+OUT=/storage/HE_GPT/HEIR-cohort-runs/v090-joint
+uv run heir cohort-joint prepare --root "$DATA" --config configs/personalized/joint_v1.json \
+  --folds configs/personalized/study_folds.csv --output "$OUT/prepared"
+uv run heir cohort-joint prepare --root "$DATA" --config configs/personalized/joint_uni2h.json \
+  --folds configs/personalized/study_folds.csv --output "$OUT/uni2h-prepared"
+uv run heir cohort-joint pilot --prepared "$OUT/uni2h-prepared" --biopsies 313-932 514-6760 \
+  --config configs/personalized/joint_uni2h.json --output "$OUT/uni2h-pilots"
+uv run heir cohort-joint study --prepared "$OUT/prepared" \
+  --config configs/personalized/joint_hoptimus1_study.json \
+  --folds configs/personalized/study_folds.csv --seeds 0 --output "$OUT/hoptimus1-study"
+uv run heir cohort-joint study --prepared "$OUT/uni2h-prepared" \
+  --config configs/personalized/joint_uni2h_study.json \
+  --folds configs/personalized/study_folds.csv --seeds 0 --output "$OUT/uni2h-study"
+uv run heir cohort-joint compare-backbones --hoptimus-study "$OUT/hoptimus1-study" \
+  --uni2-study "$OUT/uni2h-study" --config configs/personalized/joint_backbones_study.json \
+  --output "$OUT/backbone-comparison"
+```
+
+The [backbone protocol](configs/personalized/joint_backbones_study.json) specifies **55 principal
+fits plus 20 mechanistic fits**, all seed 0. RP is fitted once per fold and shared. Predictions
+and fixed-model interventions precede each fold's test-target loading. Existing H-optimus-1
+pilots are retained; same-biopsy pilots do not measure generalization. The earlier 100-fit
+proposal and panel extensions remain separate, unexecuted protocols. New runs require new
+output paths and corresponding protocol bindings; existing results are never overwritten.
 
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:

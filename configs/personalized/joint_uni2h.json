@@ -1,0 +1,130 @@
+{
+  "schema": "heir.joint_region_workflow.v1",
+  "preparation": {
+    "region_size": 100,
+    "min_tissue_fraction": 0.1,
+    "embedding_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A1",
+      "COL1A2",
+      "DCN",
+      "PECAM1",
+      "VWF",
+      "PTPRC",
+      "CD3D",
+      "CD4",
+      "CD8A",
+      "NKG7",
+      "LYZ",
+      "CD68",
+      "MKI67"
+    ],
+    "max_states": 32,
+    "protein_cofactor": 100.0,
+    "feature_cache_dir": "/storage/HE_GPT/HEIR-cohort-runs/v090-joint/uni2h-features",
+    "feature_encoder_manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369"
+  },
+  "model": {
+    "feature_dim": 1536,
+    "state_dim": 18,
+    "gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "supervised_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "normalization_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "state_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A1",
+      "COL1A2",
+      "DCN",
+      "PECAM1",
+      "VWF",
+      "PTPRC",
+      "CD3D",
+      "CD4",
+      "CD8A",
+      "NKG7",
+      "LYZ",
+      "CD68",
+      "MKI67"
+    ],
+    "hidden_dim": 32,
+    "marker_ids": [
+      "CD4",
+      "CD8",
+      "CD45",
+      "CD31",
+      "Ki67"
+    ],
+    "modalities": [
+      "H",
+      "R",
+      "P"
+    ],
+    "residual_rank": 2,
+    "residual_bound": 0.5,
+    "assignment_mode": "learned",
+    "transfer_only": false,
+    "image_encoder_manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369"
+  },
+  "training": {
+    "epochs": 100,
+    "warmup_epochs": 30,
+    "learning_rate": 0.001,
+    "transfer_weight": 0.5,
+    "centered_weight": 0.25,
+    "residual_weight": 0.001,
+    "device": "cpu"
+  },
+  "interpretation": "Frozen uni2h visual backbone with trainable joint fusion; historical uncalibrated 100 registered-pixel regions; no biological qualification.",
+  "image_backbone": {
+    "backbone_id": "uni2h",
+    "manifest": "/storage/HE_GPT/HEIR/manifests/encoders/uni2h.json",
+    "manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369",
+    "mode": "frozen",
+    "feature_dim": 1536,
+    "feature_cache_dir": "/storage/HE_GPT/HEIR-cohort-runs/v090-joint/uni2h-features",
+    "crop_mode": "historical_registered_region"
+  },
+  "pilot_arms": [
+    "H",
+    "HR",
+    "HRP"
+  ]
+}

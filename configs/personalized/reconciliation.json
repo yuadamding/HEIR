@@ -1,0 +1,47 @@
+{
+  "schema": "heir.source_reconciliation.v1",
+  "source_base_commit": "26ee7a8950d28a4a6f3377fa3e76571d8696c4cb",
+  "pipeline_commit": "eac56009691ab3a2bf5b56c34e82683f90cf0141",
+  "pipeline_files_sha256": {
+    "HTAPP_MBC/03_spatial_analysis/spatial_utils.py": "2fc2d18afd03f8a1d9cf49cf34de9195542fb6df98246693a9a59059815b8aa8",
+    "HTAPP_MBC/03_spatial_analysis/00_matchSpatial.ipynb": "a6f189b795c9579552068a54fad491ce429a514b4821b58d91b80d386335cf26",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-213-SMP-6752_processing.ipynb": "0085ae07295d3b1e32898c919109fd6298b01553d97776c0509bd252dc8678d9",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-313-SMP-932_processing.ipynb": "1ad1034022fcc26426659e90d8eb6abf6d49d60d8b47ba225406c146675e5fc8",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-330-SMP-1082_processing.ipynb": "4569eba9dcb7985a1cdfd3f1231078c3b182a50c5dc80e45469651d180de0a3e",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-364-SMP-1321_processing.ipynb": "928ed0dc31b9c25b909cd2efb24ddd0265d84629e88a02ce8b30b511fcc73281",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-514-SMP-6760_processing.ipynb": "0e21b5e58a4e32bc1254ce48c7c1593f42c8879839e85736a77bf10767aab520",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-783-SMP-4081_processing.ipynb": "353e125093626575da77d1ed38693c8b850345bd328babdde53f3dfa6a2ff511",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-812-SMP-8239_processing.ipynb": "84e0a336275b42a8364aaef9aa63196d1e7cf523b2b7e0965ad0a9bf03016086",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-853-SMP-4381_processing.ipynb": "fbbcda3c655b49426d742414b75a6da21cf16f0cad9435a9c3785f1d213ef8ea",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-878-SMP-7149_processing.ipynb": "a5b49d4664778658719542983703846ebbf0322f30cf3ab747c5f3f3909584a2",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-880-SMP-7179_processing.ipynb": "34775934323fa4fbe7151f06b193af88cde60c2bab2cef7037cf4a4bc1a06240",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-917-SMP-4531_processing.ipynb": "bc8649607f71032e50763f92510d06a25c9a4a3ca37721c1c96b0a7deca9558e",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-982-SMP-7629_processing.ipynb": "4981d73190444fca63c923b05021cbdb7c57c8b17aecb62e6cbcbfcb6865997f",
+    "HTAPP_MBC/03_spatial_analysis/00.1_processing/HTAPP-997-SMP-7789_processing.ipynb": "f8c078034675fcd58a9ddb0c371a00ab91e58604a91fda0d927895f8e2ff7230"
+  },
+  "manifest_sha256": "a6ade33a63d81aafc996dfdf7a1ee1ebefce5d415009911ae3e7af2778356c9f",
+  "completed_measurement_summary_sha256": "098cb47caaa94e846b3cf259f6655eea62c7ad749882ef2b17711894c45fbd16",
+  "replay_tolerance_pixels": 1e-06,
+  "reference_region_widths_pixels": [
+    100,
+    200
+  ],
+  "assays": [
+    "slide_seq",
+    "codex"
+  ],
+  "coordinate_estimation": "none; replay pinned source operations and preprocessing populations",
+  "native_slide_seq_factor_executed": 0.6,
+  "native_slide_seq_micrometres_per_pixel_reported": 0.65,
+  "output_frame": "registered_pixel",
+  "new_geometry_view": false,
+  "new_model_fitting": false,
+  "new_measurement_sweep": false,
+  "independent_alignment_evidence": "source/registered coordinate agreement proves provenance only; no held-out landmark residuals supplied",
+  "focused_validation": "conditional_on_supported_correspondence_and_independent_geometry_evidence; no duplicate sweep when only existing geometry is reproduced",
+  "publication_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11564109/",
+  "portal_url": "https://singlecell.broadinstitute.org/single_cell/study/SCP2702/htapp-mbc",
+  "missing_source_crosswalk": "sampletracking_HTAPP_MBC_spatial.csv and its section/core/image mapping",
+  "source_correspondence_scope": "HEIR selected H&E1,independentRNA,CODEX,Slide-seq; supplementary H&E2 chain retained",
+  "prior_studies_unchanged": true
+}

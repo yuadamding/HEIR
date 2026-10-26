@@ -1,0 +1,45 @@
+{
+  "schema": "heir.joint_patient_study.v1",
+  "model_config": "joint_v1.json",
+  "model_config_sha256": "d05577746a108e7dd95dd32d01a5fe09acc637b1d36f56c35bf3f742e9cead19",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_arms": [
+    "H",
+    "HR",
+    "HP",
+    "RP",
+    "HRP",
+    "HRP_generic"
+  ],
+  "control_arms": [
+    "HRP_constant_reference",
+    "HRP_transfer_only"
+  ],
+  "seeds": [
+    0,
+    17,
+    42
+  ],
+  "control_seeds": [
+    0
+  ],
+  "planned_fits": 100,
+  "test_prediction_before_target_loading": true,
+  "no_train_validation_refit": true,
+  "scientific_qualification": false,
+  "prior_cohort_exposure": true,
+  "selection": "validation_spatial_correlation_then_centered_error_then_total_mse",
+  "paired_contrasts": [
+    "HRP-HR",
+    "HRP-HP",
+    "HRP-RP",
+    "HRP-HRP_generic"
+  ],
+  "aggregation": "average_seeds_within_patient_then_equal_patients"
+}

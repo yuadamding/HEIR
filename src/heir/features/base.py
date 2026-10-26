@@ -241,7 +241,7 @@ class TorchPatchEncoder:
             raise ValueError("CUDA was requested but is unavailable")
         self._torch = torch
         self._device = torch.device(device)
-        self._model = model.eval().to(self._device)
+        self._model = model.eval().requires_grad_(False).to(self._device)
         self._input_pixels = manifest.input_pixels
         self._interpolation = manifest.interpolation
         if self._interpolation not in {"bilinear", "bicubic"}:
@@ -253,6 +253,13 @@ class TorchPatchEncoder:
         self._std = self._std.to(self._device)
         self.feature_width = manifest.feature_width
         self.manifest_sha256 = manifest.sha256
+        self._assert_frozen()
+
+    def _assert_frozen(self):
+        if any(module.training for module in self._model.modules()) or any(
+            parameter.requires_grad for parameter in self._model.parameters()
+        ):
+            raise ValueError("frozen encoder requires evaluation mode and non-trainable weights")
 
     def _pool(self, output: object):
         torch = self._torch
@@ -277,6 +284,7 @@ class TorchPatchEncoder:
         return output
 
     def encode(self, patches: np.ndarray) -> np.ndarray:
+        self._assert_frozen()
         torch = self._torch
         values = np.asarray(patches)
         if values.ndim != 4 or values.shape[-1] != 3 or values.dtype != np.uint8:

@@ -639,7 +639,65 @@ def measurement_command(args):
     run_measurement(args.root, args.study, args.capability, args.config, args.output)
 
 
+def reconciliation_command(args):
+    from .source_reconciliation import run_reconciliation
+
+    run_reconciliation(args.root, args.pipeline, args.measurement, args.config, args.output)
+
+
+def joint_command(args):
+    """Prepare, fit, or diagnose the explicitly separate joint model family."""
+    from .joint_workflow import (
+        compare_backbones,
+        diagnose_joint,
+        pilot_joint,
+        prepare_joint,
+        study_joint,
+    )
+
+    if args.joint_action == "prepare":
+        result = prepare_joint(args.root, args.config, args.folds, args.output)
+    elif args.joint_action == "pilot":
+        result = pilot_joint(args.prepared, args.biopsies, args.config, args.output)
+    elif args.joint_action == "study":
+        result = study_joint(args.prepared, args.config, args.folds, args.seeds, args.output)
+    elif args.joint_action == "compare-backbones":
+        result = compare_backbones(args.hoptimus_study, args.uni2_study, args.config, args.output)
+    else:
+        result = diagnose_joint(args.prepared, args.study, args.output)
+    print(json.dumps(result, indent=2, allow_nan=False))
+
+
 def add_commands(commands):
+    joint = commands.add_parser("cohort-joint", help="Joint H&E–RNA–protein experiments")
+    joint_commands = joint.add_subparsers(dest="joint_action", required=True)
+    for action in ("prepare", "pilot", "study", "diagnose", "compare-backbones"):
+        parser = joint_commands.add_parser(action)
+        parser.add_argument("--output", required=True)
+        if action == "prepare":
+            parser.add_argument("--root", required=True)
+        elif action != "compare-backbones":
+            parser.add_argument("--prepared", required=True)
+        if action in ("prepare", "pilot", "study", "compare-backbones"):
+            parser.add_argument("--config", required=True)
+        if action in ("prepare", "study"):
+            parser.add_argument("--folds", required=True)
+        if action == "pilot":
+            parser.add_argument("--biopsies", nargs="+", default=["313-932", "514-6760"])
+        if action == "study":
+            parser.add_argument("--seeds", nargs="+", type=int, default=[0, 17, 42])
+        if action == "diagnose":
+            parser.add_argument("--study", required=True)
+        if action == "compare-backbones":
+            parser.add_argument("--hoptimus-study", required=True)
+            parser.add_argument("--uni2-study", required=True)
+        parser.set_defaults(run=joint_command)
+    reconcile = commands.add_parser(
+        "cohort-reconcile", help="Reconcile source identities and replay author coordinate chains"
+    )
+    for name in ("root", "pipeline", "measurement", "config", "output"):
+        reconcile.add_argument(f"--{name}", required=True)
+    reconcile.set_defaults(run=reconciliation_command)
     measurement = commands.add_parser("cohort-measurement", help=measurement_command.__doc__)
     for name in ("root", "study", "capability", "config", "output"):
         measurement.add_argument(f"--{name}", required=True)

@@ -1,0 +1,49 @@
+{
+  "schema": "heir.joint_patient_study.v1",
+  "model_config": "joint_expanded_v1.json",
+  "model_config_sha256": "5fd6dc916c3daeb4d3321989c9e56c8cb764decd558b081ba31192038c9b2494",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_arms": [
+    "HRP"
+  ],
+  "control_arms": [],
+  "seeds": [
+    0
+  ],
+  "control_seeds": [],
+  "planned_fits": 5,
+  "test_prediction_before_target_loading": true,
+  "no_train_validation_refit": true,
+  "scientific_qualification": false,
+  "prior_cohort_exposure": true,
+  "selection": "validation_spatial_correlation_then_centered_error_then_total_mse",
+  "paired_contrasts": [
+    "expanded_HRP_seed0-initial_five_marker_HRP_seed0"
+  ],
+  "aggregation": "average_seeds_within_patient_then_equal_patients",
+  "extension_label": "expanded_50_antibody_panel_on_historical_100px_nine_outcomes",
+  "external_comparison": {
+    "initial_model_config": "joint_v1.json",
+    "initial_model_config_sha256": "d05577746a108e7dd95dd32d01a5fe09acc637b1d36f56c35bf3f742e9cead19",
+    "arm": "HRP",
+    "seed": 0,
+    "matching": "same_patient_fold_region_and_target_normalizer",
+    "no_test_selected_hyperparameters": true
+  },
+  "marker_axis_preflight": {
+    "scope": "all_13_registered_CODEX_uns/counts_var_headers_only",
+    "ordered_measured_axes_identical": true,
+    "qualified_features": 50,
+    "original_table_markers_absent_from_all_retained_axes": [
+      "CD3",
+      "TCRyd"
+    ],
+    "source_panel_sha256": "ae7cfcdca488cc5de85ac3da6b61d63052b86ce2fc25ae9ba9047f503c57278b"
+  }
+}

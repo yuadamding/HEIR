@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from numbers import Real
 from typing import Optional
 
@@ -29,6 +29,19 @@ def spatial_metadata(prediction_unit: str, coordinate_units: str) -> None:
         raise ValueError("prediction_unit must be nucleus or tissue_region")
     if not isinstance(coordinate_units, str) or coordinate_units not in {"um", "registered_pixel"}:
         raise ValueError("coordinate_units must be um or registered_pixel")
+
+
+def image_backbone_identity(value: Optional[str], *, present: bool) -> None:
+    """A feature width is not an encoder identity, including synthetic fixtures."""
+    if present:
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(c not in "0123456789abcdef" for c in value)
+        ):
+            raise ValueError("image features require a pinned lowercase SHA-256 encoder manifest")
+    elif value is not None:
+        raise ValueError("absent image modality must not carry an encoder identity")
 
 
 @dataclass(frozen=True)
@@ -67,6 +80,117 @@ class RNAReference:
             raise ValueError("every reference state must have supporting RNA cells")
         if len(self.state_types) != k or any(not str(t).strip() for t in self.state_types):
             raise ValueError("reference state_types must identify each state's broad type")
+
+
+@dataclass(frozen=True)
+class RegionalProteinFeatures:
+    """Measured regional proteins, without an RNA template or biological equality.
+
+    Consensus statistics use equal weights for observed assay replicates. Counts
+    are total valid source cells; they describe coverage, not registration quality.
+    Masked entries may contain arbitrary values and must be ignored by consumers.
+    """
+
+    region_ids: tuple[str, ...]
+    marker_ids: tuple[str, ...]
+    mean: np.ndarray
+    q90: np.ndarray
+    observed: np.ndarray
+    valid_counts: np.ndarray
+    replicate_labels: tuple[str, ...] = ()
+    replicate_mean: Optional[np.ndarray] = None
+    replicate_q90: Optional[np.ndarray] = None
+    replicate_observed: Optional[np.ndarray] = None
+    replicate_valid_counts: Optional[np.ndarray] = None
+    replicate_disagreement: Optional[np.ndarray] = None
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        identifiers(self.region_ids, "protein region_ids")
+        identifiers(self.marker_ids, "protein marker_ids")
+        shape = (len(self.region_ids), len(self.marker_ids))
+
+        def validate(mean, quantile, mask, counts, expected, label):
+            mask, counts = np.asarray(mask), np.asarray(counts)
+            if mask.dtype != bool or mask.shape != expected:
+                raise ValueError(f"{label} observed must be a boolean mask with shape {expected}")
+            for name, values in (("mean", mean), ("q90", quantile), ("valid_counts", counts)):
+                values = np.asarray(values)
+                if values.shape != expected or not np.isfinite(values[mask]).all():
+                    raise ValueError(
+                        f"{label} observed {name} must be finite with shape {expected}"
+                    )
+            if np.any(counts[mask] < 1) or np.any(counts[mask] != np.floor(counts[mask])):
+                raise ValueError(f"{label} observed valid_counts must be positive integers")
+
+        validate(self.mean, self.q90, self.observed, self.valid_counts, shape, "protein")
+        arrays = (
+            self.replicate_mean,
+            self.replicate_q90,
+            self.replicate_observed,
+            self.replicate_valid_counts,
+        )
+        if self.replicate_labels:
+            identifiers(self.replicate_labels, "protein replicate_labels")
+            if any(v is None for v in arrays):
+                raise ValueError("protein replicate summaries require all four arrays")
+            validate(*arrays, (len(self.replicate_labels), *shape), "replicate protein")
+            if not np.array_equal(np.any(self.replicate_observed, axis=0), self.observed):
+                raise ValueError(
+                    "protein consensus availability must match its observed replicates"
+                )
+        elif any(v is not None for v in arrays):
+            raise ValueError("protein replicate arrays require replicate labels")
+        if self.replicate_disagreement is not None:
+            values = np.asarray(self.replicate_disagreement)
+            mask = np.asarray(self.observed)
+            if (
+                values.shape != shape
+                or not np.isfinite(values[mask]).all()
+                or np.any(values[mask] < 0)
+            ):
+                raise ValueError("observed protein disagreement must be finite and nonnegative")
+        if not isinstance(self.metadata, dict):
+            raise ValueError("protein feature metadata must be a dictionary")
+
+
+@dataclass(frozen=True)
+class JointInputs:
+    """Prediction-only inputs with genuinely optional H&E, RNA and protein paths."""
+
+    patient_id: str
+    specimen_id: str
+    cell_ids: tuple[str, ...]
+    coordinates_um: np.ndarray
+    image_features: Optional[np.ndarray] = None
+    reference: Optional[RNAReference] = None
+    protein_features: Optional[RegionalProteinFeatures] = None
+    prediction_unit: str = "tissue_region"
+    coordinate_units: str = "registered_pixel"
+    image_encoder_manifest_sha256: Optional[str] = None
+
+    def __post_init__(self):
+        spatial_metadata(self.prediction_unit, self.coordinate_units)
+        image_backbone_identity(
+            self.image_encoder_manifest_sha256, present=self.image_features is not None
+        )
+        identifiers(self.cell_ids, "joint cell_ids")
+        if not self.patient_id or not self.specimen_id:
+            raise ValueError("joint patient_id and specimen_id are required")
+        n = len(self.cell_ids)
+        array(self.coordinates_um, (n, 2), "joint coordinates")
+        if self.image_features is not None:
+            if np.ndim(self.image_features) != 2 or np.shape(self.image_features)[1] == 0:
+                raise ValueError("joint image_features must have a nonempty feature axis")
+            array(self.image_features, (n, self.image_features.shape[1]), "joint image_features")
+        if self.reference is not None and not isinstance(self.reference, RNAReference):
+            raise ValueError("joint reference must be an RNAReference")
+        if self.protein_features is not None and self.protein_features.region_ids != self.cell_ids:
+            raise ValueError("joint protein features must follow the ordered prediction regions")
+
+    @property
+    def coordinates(self) -> np.ndarray:
+        return self.coordinates_um
 
 
 @dataclass(frozen=True)

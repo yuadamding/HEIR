@@ -1,0 +1,73 @@
+{
+  "schema": "heir.joint_backbone_matrix.v1",
+  "backbones": {
+    "hoptimus1": {
+      "experiment_config": "joint_hoptimus1.json",
+      "experiment_config_sha256": "3672a875221ef5b0fbdca6ecef1612e3dd937d410ed1e9ce93c54462e13c2f78",
+      "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v090-joint/prepared",
+      "principal_arms": [
+        "H",
+        "HR",
+        "HP",
+        "RP",
+        "HRP",
+        "HRP_generic"
+      ],
+      "control_arms": [
+        "HRP_constant_reference",
+        "HRP_transfer_only"
+      ],
+      "planned_fits": 40
+    },
+    "uni2h": {
+      "experiment_config": "joint_uni2h.json",
+      "experiment_config_sha256": "0bf160a892956a9378227224b534cd6685c05fb1b112450e0b8fa121b174a8ed",
+      "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v090-joint/uni2h-prepared",
+      "principal_arms": [
+        "H",
+        "HR",
+        "HP",
+        "HRP",
+        "HRP_generic"
+      ],
+      "control_arms": [
+        "HRP_constant_reference",
+        "HRP_transfer_only"
+      ],
+      "planned_fits": 35
+    }
+  },
+  "seeds": [
+    0
+  ],
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_fits": 55,
+  "mechanistic_fits": 20,
+  "total_fits": 75,
+  "shared_RP_source": "hoptimus1",
+  "paired_backbone_arms": [
+    "H",
+    "HR",
+    "HP",
+    "HRP",
+    "HRP_generic",
+    "HRP_constant_reference",
+    "HRP_transfer_only"
+  ],
+  "further_seeds_in_this_revision": [],
+  "panel_or_context_extensions_in_this_revision": false,
+  "decision_frozen_before_first_heldout_result": true,
+  "additional_seed_17_42_fits_authorized": false,
+  "expanded_or_broader_panels_scored": false,
+  "existing_hoptimus_pilots_reused": 6,
+  "additional_uni2h_pilots": 6,
+  "all_previous_14_pilot_fits_retained": true,
+  "independent_confirmation": false,
+  "scientific_qualification": false
+}

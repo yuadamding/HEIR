@@ -1078,3 +1078,73 @@ result. If LR matches generic context, retain the simpler model. If LR helps dec
 placement, claim only the expression improvement. Robust independent within-type localization
 would justify further joint refinement and external validation. An inconclusive result remains a
 valid outcome for a small cohort.
+
+## Version 0.9 joint model and source reconciliation
+
+The new `joint` family leaves the legacy model, bundles, and completed studies intact.
+Prediction uses separately stored H&E, RNA, and protein inputs; ST remains supervision or
+evaluation. The six principal arms are H, HR, HP, RP, HRP, and HRP with a training-only generic
+RNA reference. HP has no matched RNA input. RP has no image embeddings or tissue-fraction
+predictors, but uses the shared H&E-derived regional grid.
+
+The subsequent backbone request supersedes the original three-seed first-run proposal before
+any of its cohort fits started. The executed design is fixed at seed 0: five image-dependent
+arms for each of H-optimus-1 and UNI2-h, plus one shared RP arm, over five folds (55 principal
+fits). Constant-reference and separately trained transfer controls add 20 mechanistic fits.
+The six relevant H-optimus-1 pilot fits are reused from the completed 14-fit pilot; six UNI2-h
+pilots add H, HR, and HRP for the same two biopsies. All completed results remain retained.
+Further seeds, expanded-protein fits, broader-outcome fits, context crops, and coarser-target
+fits are deferred in the protocol before the first new held-out result is inspected.
+
+Both existing checkpoint-specific adapters are reused with frozen weights and evaluation-mode
+assertions. Each retains its own normalization/interpolation, while source images, region IDs,
+crop bounds, orientation, and edge handling are identical. A SHA-256 encoder identity is
+mandatory for the joint image branch and forbidden for RP. Joint bundle v2 persists that
+identity; earlier joint pilot bundles load only when their integrity-checked preparation already
+binds it. Equal feature width never permits substitution of another encoder's cache. The
+legacy personalized bundle v2 contract is unchanged. No LoRA or pretrained-weight updates occur.
+
+The initial model uses 32-dimensional image, protein, and fused embeddings; the fusion receives
+their elementwise interaction, protein masks, and coverage. Hierarchical assignment separates
+broad RNA types from within-type states. Its coefficients are regional reference-state weights,
+not calibrated cell fractions. The rank-2 correction receives fused spatial features, assigned RNA
+features, and a specimen RNA summary, with a 0.5 log bound. Unsupervised genes retain exact
+reference transfer. Missing proteins have an explicit representation.
+
+Protein summaries are calculated from retained original cell intensities: asinh(x/100), mean,
+90th percentile, and valid-cell counts for each region and assay replicate. Consensus averages
+observed replicate summaries equally, retaining replicate disagreement; its quantile is explicitly
+an average of replicate quantiles. Training patients alone fit robust median/IQR scaling.
+Antibody identities and diagnostic RNA aliases are separate. The expanded option records
+ambiguous aliases and manufacturer-supported multigene overlap without imposing RNA–protein
+abundance equality. The initial five markers and nine outcomes preserve the historical task.
+
+The fixed schedule uses 100 epochs at 0.001 learning rate, with 30 transfer-only warmup epochs
+for learned reference models. Joint training adds transfer MSE (0.5), within-replicate centered
+error (0.25), and squared correction (0.001); abundance and fixed protein-proxy penalties are
+zero. Direct decoders and the constant-reference control train for all 100 epochs. Checkpoint
+selection uses validation spatial Spearman, then centered error, then MSE, retaining the earliest
+exact tie. A selected warmup checkpoint keeps correction disabled at inference.
+
+The source reconciliation replays the pinned author pipeline
+`eac56009691ab3a2bf5b56c34e82683f90cf0141` by exact observation ID, without estimating transforms
+from registered coordinates or expression correlations. All 23 retained Slide-seq replicates
+(169,061 observations) and 13 CODEX datasets (312,598 cells) reproduce. Maximum coordinate
+residuals are 5.322e-11 and 1.492e-10 registered pixels, respectively. Two additional native
+Slide-seq replicates contribute to the original shared QC even though their processed records
+were discarded. CODEX biopsy 213's five fragments and 214 overlap removals reproduce; 514's
+1,459 final H&E-mask exclusions are recorded as not replayed.
+
+These are provenance residuals, not independent registration errors. H&E image chains retain
+source hashes, dimensions, thumbnail/rotation/crop/resampling history and array orientation;
+neither raster replay nor scanner calibration is claimed. The executed Slide-seq factor of 0.6
+is preserved; the reported 0.65 physical scale does not justify rescaling registered coordinates
+alone. Study-level serial sections and the distinct independent-RNA core are documented by the
+[publication](https://pmc.ncbi.nlm.nih.gov/articles/PMC11564109/), while file-level core/section/H&E
+crosswalk fields remain unresolved. Replicate labels are never promoted to section numbers.
+
+The bounded reconciliation closes with a specific missing-source request, prepared but not sent.
+No independently qualified 200-pixel geometry was recovered. The requested joint comparison
+therefore uses historical 100-pixel regions as exploratory development. A later 200-pixel run
+requires explicit new membership, raw RNA/protein aggregation, and new image features or a
+declared pooling representation. Prediction grids must remain independent of ST support masks.

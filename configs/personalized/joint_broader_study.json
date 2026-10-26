@@ -1,0 +1,52 @@
+{
+  "schema": "heir.joint_patient_study.v1",
+  "model_config": "joint_broader_v1.json",
+  "model_config_sha256": "df212404ec6fc982ffbf676e763763369d4aee7dca8ef8bc39c5e7de02ca9805",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "principal_arms": [
+    "H",
+    "HR",
+    "HP",
+    "RP",
+    "HRP",
+    "HRP_generic"
+  ],
+  "control_arms": [],
+  "seeds": [
+    0
+  ],
+  "control_seeds": [],
+  "planned_fits": 30,
+  "test_prediction_before_target_loading": true,
+  "no_train_validation_refit": true,
+  "scientific_qualification": false,
+  "prior_cohort_exposure": true,
+  "selection": "validation_spatial_correlation_then_centered_error_then_total_mse",
+  "aggregation": "average_seeds_within_patient_then_equal_patients",
+  "extension_label": "broader_training_only_outcomes_expanded_50_proteins_100px",
+  "marker_axis_preflight": {
+    "scope": "all_13_registered_CODEX_uns/counts_var_headers_only",
+    "ordered_measured_axes_identical": true,
+    "qualified_features": 50,
+    "original_table_markers_absent_from_all_retained_axes": [
+      "CD3",
+      "TCRyd"
+    ],
+    "source_panel_sha256": "ae7cfcdca488cc5de85ac3da6b61d63052b86ce2fc25ae9ba9047f503c57278b"
+  },
+  "paired_contrasts": [
+    "HRP-minus-HR",
+    "HRP-minus-HP",
+    "HRP-minus-RP",
+    "HRP-minus-HRP_generic"
+  ],
+  "outcome_panel_policy": "freeze_from_training_RNA_and_training_ST_before_validation_or_test_access",
+  "missing_heldout_panel_policy": "explicit_unevaluable_no_reselection",
+  "comparison_scope": "within_fold_task_only_no_MSE_comparison_across_normalizers"
+}
