@@ -27,6 +27,7 @@ class RegionGrid:
     tissue_fraction: np.ndarray
     component_ids: tuple[str, ...]
     settings: dict
+    tissue_pixel_counts: np.ndarray | None = None
 
 
 def _rgb_image(image):
@@ -77,6 +78,7 @@ def build_region_grid(
     min_saturation=0.05,
     min_intensity=0.05,
     max_intensity=0.95,
+    compute_features=True,
 ) -> RegionGrid:
     """Select bins from RGB tissue fraction and encode their actual image patches.
 
@@ -105,10 +107,12 @@ def build_region_grid(
         raise ValueError("tissue thresholds must be finite values in [0, 1]")
     if min_tissue_fraction <= 0 or min_intensity >= max_intensity:
         raise ValueError("tissue fraction must be positive and intensity bounds increasing")
+    if not isinstance(compute_features, (bool, np.bool_)):
+        raise ValueError("compute_features must be boolean")
     values = _rgb_image(image)
     height, width = values.shape[:2]
-    encoder = HandcraftedPatchEncoder()
-    keys, coordinates, features, fractions = [], [], [], []
+    encoder = HandcraftedPatchEncoder() if compute_features else None
+    keys, coordinates, features, fractions, tissue_counts = [], [], [], [], []
     # Work one patch at a time: no full-image float raster or padding allocation.
     for y in range(0, height, bin_size_pixels):
         for x in range(0, width, bin_size_pixels):
@@ -127,8 +131,10 @@ def build_region_grid(
                 continue
             keys.append((x // bin_size_pixels, y // bin_size_pixels))
             coordinates.append(((x + right) / 2, (y + top) / 2))
-            features.append(encoder.encode(patch[None])[0])
+            if encoder is not None:
+                features.append(encoder.encode(patch[None])[0])
             fractions.append(fraction)
+            tissue_counts.append(int(tissue.sum()))
     if not keys:
         raise ValueError("H&E image contains no regions meeting the fixed tissue thresholds")
     keys = np.asarray(keys, dtype=np.int64)
@@ -147,19 +153,24 @@ def build_region_grid(
         "min_intensity": float(min_intensity),
         "max_intensity": float(max_intensity),
         "component_connectivity": "four_neighbor_selected_bins",
-        "encoder_name": "handcrafted_rgb_moments_negative_control",
-        "encoder_manifest_sha256": encoder.manifest_sha256,
+        "encoder_name": "handcrafted_rgb_moments_negative_control"
+        if encoder
+        else "none_measurement_only",
+        "encoder_manifest_sha256": encoder.manifest_sha256 if encoder else None,
         "contains_spatial_rna_derived_features": False,
         "contains_protein_derived_features": False,
     }
     return RegionGrid(
         region_ids=tuple(f"he_region:{x}:{y}" for x, y in keys),
         coordinates=np.asarray(coordinates, dtype=np.float32),
-        image_features=np.asarray(features, dtype=np.float32),
+        image_features=np.asarray(features, dtype=np.float32)
+        if encoder
+        else np.empty((len(keys), 0), dtype=np.float32),
         bin_keys=keys,
         tissue_fraction=np.asarray(fractions, dtype=np.float32),
         component_ids=_components(keys),
         settings=settings,
+        tissue_pixel_counts=np.asarray(tissue_counts, dtype=np.int64),
     )
 
 
@@ -183,3 +194,93 @@ def point_to_grid(grid: RegionGrid, coordinates) -> np.ndarray:
         key = tuple(np.floor(values[row] / size).astype(np.int64))
         result[row] = lookup.get(key, -1)
     return result
+
+
+@dataclass(frozen=True)
+class NestedRegionGrid:
+    """Explicit fine-to-parent membership; gaps never become inferred tissue."""
+
+    region_ids: tuple[str, ...]
+    coordinates: np.ndarray
+    bin_keys: np.ndarray
+    fine_to_parent: np.ndarray
+    parent_fine_indices: tuple[tuple[int, ...], ...]
+    parent_fine_region_ids: tuple[tuple[str, ...], ...]
+    bin_area_pixels: np.ndarray
+    support_area_pixels: np.ndarray
+    tissue_area_pixels: np.ndarray
+    scale_pixels: int
+    base_region_ids: tuple[str, ...]
+
+
+def fine_region_areas(grid):
+    """Return clipped rectangular support and H&E tissue areas in image pixels."""
+    size = grid.settings["bin_size_pixels"]
+    extent = np.asarray(grid.settings["image_shape"][::-1])
+    lower = grid.bin_keys * size
+    area = np.prod(np.minimum(lower + size, extent) - lower, axis=1)
+    tissue = (
+        np.asarray(grid.tissue_pixel_counts).copy()
+        if grid.tissue_pixel_counts is not None
+        else area * grid.tissue_fraction
+    )
+    return area, tissue
+
+
+def nested_grid_membership(grid, scale_pixels, *, fine_indices=None):
+    """Nest selected base bins at origin zero without redefining the footprint.
+
+    A coarse rectangle can contain excluded/unselected gaps. ``support_area_pixels``
+    counts only its declared fine-bin union; tissue area sums H&E tissue pixels
+    within that union. Empty support produces an explicitly empty parent axis.
+    """
+    base = grid.settings["bin_size_pixels"]
+    if (
+        not isinstance(scale_pixels, (int, np.integer))
+        or isinstance(scale_pixels, (bool, np.bool_))
+        or scale_pixels < base
+        or scale_pixels % base
+    ):
+        raise ValueError("nested scale must be an integer multiple of the base grid size")
+    if grid.settings["origin_pixels"] != [0, 0]:
+        raise ValueError("nested measurement grids require origin zero")
+    selected = np.arange(len(grid.region_ids)) if fine_indices is None else np.asarray(fine_indices)
+    if selected.size == 0:
+        selected = selected.astype(np.int64)
+    if (
+        selected.ndim != 1
+        or selected.dtype.kind not in "iu"
+        or len(set(selected.tolist())) != len(selected)
+        or np.any(selected < 0)
+        or np.any(selected >= len(grid.region_ids))
+    ):
+        raise ValueError("fine support requires unique valid integer region indices")
+    selected = np.sort(selected)
+    parent_keys = grid.bin_keys[selected] // (scale_pixels // base)
+    keys = sorted(set(map(tuple, parent_keys)), key=lambda key: (key[1], key[0]))
+    key_array = np.asarray(keys, dtype=np.int64).reshape(-1, 2)
+    lookup = {key: i for i, key in enumerate(keys)}
+    mapping = np.full(len(grid.region_ids), -1, dtype=np.int64)
+    for index, key in zip(selected, parent_keys):
+        mapping[index] = lookup[tuple(key)]
+    members = tuple(tuple(np.flatnonzero(mapping == i).tolist()) for i in range(len(keys)))
+    extent = np.asarray(grid.settings["image_shape"][::-1])
+    lower = key_array * scale_pixels
+    upper = np.minimum(lower + scale_pixels, extent)
+    area, tissue = fine_region_areas(grid)
+    return NestedRegionGrid(
+        region_ids=tuple(
+            f"he_region:{x}:{y}" if scale_pixels == base else f"he_region_{scale_pixels}:{x}:{y}"
+            for x, y in keys
+        ),
+        coordinates=((lower + upper) / 2).astype(np.float32),
+        bin_keys=key_array,
+        fine_to_parent=mapping,
+        parent_fine_indices=members,
+        parent_fine_region_ids=tuple(tuple(grid.region_ids[i] for i in group) for group in members),
+        bin_area_pixels=np.prod(upper - lower, axis=1),
+        support_area_pixels=np.asarray([area[list(group)].sum() for group in members]),
+        tissue_area_pixels=np.asarray([tissue[list(group)].sum() for group in members]),
+        scale_pixels=int(scale_pixels),
+        base_region_ids=grid.region_ids,
+    )

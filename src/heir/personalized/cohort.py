@@ -83,14 +83,38 @@ def _source_path(root, source, *, check_size=True):
     return path
 
 
-def _verified_source_path(root, source):
+def _verified_source_path(root, source, *, verification_cache=None):
     path = _source_path(root, source)
+    before = path.stat()
+    identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    expected = (source["sha256"], identity)
+    if verification_cache is not None and str(path) in verification_cache:
+        if verification_cache[str(path)] != expected:
+            raise ValueError("consumed source changed after verification in this run")
+        return path
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(block)
+    after = path.stat()
+    if identity != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise ValueError("consumed source changed during checksum verification")
     if digest.hexdigest() != source["sha256"]:
         raise ValueError(f"cohort source checksum differs: {source['working_path']}")
+    if verification_cache is not None:
+        verification_cache[str(path)] = expected
     return path
 
 
@@ -610,4 +634,109 @@ def load_cohort_targets(root, biopsy_id, prediction, provenance, *, gene_ids):
             "matching_scope": "published_biopsy",
             "section_identity": "unknown",
         },
+    )
+
+
+def _retained_gene_axis(path):
+    """Read only the actual retained count axis, never processed .var or expression."""
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        axis = handle["uns/counts_var"]
+        if not isinstance(axis, h5py.Dataset) or axis.ndim != 1 or axis.dtype.kind not in "OS":
+            raise ValueError("measurement preflight requires a retained string gene-ID vector")
+        genes = _axis(axis.asstr()[:], "retained measured genes")
+        counts = handle["obsm/counts"]
+        shape = counts.shape if isinstance(counts, h5py.Dataset) else counts.attrs.get("shape")
+        if shape is None or len(shape) != 2 or shape[1] != len(genes):
+            raise ValueError("retained gene axis differs from the count matrix dimensions")
+    return genes
+
+
+def load_measurement_gene_axes(root, biopsy_id, *, verification_cache=None):
+    """Predeclare spatial/RNA gene availability without loading or fitting a reference."""
+    entry = discover_cohort(root)[biopsy_id]
+    sources = {role: entry["role_sources"][role] for role in ("targets", "rna")}
+    axes = {
+        role: _retained_gene_axis(
+            _verified_source_path(root, source, verification_cache=verification_cache)
+        )
+        for role, source in sources.items()
+    }
+    return {
+        "spatial_gene_ids": axes["targets"],
+        "independent_rna_gene_ids": axes["rna"],
+        "sources": sources,
+    }
+
+
+def load_measurement_substrate(
+    root, biopsy_id, *, base_region_size=100, min_tissue_fraction=0.1, verification_cache=None
+):
+    """Load raw measurement support without model, reference fitting, or embeddings."""
+    from scipy.sparse import csr_matrix
+
+    from .measurement import MeasurementSubstrate
+
+    verification_cache = {} if verification_cache is None else verification_cache
+    entry = discover_cohort(root)[biopsy_id]
+    sources = {role: entry["role_sources"][role] for role in ("he", "targets", "rna")}
+    axes = load_measurement_gene_axes(root, biopsy_id, verification_cache=verification_cache)
+    grid = build_region_grid(
+        _verified_source_path(root, sources["he"], verification_cache=verification_cache),
+        bin_size_pixels=base_region_size,
+        min_tissue_fraction=min_tissue_fraction,
+        compute_features=False,
+    )
+    with _read_h5ad(
+        _verified_source_path(root, sources["targets"], verification_cache=verification_cache)
+    ) as adata:
+        counts, genes = extract_raw_counts(adata)
+        if genes != axes["spatial_gene_ids"]:
+            raise ValueError("spatial gene axis changed since measurement preflight")
+        counts = csr_matrix(counts, copy=True)
+        if counts.data.size and counts.data.max() > np.iinfo(np.int64).max:
+            raise ValueError("raw counts exceed signed integer aggregation capacity")
+        counts.data = np.rint(counts.data).astype(np.int64)
+        bead_ids = _axis(adata.obs_names, "Slide-seq source bead IDs")
+        coordinates = adata.obs[["x", "y"]].to_numpy(dtype=np.float64)
+        replicates = tuple(_replicates(adata, sources["targets"]).tolist())
+    mapping = point_to_grid(grid, coordinates)
+    provenance = {
+        "schema": "heir.raw_measurement_substrate.v1",
+        "biopsy_id": biopsy_id,
+        "patient_id": entry["patient_id"],
+        "specimen_id": entry["specimen_id"],
+        "sources": sources,
+        "source_observation_axis": _axis_provenance(bead_ids),
+        "source_replicates": _counts_by_label(replicates),
+        "metadata": entry["metadata"],
+        "matching_scope": "published_biopsy",
+        "section_identity": "unknown",
+        "core_identity": "unknown",
+        "replicate_linkage": "unknown",
+        "linkage_basis": "no documented section/core linkage in consumed acquisition metadata",
+        "registration": "published_coarse_registration_unvalidated",
+        "physical_calibration": "unknown",
+        "coordinate_units": "registered_pixel",
+        "grid_selection": "H&E_only_fixed_base_grid",
+        "support_limitation": (
+            "shared bead-occupied base bins; same sampled tissue within a bin is unknown"
+        ),
+        "total_exposure_basis": "all_retained_spatial_measured_gene_ids",
+        "outside_selected_he_regions": int((mapping < 0).sum()),
+    }
+    return MeasurementSubstrate(
+        biopsy_id,
+        entry["patient_id"],
+        entry["specimen_id"],
+        grid,
+        tuple(genes),
+        axes["independent_rna_gene_ids"],
+        bead_ids,
+        coordinates,
+        replicates,
+        counts,
+        mapping,
+        provenance,
     )

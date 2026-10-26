@@ -25,6 +25,8 @@ Version 0.6 adds fixed-model diagnostics, separately fitted transfer and constan
 controls, and a frozen internal patient-held-out study with validation-only rank selection.
 Version 0.7 preserves that study and adds error decomposition, cohort measurement consistency,
 and explicitly target-informed reference reconstruction to diagnose its limitations.
+Version 0.8 fixes reconstruction region-ID alignment and adds a measurement-only screen of
+100/200/400 registered-pixel aggregation, fixed normalization panels, exposure, and displacement.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
@@ -95,6 +97,19 @@ uv run heir cohort-capability --root /mnt/seagate/HnE/HTAPP_MBC \
 This command fits diagnostic RNA mixtures directly to spatial targets and evaluates shared-region
 replicate transfers. Those reconstructions are target-informed analyses, not new prediction models
 or certified performance bounds. See the [capability report](docs/personalized_development.md#version-07-capability-analysis).
+
+Qualify the spatial measurements without fitting another model or loading image embeddings:
+
+```bash
+uv run heir cohort-measurement --root /mnt/seagate/HnE/HTAPP_MBC \
+  --study /storage/HE_GPT/HEIR-cohort-runs/v060-controls/internal-study \
+  --capability /storage/HE_GPT/HEIR-cohort-runs/v070-capability \
+  --config configs/personalized/measurement.json --output /tmp/heir-measurement
+```
+
+The [measurement configuration](configs/personalized/measurement.json) fixes all six conditions,
+support and eligibility rules, and the pixel displacement stress test. Raw counts are aggregated
+before normalization. See the [measurement report](docs/personalized_development.md#version-08-measurement-qualification).
 
 Adapt the [specimen manifest](configs/personalized/htapp.example.json) and
 [model configuration](configs/personalized/model.example.json), then run:

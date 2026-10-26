@@ -29,6 +29,114 @@ _COLORS = {
 }
 
 
+def write_measurement_overlay(output, he_path, grid, bead_xy, bead_replicates, common_fine_indices):
+    """Write morphology/support panels without loading models or expression values.
+
+    Image and points are flipped together only for lower-origin display. At most
+    8,000 evenly spaced in-image source rows are drawn per replicate; the caller
+    retains all bead positions in the numeric measurement artifact.
+    """
+    from PIL import Image, ImageDraw
+
+    xy = np.asarray(bead_xy, dtype=float)
+    replicates = np.asarray(bead_replicates).astype(str)
+    common = np.asarray(common_fine_indices)
+    if replicates.ndim != 1 or xy.shape != (len(replicates), 2):
+        raise ValueError("overlay bead coordinates and replicate labels must align")
+    if not len(replicates) or any(not label.strip() for label in replicates):
+        raise ValueError("overlay requires nonempty assay replicate labels")
+    if common.ndim != 1 or common.dtype.kind not in "iu":
+        raise ValueError("common fine-region indices must be an integer vector")
+    if len(set(common)) != len(common) or np.any((common < 0) | (common >= len(grid.region_ids))):
+        raise ValueError("common fine-region indices must be unique and within the grid")
+    if grid.settings["coordinate_units"] != "registered_pixel":
+        raise ValueError("measurement overlays require registered-pixel geometry")
+    mapped = point_to_grid(grid, xy)
+    height, width = grid.settings["image_shape"]
+    inside = ((xy >= 0) & (xy < [width, height])).all(1)
+    with Image.open(he_path) as source:
+        if source.size != (width, height):
+            raise ValueError("H&E image dimensions differ from the measurement grid")
+        thumbnail = source.convert("RGB")
+        thumbnail.thumbnail((640, 640), Image.Resampling.LANCZOS)
+        thumbnail = thumbnail.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    thumb_width, thumb_height = thumbnail.size
+    sx, sy = thumb_width / width, thumb_height / height
+    panel_width, image_top = max(320, thumb_width + 20), 48
+    labels = sorted(set(replicates))
+    canvas = Image.new("RGB", (panel_width * (len(labels) + 1), thumb_height + 90), "white")
+    text = ImageDraw.Draw(canvas)
+    panels = []
+    size = grid.settings["bin_size_pixels"]
+    for column, label in enumerate([*labels, None]):
+        image_left = column * panel_width + (panel_width - thumb_width) // 2
+        image = thumbnail.copy().convert("RGBA")
+        overlay = Image.new("RGBA", image.size)
+        drawing = ImageDraw.Draw(overlay)
+        if label is None:
+            for index in common:
+                x, y = grid.bin_keys[index] * size
+                right, top = min(x + size, width), min(y + size, height)
+                drawing.rectangle(
+                    (x * sx, (height - top) * sy, right * sx, (height - y) * sy),
+                    fill=(20, 165, 100, 65),
+                    outline=(0, 130, 80, 220),
+                )
+            heading = f"Shared {size}-pixel support: {len(common)} regions"
+            detail = "Green: caller-declared common fine regions"
+        else:
+            selected = replicates == label
+            visible = np.flatnonzero(selected & inside)
+            sampled = visible[np.linspace(0, len(visible) - 1, min(len(visible), 8000), dtype=int)]
+            for index in sampled:
+                x, y = xy[index]
+                px, py = x * sx, (height - y) * sy
+                color = (15, 110, 180, 130) if mapped[index] >= 0 else (220, 0, 125, 150)
+                drawing.ellipse((px - 0.8, py - 0.8, px + 0.8, py + 0.8), fill=color)
+            heading = f"Slide-seq replicate {label}: {int(selected.sum())} beads"
+            detail = "Blue: selected tissue bin; magenta: other in-image"
+            panels.append(
+                {
+                    "replicate": label,
+                    "source_beads": int(selected.sum()),
+                    "inside_image": int((selected & inside).sum()),
+                    "outside_image": int((selected & ~inside).sum()),
+                    "in_selected_tissue_regions": int((selected & (mapped >= 0)).sum()),
+                    "in_common_fine_regions": int((selected & np.isin(mapped, common)).sum()),
+                    "displayed_beads": len(sampled),
+                    "image_rectangle_pixels": [image_left, image_top, thumb_width, thumb_height],
+                }
+            )
+        canvas.paste(Image.alpha_composite(image, overlay).convert("RGB"), (image_left, image_top))
+        text.text((column * panel_width + 10, 9), heading, fill="black")
+        text.text((column * panel_width + 10, 27), detail, fill="black")
+    text.text(
+        (10, thumb_height + 60),
+        "Lower origin; registered pixels. "
+        "Section linkage, physical scale and registration unqualified.",
+        fill="black",
+    )
+    with Path(output).open("xb") as handle:
+        canvas.save(handle, format="PNG")
+    return {
+        "schema": "heir.measurement_overlay.v1",
+        "coordinate_units": "registered_pixel",
+        "display_origin": "lower",
+        "display_flip": "image_and_geometry_together",
+        "source_coordinates_modified": False,
+        "image_shape": [height, width],
+        "region_size_pixels": size,
+        "common_fine_region_ids": [grid.region_ids[i] for i in common],
+        "common_support_definition": "caller_declared_geometry_only",
+        "point_display_policy": "at_most_8000_evenly_spaced_in_image_source_rows_per_replicate",
+        "panels": panels,
+        "registration_qualified": False,
+        "physical_scale_verified": False,
+        "section_linkage": "unknown",
+        "manual_review_status": "not_recorded",
+    }
+
+
 def _coordinates(path, source, grid):
     """Read observation coordinates only; do not materialize expression matrices again."""
     import h5py

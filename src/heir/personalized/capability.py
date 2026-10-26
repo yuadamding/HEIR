@@ -23,6 +23,7 @@ from .reconstruction import (
     predict_reconstruction,
     save_reconstruction,
 )
+from .schema import identifiers
 from .serialization import load_prediction
 from .study import load_pooled_reference, patient_summary
 from .train import FittedModel
@@ -64,14 +65,25 @@ def _table(path, rows):
 
 def _linear_score(scaffold, expression, targets, operator, genes, normal):
     """Substitute linear expression for scoring only; never export this scaffold."""
+    identifiers(scaffold.cell_ids, "reconstruction scaffold region IDs")
+    identifiers(operator.cell_ids, "reconstruction operator region IDs")
     columns = _region_rows(operator)
+    region_ids = tuple(operator.cell_ids[column] for column in columns)
     values = np.asarray(expression)
-    if len(set(columns)) != len(columns) or values.shape != (len(columns), len(scaffold.gene_ids)):
+    if len(set(region_ids)) != len(region_ids) or values.shape != (
+        len(columns),
+        len(scaffold.gene_ids),
+    ):
         raise ValueError("reconstruction scores require unique regions and the saved gene axis")
+    unknown = sorted(set(operator.cell_ids) - set(scaffold.cell_ids))
+    if unknown:
+        raise ValueError(f"reconstruction operator contains unknown scaffold region IDs: {unknown}")
     if not np.isfinite(values).all() or np.any(values < 0):
         raise ValueError("invalid linear reconstruction values")
+    scaffold_rows = {region: row for row, region in enumerate(scaffold.cell_ids)}
+    destination = [scaffold_rows[region] for region in region_ids]
     linear = torch.zeros_like(scaffold.expression)
-    linear[columns] = torch.as_tensor(values, dtype=linear.dtype, device=linear.device)
+    linear[destination] = torch.as_tensor(values, dtype=linear.dtype, device=linear.device)
     prediction = replace(scaffold, expression=linear)
     result = score(prediction, targets, operator, genes, normalization_gene_ids=normal)
     result.update(

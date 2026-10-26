@@ -1,0 +1,180 @@
+{
+  "schema": "heir.cohort_measurement.v1",
+  "source_base_commit": "2cedac832bef5424dba8b88e83d673e4b4b996b0",
+  "completed_study_files_sha256": {
+    "summary.json": "cd10d9ca7b28a14a1816bd9b8eecc52eef7f42df449ceb0d7003407089f719dc",
+    "identity.json": "522a7dd19ac9dfbd9c3d884cfc999c41b936fa5e8c1acdaae5b3d8eba904c43e",
+    "config.json": "75422ac836be0d11850f9f3d08dc4129e814ada6d04009eb9fca9723b61a4c25",
+    "folds.csv": "b08ac3bccb3af7ab77054d27554c1addd6042a584ada774ac13ab3ec9898d881",
+    "protocol.json": "90a2cfdc44d71e86436132127a7438af9107c00988212d88a2e5c2234dafca89",
+    "metadata-review.json": "43e5767d44419e0108789dae1a8974f61332fa3ce582b59a303527cd100e6072"
+  },
+  "completed_capability_summary_sha256": "9b54ff4c408bf3b19cb70cc9db994b066f596237047b3b317b50e0d517696954",
+  "patient_metadata_sha256": "025d5dd02ee80322c3ba0e70c93984beddfa349301b12e9e3c876f5bc1bc8839",
+  "outcome_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "base_region_size_pixels": 100,
+  "min_tissue_fraction": 0.1,
+  "scales_pixels": [
+    100,
+    200,
+    400
+  ],
+  "normalizers": {
+    "original_nine": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "shared_measured": {
+      "rule": "sorted_intersection_of_retained_spatial_and_independent_rna_gene_ids_across_all_thirteen_patients",
+      "exclusions": "none_beyond_missing_or_nonunique_identifiers_rejected",
+      "selection_uses_expression_or_agreement": false
+    }
+  },
+  "support": "intersection_of_bead_occupied_selected_100_pixel_he_bins_across_registered_replicates_before_exposure_filtering",
+  "intrabin_correspondence": "unknown; common_bins_do_not_imply_identical_sampled_tissue",
+  "aggregation": "sum_raw_counts_within_fixed_fine_support_then_normalize; no_log_averaging",
+  "normalization": "log1p(10000*outcome_counts/sum_fixed_panel_counts)",
+  "eligibility": "both_replicates_present_and_positive_complete_panel_exposure",
+  "exposure_strata": {
+    "quantiles": [
+      0.3333333333333333,
+      0.6666666666666666
+    ],
+    "statistic": "minimum_of_paired_panel_counts",
+    "quantile_method": "linear",
+    "ties": "equal_values_never_split",
+    "use": "descriptive_no_threshold_selection"
+  },
+  "minimum_regions": 3,
+  "displacement": {
+    "offsets_pixels": [
+      [
+        0,
+        0
+      ],
+      [
+        -25,
+        0
+      ],
+      [
+        25,
+        0
+      ],
+      [
+        0,
+        -25
+      ],
+      [
+        0,
+        25
+      ]
+    ],
+    "shifted_replicate": "second_sorted_registered_label",
+    "role": "pixel_stress_test_not_landmark_calibrated_uncertainty",
+    "support": "intersection_of_geometry_support_across_all_offsets_fixed_before_scoring",
+    "eligibility": "report_all_eligible_and_intersection_across_all_offsets_per_scale_and_panel",
+    "select_transform": false,
+    "strata": "reuse_zero_offset_panel_exposure_cutpoints; exposure_changes_may_move_rows_between_strata; if_zero_offset_has_no_eligible_rows_use_zero_cutpoints"
+  },
+  "saved_predictions": {
+    "supported": "original_nine_at_100_pixels_on_identical_rows",
+    "coarse_scales": "unsupported_no_declared_coarse_prediction_representation",
+    "shared_measured": "unsupported_missing_predicted_normalizer_genes"
+  },
+  "linkage_categories": [
+    "documented_same_section_repeat",
+    "serial_section",
+    "separate_core",
+    "unknown"
+  ],
+  "correspondence_categories": [
+    "documented_correspondence",
+    "morphologically_plausible_with_uncertainty",
+    "unresolved"
+  ],
+  "new_model_fitting": false,
+  "new_reference_fitting": false,
+  "prior_cohort_exposure": true,
+  "independent_confirmation": false,
+  "selection": "report_every_predefined_condition; no_automatic_winner_or_exposure_threshold",
+  "physical_dimensions": "unknown_until_registered_image_calibration_is_established",
+  "morphology_review": {
+    "213-6752": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays cover the bend of the larger curved tissue fragment; coverage along its limbs differs. Detached upper fragment is not common support."
+    },
+    "313-932": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays cover the same central segment of the long upper fragment; most of the H&E and lower fragment remain unsampled."
+    },
+    "330-1082": {
+      "category": "unresolved",
+      "note": "Only one registered replicate; points extend laterally beyond a narrow stained tissue strip. Paired correspondence cannot be assessed."
+    },
+    "364-1321": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays broadly intersect the same two tissue segments, but coverage is sparse and patchy and some points lie beyond outlines."
+    },
+    "514-6760": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays follow the same curved left/central tissue segment; sampled extents differ and detached fragments are outside common support."
+    },
+    "783-4081": {
+      "category": "unresolved",
+      "note": "Both point clouds occupy the upper end of a very pale tissue strip; weak visible morphology and points beyond tissue prevent a confident overlap assessment."
+    },
+    "812-8239": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays occupy the lower elongated fragment; detached upper pieces are unsampled and lateral point coverage differs."
+    },
+    "853-4381": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays occupy the same central narrow fragment; other separated fragments remain unsampled."
+    },
+    "878-7149": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays span the large tissue body with similar broad outlines; coverage density and peripheral extent differ."
+    },
+    "880-7179": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays span the large tissue body with similar broad outline and internal gaps; local correspondence remains unverified."
+    },
+    "917-4531": {
+      "category": "unresolved",
+      "note": "Only one registered replicate; the upper tissue segment is sampled with peripheral points outside the visible outline."
+    },
+    "982-7629": {
+      "category": "unresolved",
+      "note": "Only one registered replicate; the middle/lower narrow fragment is sampled while the upper fragment is largely unsampled."
+    },
+    "997-7789": {
+      "category": "morphologically_plausible_with_uncertainty",
+      "note": "Both assays occupy the upper/middle strip, with different lateral and longitudinal extents; lower tissue remains unsampled."
+    }
+  },
+  "morphology_review_method": "visual_review_of_source_bound_lower_origin_HE_and_raw_bead_overlays_before_condition_scores; descriptive_no_acceptance_threshold",
+  "linkage_evidence": {
+    "pipeline_commit": "eac56009691ab3a2bf5b56c34e82683f90cf0141",
+    "section_relationship": "unknown; assay replicates are not biological section IDs",
+    "metadata": "selected_Table_S1_library_rows.tsv and selected_Table_S2_assay_rows.tsv lack exact spatial section/core links; upstream sampletracking_HTAPP_MBC_spatial.csv is absent",
+    "physical_scale": "native Slide-seq scale comments conflict (0.6 versus0.65um/px); subsequent coordinate scaling and registered HE transforms do not establish final canvas calibration",
+    "registration_residuals": "no local landmark residual table found; +/-25pixel displacements are stress tests only"
+  }
+}

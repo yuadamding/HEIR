@@ -632,7 +632,18 @@ def capability_command(args):
     run_capability(args.root, args.study, args.protocol, args.output)
 
 
+def measurement_command(args):
+    """Qualify regional measurements without fitting models or loading image embeddings."""
+    from .measurement_workflow import run_measurement
+
+    run_measurement(args.root, args.study, args.capability, args.config, args.output)
+
+
 def add_commands(commands):
+    measurement = commands.add_parser("cohort-measurement", help=measurement_command.__doc__)
+    for name in ("root", "study", "capability", "config", "output"):
+        measurement.add_argument(f"--{name}", required=True)
+    measurement.set_defaults(run=measurement_command)
     capability = commands.add_parser("cohort-capability", help=capability_command.__doc__)
     for name in ("root", "study", "protocol", "output"):
         capability.add_argument(f"--{name}", required=True)

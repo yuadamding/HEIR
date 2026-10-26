@@ -924,6 +924,125 @@ The compact report and exact patient-by-gene, consistency, template, reconstruct
 artifacts are under `/storage/HE_GPT/HEIR-cohort-runs/v070-capability`. The completed v0.6 study,
 source data, retained checkpoints, and historical archive remain unchanged.
 
+### Version 0.8 measurement qualification
+
+Version 0.8 retains the completed v0.6/v0.7 studies and fixes `_linear_score` to join
+operator region IDs to prediction rows before writing expression. A complete permutation of
+all region-associated fields now leaves scores unchanged; unknown or duplicated IDs reject.
+The old cohort path required identical region ordering before reconstruction, so this correction
+does not invalidate its recorded results.
+
+The new `cohort-measurement` command uses one [fixed configuration](../configs/personalized/measurement.json).
+It reads retained sparse raw Slide-seq counts, named measured gene axes, original bead IDs and
+coordinates, and H&E tissue geometry. It does not fit models/references or load learned image
+embeddings. Missing parent/replicate measurements remain absent; measured zero counts remain
+observed. The existing loader independently checks the original 100-pixel nine-gene raw counts,
+bead counts, grid and positive-exposure eligibility for every patient.
+
+Six conditions combine 100, 200 and 400 registered-pixel bins with the original nine-gene panel
+and a broader ordered intersection of the retained spatial and independent-RNA gene axes across
+all 13 biopsies. There are no expression-based panel exclusions or agreement-based selections.
+The same nine outcomes are used throughout. Counts are summed before fixed-panel library-10,000
+normalization and log1p; outcome selection cannot redefine the denominator.
+
+Common geometry is fixed before expression filtering: the intersection of bead-occupied,
+H&E-selected 100-pixel bins across a patient's registered replicates. Coarse parents are nested
+at the original (0,0) origin and retain that exact union of fine bins. Every aggregation verifies
+raw-bead equivalence and count conservation within each replicate. This defines common bin-level
+support; it does not assert identical tissue sampled inside a bin. Original bead locations,
+assignments, parent membership, occupied-bin area and H&E tissue support remain inspectable.
+All-available coverage is reported separately. Single assays remain explicit in the patient registry.
+
+Both normalizers retain their all-eligible rows and the same-row intersection. Descriptive exposure
+tertiles use the lower paired panel count, linear quantiles, and unsplit ties. The pixel stress test
+keeps the first replicate fixed and shifts the second by (0,0), (−25,0), (+25,0), (0,−25), (0,+25).
+Its fine footprint is the intersection across all five offsets; it reports both all-eligible and
+common-across-offset rows. Strata reuse zero-offset cutpoints, although changing exposure can move
+rows between strata. No transform is chosen by expression agreement. These offsets are not
+landmark-calibrated uncertainty estimates.
+
+Assay summaries preserve every requested gene's reason for undefined correlation. The strict
+patient summary requires all nine correlations; the defined-gene median is a labeled diagnostic.
+Cohort summaries give paired patients equal weight and retain undefined patients. Saved models
+retain their original target-defined gene eligibility policy and are scored only under the
+compatible 100-pixel nine-gene condition on exactly the same shared rows. They cannot be
+renormalized on genes they never predicted; coarse prediction representations also require a
+separate protocol. Neither incompatibility triggers retraining in this release.
+
+Local source review still leaves exact Slide-seq section/core links unknown. Table S2 supplies
+assay replicate counts, and the source manifest explicitly leaves section IDs blank. The pinned
+matching notebook references an unavailable upstream spatial tracking CSV; CODEX filename section
+clues do not establish cross-assay links. Native-pixel scale comments and later image/coordinate
+transforms do not qualify the final registered canvas in micrometres. Visual review of all 13
+source-bound overlays is recorded in the configuration: nine paired biopsies have morphologically
+plausible broad correspondence with uncertainty; 783-4081 has weak visible morphology, and the
+three single-replicate cases cannot establish paired correspondence. None is classified as
+documented exact correspondence. These are descriptive reviews, not registration acceptance.
+
+Good target-informed reconstruction of `qB` does not validate `q` as a cell-state mixture.
+Up to 32 states give 31 simplex dimensions, while nine self-normalized genes supply at most
+eight independent compositional dimensions. The v0.7 mixtures remain diagnostic variables;
+they must not be used as presumed ground-truth mapper labels. No larger solver search, stronger
+protein coefficient, neighborhood model, or biological communication claim is introduced here.
+
+The completed run is `/storage/HE_GPT/HEIR-cohort-runs/v080-measurement`, with its compact
+`report.md`, exact patient/gene tables, support and exclusion arrays, all displacement results,
+source identities and overlays. The broader availability-only panel contains **8,396 genes**.
+All 13 biopsies reproduce original raw counts, bead counts, grid and eligibility. All 100 compatible
+saved-model rows reproduce the v0.7 shared-region IDs and scores exactly; the 30 single-replicate
+arm rows are explicitly unavailable for paired comparison.
+
+| Scale / normalizer | Paired patients | Defined strict patients | Mean defined-gene median (diagnostic) | Normalized MSE | Shared eligible regions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100 / nine genes | 10 | 9 | 0.13422 | 11.63873 | 1,714 |
+| 100 / 8,396 genes | 10 | 9 | 0.14839 | 1.37367 | 1,854 |
+| 200 / nine genes | 10 | 9 | 0.19118 | 8.00554 | 556 |
+| 200 / 8,396 genes | 10 | 9 | 0.19496 | 0.93655 | 580 |
+| 400 / nine genes | 10 | 9 | 0.29639 | 5.32224 | 189 |
+| 400 / 8,396 genes | 10 | 9 | 0.27491 | 0.62826 | 194 |
+
+**All six strict cohort correlation headlines remain undefined:** CD8A is constant in one
+853-4381 replicate. The diagnostic column averages each patient's median of defined genes,
+retaining that patient; it is not a substituted strict headline. The v0.7 median-across-patients
+agreement of 0.13705 and this equal-patient mean of 0.13422 are different summaries.
+
+Nine-panel agreement improves in 7/10 patients at 200 pixels and 9/10 at 400 pixels, with mean
+increments +0.05696 and +0.16217. This costs 67.6% and 89.0% of the original eligible spatial
+units. Only 13–33 regions remain per patient at 400 pixels, with diagnostic correlations spanning
+−0.02353 to 0.50000. Coarsening changes the task; it is not proof of improved fine-scale recovery.
+
+On exactly the same eligible rows at each scale, broad-panel diagnostic means are
+0.13139/0.17744/0.26991, versus nine-panel 0.13422/0.19118/0.29639. Thus its apparent all-eligible
+advantage at 100/200 pixels does not persist on common rows. The broader denominator adds
+140/24/5 eligible regions. Its smaller MSE uses a different endpoint scale and cannot be read as
+a comparable accuracy improvement. No favorable denominator is promoted after this screen.
+
+At the base scale, paired geometry-defined region-replicates have median 31 nine-panel counts
+and 33 beads. Nine-panel counts are median 0.512% of the retained total (IQR 0.357–0.742%);
+153 of 3,708 observed region-replicates have zero nine-panel exposure. Low/middle/high exposure
+strata have nine-panel diagnostic means 0.04380/0.12817/0.11705. Higher-exposure strata have lower error
+but do not uniformly have better ordering; no modeling eligibility threshold is chosen.
+
+On the displacement screen's fixed eligible rows, nine-panel diagnostic means span
+0.11254–0.13513, 0.18324–0.22405 and 0.22921–0.28526 at 100/200/400 pixels. Maximum absolute
+patient changes from zero displacement are 0.11319/0.11379/0.15165; broad normalization reaches
+0.29396 at 400 pixels. The stress footprint differs from the main screen, and its ±25 pixels
+are not calibrated registration uncertainty. All offsets are retained, without transform selection.
+
+**Decision:** do not freeze any of the six definitions as a qualified target for a new mapper
+experiment yet. Keep 100-pixel/nine-gene results as the historical reference. The 200-pixel
+condition is a candidate for focused measurement validation because it retains more units than
+400 pixels; it is not promoted to a modeling target. Prioritize documented section/assay links
+and registered overlap, then a declared support/exposure policy. More model capacity or stronger
+protein guidance is not justified by this screen. Later recipe selection and model comparisons
+on this already explored cohort remain internal development.
+
+Version 0.8 passes **335 CPU tests**, Ruff lint/format, frozen-lock and package-build checks.
+Independent artifact checks reconcile all 3,024 patient summaries, 53,136 gene/direction rows,
+288 cohort summaries and 182 paired differences. Existing prediction studies, source data and
+historical archives remain unchanged. The full report distinguishes the generated measurement
+results from the post-screen development decision.
+
 Physical calibration, exact section/core matching, registration sensitivity, marker calibration,
 and independent scientific validation remain outstanding.
 Independently segmented nuclei are required only for the nucleus-level extension, not for running
