@@ -10,6 +10,10 @@ This is a development prototype. Real HTAPP qualification, calibrated uncertaint
 benefits from personalization or communication remain unestablished. See the
 [workflow and scientific limits](docs/personalized_development.md).
 
+The 13-biopsy source working set is available at `/mnt/seagate/HnE/HTAPP_MBC`. Its
+[local-data assessment](docs/personalized_development.md#htapp-qualification) records verified
+presence and pilot count axes, plus the geometry and H&E preprocessing still needed for a real fit.
+
 Version 0.3 fixes the numerical issues identified in the assessment of `d955c01`: fixed
 normalization panels, support-independent transfer, and separate protein observation geometry.
 Specimen manifests, model bundles, and prediction exports now use **schema v2**; older artifacts

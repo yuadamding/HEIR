@@ -180,10 +180,57 @@ identities. The attached plan's optional UNI2-h suggestion does not rewrite thos
 ## HTAPP qualification
 
 The attached plan identifies the [SCP2702 portal](https://singlecell.broadinstitute.org/single_cell/study/SCP2702)
-and a previous 13-participant intersection as the candidate source. Those are planning inputs,
-not evidence that the corresponding payloads or their metadata were verified in this revision.
-The final eligibility table must derive from actual local files and exclude incomplete or
-unresolved specimens with explicit reasons.
+and a previous 13-participant intersection as the candidate source. On October 26, 2026, the user
+located the acquired working set at `/mnt/seagate/HnE/HTAPP_MBC`. All 387 paths in
+`metadata/selected_13_verified_file_manifest.tsv` are present with matching file sizes, totaling
+15,708,049,238 bytes across 13 biopsies. They include 156 H5ADs, 153 compressed TSVs, and 78 H&E
+images; each biopsy has H&E, independent RNA, CODEX, and Slide-seq. Fifteen reused metadata and
+inspection files match their recorded SHA-256 hashes. Biological payload hashes were not recomputed
+in this follow-up; acquisition/readback receipts remain in the dataset. File presence does not
+establish scientific eligibility.
+
+The local `README.md`, `DOWNLOAD_COMPLETE.json`, and `inspection/INITIAL_INSPECTION.md` distinguish
+completed acquisition from training readiness. The registered pilot measurement axes were checked
+directly in HDF5:
+
+| Biopsy | Independent RNA cells × genes | Slide-seq observations × genes | Shared RNA genes | CODEX cells × markers |
+| --- | --- | --- | --- | --- |
+| 313-932 | 12,494 × 21,081 | 11,484 × 17,023 | 13,612 | 30,005 × 50 |
+| 514-6760 | 20,916 × 26,822 | 33,272 × 20,944 | 15,462 | 35,995 × 50 |
+
+Registered retained measurements use `obsm["counts"]` with `uns["counts_var"]`; processed RNA
+`X` has only 5,000 features and is not the count axis. HEIR's `extract_raw_counts` successfully
+loaded and validated the 313-932 RNA matrix as sparse CSR, without densifying it. These are
+independent-RNA integer counts after upstream filtering/CellBender processing, not untouched raw
+UMI data. The source manifests keep molecular inputs separate from spatial targets. Imported OT/RCTD
+outputs and molecular embeddings are not H&E image features or approved prediction inputs.
+
+Inspected RNA-label ancestry traces to the dissociated-RNA workflow (clustering, SingleR/CNV,
+and manual annotation), with no spatial-label feedback found along that path. However, those
+labels include cohort-level processing rather than training-fold-only fitting; their reuse must
+be declared explicitly for a held-out experiment. This inspection does not approve every imported
+annotation field.
+
+The clean pinned processing checkout at `reference/HTAPP-Pipelines`, commit
+`eac56009691ab3a2bf5b56c34e82683f90cf0141`, supplies an author-declared common physical frame.
+`HTAPP_MBC/03_spatial_analysis/spatial_utils.py` and the pilot processing notebooks explain the
+coordinate transforms. Paired source/registered coordinates reproduce CODEX scales of 0.386 for
+313-932 and 0.772 for 514-6760 (the latter notebook doubles half-resolution coordinates), and a
+Slide-seq scale of 0.6 for both pilots. `02_HE.ipynb` labels 100 processed-image pixels as 100 µm.
+These source conventions are not independently verified scanner calibration. In particular,
+`spatial_utils.py` explicitly notes that Slide-seq should use 0.65 instead of the implemented 0.6;
+this discrepancy must be resolved with the registration before using physical bins. Do not scale
+already registered coordinates a second time or change their scale without requalifying alignment.
+
+The working set contains no H&E nucleus segmentation, nucleus-keyed frozen image features, or
+cell-to-spatial-observation map. CODEX cell coordinates cannot substitute for independently
+identified H&E nuclei. Stored `00_matchSpatial.ipynb` output identifies CODEX source section 3 for
+313-932 and section 8 for 514-6760. It does not establish the corresponding H&E/Slide-seq sections,
+core identities, or their relationships to independent RNA. The referenced
+`sampletracking_HTAPP_MBC_spatial.csv` is absent from this checkout; assay replicate numbers must
+not be substituted for biological section IDs. These links, antibody-to-gene interpretation, and
+common tissue coverage still require qualification. The final eligibility table must retain
+explicit reasons for incomplete or unresolved specimens.
 
 Preparation consumes the documented canonical local format. Portal bundles with different AnnData
 keys or metadata columns need explicit adaptation before loading; the importer does not infer
@@ -354,12 +401,13 @@ distribution builds. Regression cases cover fixed-panel missingness and outcome 
 single-gene gradients and degenerate exposure, support-only logit changes, matched protein
 aggregation and confidence, protein/registration identity mismatches, and specimen-first scoring.
 
-The user confirmed on October 26, 2026 that no local HTAPP specimen inputs are available. The
-real-specimen milestone is blocked on acquiring those files and their matching metadata; no
-real-data result or memory qualification is claimed. Once available, prepare one complete specimen,
-inspect its actual count axis and full H&E/protein/ST overlap, compare H&E-only, RNA-transfer, and
-protein-guided outputs, and score them using the fixed normalization contract before expanding
-to patient-held-out experiments.
+The subsequent local-data inspection above supersedes the earlier missing-input status. Source
+acquisition is complete for the selected working set; a qualified canonical specimen is still
+pending. Resolve the physical-scale and section-linkage evidence, create independent H&E nuclei
+and frozen image features, curate molecular inputs, and construct common-region observation
+operators. Then compare H&E-only, RNA-transfer, and protein-guided outputs using the fixed
+normalization contract before expanding to patient-held-out experiments. No real-data model score
+or model memory qualification is claimed from the source inspection.
 
 | Milestone | Software scope in this revision | Scientific acceptance still required |
 | --- | --- | --- |
