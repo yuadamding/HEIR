@@ -1296,3 +1296,54 @@ initialization is not silently treated as a matched baseline for the new MLP exp
 Further seeds, panels, image context, target resolution and communication fits remain deferred.
 The frozen protocol is `configs/personalized/joint_controls_study.json`; new outputs belong in
 `/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls`.
+
+### Completed control results
+
+All 30 fits completed for 13 patients. Independent replay of 312,598 CODEX observations
+reproduces every protein summary exactly: 284,982 observations contribute to prediction
+regions and 27,616 remain recorded as excluded. All four original numeric input payloads
+match v0.9 byte-for-byte; the new correspondence payload also matches across backbones.
+Both compared models retain hierarchical reference attention and softmax assignment;
+the comparison isolates dot-product versus pairwise-MLP compatibility scoring.
+
+| Model | H-optimus-1 rho | UNI2-h rho | H-optimus-1 MSE | UNI2-h MSE |
+|---|---:|---:|---:|---:|
+| Dot-product scorer, measured intensities | 0.081390 | 0.070373 | 12.869627 | 13.434523 |
+| MLP scorer, measured intensities | 0.061908 | 0.056597 | 12.792700 | 13.264838 |
+| Dot-product scorer, availability/coverage only | 0.083281 | 0.071344 | 12.751772 | 13.490013 |
+
+Dot-product scoring improves mean all-row spatial rho over MLP by 0.019482 and 0.013776,
+with nine positive patient contrasts under each backbone. MLP lowers total MSE under both; its centered
+error is lower for H-optimus-1 but higher for UNI2-h. Active parameter counts are 56,180 for
+attention and 56,212 for MLP, a 0.057% difference; the coverage-only control has 55,860.
+
+The common-coverage analysis retains 4,426/4,625 evaluation region-replicate rows, all 13
+patients and all 23 assay replicates. Original coverage includes 5,591/6,580 prediction regions.
+Measured-intensity attention minus coverage-only rho is -0.001892/-0.000971 on all rows and
++0.000645/+0.001981 on covered rows (H-optimus-1/UNI2-h). Only five and six patients improve
+on covered rows, with negative paired medians under both backbones. H-optimus-1 intensities
+worsen total MSE by 0.123775 but reduce centered MSE by 0.058999 on this subset; UNI2-h
+improves them by 0.052401 and 0.075656. The intensity-specific contribution remains small
+and inconsistent beyond availability/coverage.
+
+With counts and masks fixed, intensity permutation lowers covered-row rho by 0.004734 and
+0.007548, while MSE rises by only 0.002706 and 0.002050. These dependence tests remain
+separate from the retrained coverage control. Four of five H-optimus-1 attention checkpoints
+and all five UNI2-h attention checkpoints come from transfer warmup. All fits nevertheless
+complete their joint-stage training. UNI2-h correction removal is therefore exactly unchanged;
+H-optimus-1 removal slightly improves all-row rho but slightly worsens covered-row rho.
+
+Retain dot-product scoring as the correlation-oriented development reference and preserve MLP
+and coverage-only comparisons. These results do not establish a uniform scoring advantage,
+robust intensity-specific benefit, biological state placement or three-modality personalization.
+No new H/HR/HP/RP or generic-RNA models are fitted in this incremental comparison; their
+contrasts remain in the completed v0.9 study. Correspondence qualification and independent
+readouts remain necessary before stronger localization or communication claims.
+
+The executed implementation is `3003b6ea90581228e6c2c32164fd631335ca3a3e`, with matrix SHA-256
+`d383e8acb9e6586f5d457e0dc5185a1e3df49ad6f7fc26b104a69839a9680e3e`.
+All 470 tests, lint/format, lock validation and package build pass. Fifteen historical bundles
+reproduce 45 saved predictions exactly. Independent new-study audits pass 46,022 and 69,261
+checks across all 30 bundles and 286 exports, including hierarchy algebra, training-only
+transforms, checkpoint selection, coverage and metric reconstruction. Full tables, derived
+summaries and `interpretation.md` are retained in `v0100-joint-controls/backbone-comparison`.

@@ -32,9 +32,12 @@ assignment, and a multimodal correction, plus source-coordinate replay. Legacy b
 their original meaning. Joint experiments use the historical 100-pixel view as exploratory
 development; coordinate replay does not qualify biological alignment.
 Version 0.10 makes the joint hierarchy and protein correspondence explicit in exports, adds
-zero-initialized correction, and compares attention with a parameter-comparable reference
-MLP and an availability/coverage-only control. See the
+zero-initialized correction, and compares dot-product and parameter-comparable MLP scoring
+within the same reference hierarchy, plus an availability/coverage-only control. See the
 [HEIR-Joint architecture and control protocol](docs/personalized_development.md#version-010-heir-joint-controls).
+Its [30 completed control fits](docs/personalized_development.md#completed-control-results)
+show higher correlation with dot-product scoring but lower total error with MLP, and little
+consistent protein-intensity benefit beyond availability/coverage.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
