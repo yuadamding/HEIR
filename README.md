@@ -38,6 +38,10 @@ within the same reference hierarchy, plus an availability/coverage-only control.
 Its [30 completed control fits](docs/personalized_development.md#completed-control-results)
 show higher correlation with dot-product scoring but lower total error with MLP, and little
 consistent protein-intensity benefit beyond availability/coverage.
+Version 0.11 adds direct ridge readouts of the existing frozen 1,536-dimensional features,
+target-free diagnostics of saved joint representations, and portable hash-checked encoder
+manifest resolution. The [probe protocol](docs/personalized_development.md#version-011-frozen-feature-probes)
+uses the two locally available backbones; a new paired image–RNA encoder is deferred.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 

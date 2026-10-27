@@ -1347,3 +1347,45 @@ reproduce 45 saved predictions exactly. Independent new-study audits pass 46,022
 checks across all 30 bundles and 286 exports, including hierarchy algebra, training-only
 transforms, checkpoint selection, coverage and metric reconstruction. Full tables, derived
 summaries and `interpretation.md` are retained in `v0100-joint-controls/backbone-comparison`.
+
+## Version 0.11: frozen-feature probes
+
+The new protocol in `configs/personalized/frozen_feature_probes.json` preserves v0.9/v0.10
+configurations, predictions and scope. Following the user's direction to use existing pretrained
+models, this revision uses only the local frozen H-optimus-1 and UNI2-h caches. OmiCLIP and its
+25 dependent joint fits are deferred; visual backbones alone do not supply pretrained image–RNA
+compatibility. No new state partition, outcome panel, protein panel, context size or nucleus
+segmentation is introduced.
+
+```bash
+heir cohort-probe --config configs/personalized/frozen_feature_probes.json \
+  --output /storage/HE_GPT/HEIR-cohort-runs/v0110-pretrained/probes
+```
+
+The diagnostic bypasses the learned 32-dimensional projection. It standardizes all 1,536 features
+using training patients only and fits an unpenalized intercept plus ridge coefficients. The
+weighted mean squared loss balances patients, specimens, assay replicates and available rows.
+The fixed regularization grid is 0.01, 0.1, 1, 10, 100. The existing validation correlation,
+centered error and total MSE ordering selects a candidate, with the first increasing-grid entry
+breaking exact ties. Five folds × two backbones produce **10 selected readouts from 50 candidate
+solutions**, with no train-plus-validation refit. Seed 0 records the protocol identity; the linear
+solver is deterministic. These are diagnostic expression readouts, not RNA-state predictors.
+
+Predictions are already on the fixed nine-gene `log1p(1e4 * expression / panel_sum)` scale and
+are scored directly, without another library normalization or clipping. The workflow requires
+one unit-weight image region per assay observation, exports all test predictions in each fold
+before reading its test targets, and compares the saved v0.10 HRP full/transfer outputs on the
+same target rows, genes and common original protein support. This previously exposed cohort
+supports internal development evidence, not independent biological qualification.
+
+`heir.personalized.representations.analyze_saved_representations` inspects saved models without
+ST targets or fitting. It checks exact historical prediction reproduction and reports variation
+through raw/standardized image features, image projection, fusion, actual type/state logits,
+hierarchical mixtures and transferred expression. Tanh saturation and reference-descriptor cosine
+similarity are descriptive. Variances at different stages have different units and cannot alone
+establish information loss.
+
+Encoder location is now resolved separately from identity. A missing workstation manifest path
+can resolve under the checkout or an explicit asset root, but its original SHA-256 must match.
+Existing incorrect files are rejected. Configuration checks do not open large checkpoints; the
+regression test makes `/storage/HE_GPT` unavailable in a temporary checkout.

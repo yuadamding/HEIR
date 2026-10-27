@@ -1,6 +1,8 @@
 """Matched controls, frozen coverage eligibility and legacy study preservation."""
 
+import hashlib
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,6 +57,73 @@ def test_actual_control_matrix_has_thirty_matched_fits_and_preserves_old_seventy
     assert workflow._backbone_matrix(directory / "joint_backbones_study.json")["total_fits"] == 75
     assert workflow.CONTROL_ARMS == ("HRP_constant_reference", "HRP_transfer_only")
     assert "protein_intensity_permuted" not in workflow.INTERVENTIONS
+
+
+def test_committed_matrices_resolve_exact_manifests_without_workstation_access(
+    tmp_path, monkeypatch
+):
+    source = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "portable-checkout"
+    shutil.copytree(source / "configs", checkout / "configs")
+    shutil.copytree(source / "manifests", checkout / "manifests")
+    paths = [
+        p for directory in ("configs", "manifests") for p in (checkout / directory).rglob("*.json")
+    ]
+    original_bytes = {p: p.read_bytes() for p in paths}
+    real_open, real_is_file, real_is_dir = Path.open, Path.is_file, Path.is_dir
+
+    def inaccessible(path):
+        return str(path).startswith("/storage/HE_GPT")
+
+    def guarded_open(path, *args, **kwargs):
+        if inaccessible(path):
+            raise FileNotFoundError("simulated absent workstation storage")
+        if path.suffix in {".pt", ".bin", ".safetensors"}:
+            pytest.fail("configuration validation must not read a model checkpoint")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: False if inaccessible(path) else real_is_file(path)
+    )
+    monkeypatch.setattr(
+        Path, "is_dir", lambda path: False if inaccessible(path) else real_is_dir(path)
+    )
+    folder = checkout / "configs" / "personalized"
+    assert workflow._backbone_matrix(folder / "joint_controls_study.json")["total_fits"] == 30
+    assert workflow._backbone_matrix(folder / "joint_backbones_study.json")["total_fits"] == 75
+    assert all(path.read_bytes() == contents for path, contents in original_bytes.items())
+    # Valid JSON with changed bytes must fail even at a valid fallback location.
+    manifest = checkout / "manifests" / "encoders" / "hoptimus1.json"
+    manifest.write_bytes(manifest.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="manifest SHA-256 mismatch"):
+        workflow._backbone_matrix(folder / "joint_controls_study.json")
+
+
+def test_manifest_user_asset_root_requires_exact_bytes_and_no_checkpoint(tmp_path):
+    from heir.features.manifest_resolution import resolve_encoder_manifest
+
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    manifest = asset_root / "encoder.json"
+    manifest.write_bytes(b'{"identity": "fixture manifest, no checkpoint"}\n')
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    configured = tmp_path / "retired-workstation" / "encoder.json"
+    assert (
+        resolve_encoder_manifest(
+            configured,
+            digest,
+            repository_root=tmp_path / "empty-checkout",
+            asset_roots=(asset_root,),
+        )
+        == manifest
+    )
+    with pytest.raises(FileNotFoundError, match="supplied asset roots"):
+        resolve_encoder_manifest(configured, digest, repository_root=tmp_path / "empty-checkout")
+    configured.parent.mkdir()
+    configured.write_bytes(b'{"wrong": "identity"}\n')
+    with pytest.raises(ValueError, match="manifest SHA-256 mismatch"):
+        resolve_encoder_manifest(configured, digest, asset_roots=(asset_root,))
 
 
 def test_common_coverage_requires_every_positive_contributor_and_ignores_target_values():

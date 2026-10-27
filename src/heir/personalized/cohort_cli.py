@@ -668,7 +668,19 @@ def joint_command(args):
     print(json.dumps(result, indent=2, allow_nan=False))
 
 
+def probe_command(args):
+    """Fit validation-selected direct readouts of the frozen full-width image features."""
+    from .probe_workflow import run_feature_probes
+
+    result = run_feature_probes(args.config, args.output)
+    print(json.dumps(result, indent=2, allow_nan=False))
+
+
 def add_commands(commands):
+    probe = commands.add_parser("cohort-probe", help=probe_command.__doc__)
+    probe.add_argument("--config", required=True)
+    probe.add_argument("--output", required=True)
+    probe.set_defaults(run=probe_command)
     joint = commands.add_parser("cohort-joint", help="Joint H&E–RNA–protein experiments")
     joint_commands = joint.add_subparsers(dest="joint_action", required=True)
     for action in ("prepare", "pilot", "study", "diagnose", "compare-backbones"):

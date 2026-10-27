@@ -55,7 +55,7 @@ def _tsv(path, rows):
         )
 
 
-def _configuration(path):
+def _configuration(path, *, encoder_asset_roots=()):
     config = json.loads(Path(path).read_text())
     if config.get("schema") != "heir.joint_region_workflow.v1":
         raise ValueError("unsupported joint workflow configuration")
@@ -70,7 +70,22 @@ def _configuration(path):
     model = JointModelConfig.from_dict(model_values)
     backbone = config.get("image_backbone")
     if backbone is not None:
-        manifest_path = Path(backbone["manifest"])
+        from heir.features.manifest_resolution import resolve_encoder_manifest
+
+        checkout = next(
+            (
+                parent
+                for parent in Path(path).resolve().parents
+                if (parent / "manifests" / "encoders").is_dir()
+            ),
+            None,
+        )
+        manifest_path = resolve_encoder_manifest(
+            backbone["manifest"],
+            model.image_encoder_manifest_sha256,
+            repository_root=checkout,
+            asset_roots=encoder_asset_roots,
+        )
         manifest = json.loads(manifest_path.read_text())
         if (
             backbone.get("mode") != "frozen"

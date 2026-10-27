@@ -1,0 +1,67 @@
+{
+  "schema": "heir.frozen_feature_probe_study.v1",
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "seed": 0,
+  "alpha_grid": [
+    0.01,
+    0.1,
+    1,
+    10,
+    100
+  ],
+  "selected_readouts": 10,
+  "candidate_solutions": 50,
+  "feature_dim": 1536,
+  "evaluation_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "normalization_gene_ids": [
+    "EPCAM",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "VIM",
+    "COL1A2",
+    "DCN",
+    "CD8A",
+    "MKI67"
+  ],
+  "folds_sha256": "b08ac3bccb3af7ab77054d27554c1addd6042a584ada774ac13ab3ec9898d881",
+  "no_train_validation_refit": true,
+  "prediction_scale": "fixed_panel_log1p_1e4",
+  "selection": "validation_spatial_correlation_then_centered_error_then_total_mse",
+  "tie_break": "first_in_increasing_alpha_grid",
+  "backbones": {
+    "hoptimus1": {
+      "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/hoptimus1-prepared",
+      "source_study_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/hoptimus1-study",
+      "encoder_manifest_sha256": "f6852288e1ae146a4865bf19e38ce994c0be9ce1c2bfa09bdf77747043ac8fd9",
+      "source_identity_sha256": "c872c77e5e0e1177144fef5500a0ea54841031490100470719220b60439e1568",
+      "source_exports_sha256": "528ffd05e89c00358cfe0032a893368c0b15a4044e1864e3e6bf6530bcd78f68"
+    },
+    "uni2h": {
+      "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/uni2h-prepared",
+      "source_study_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/uni2h-study",
+      "encoder_manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369",
+      "source_identity_sha256": "bfd5ab6f7f7f2ded4520e2bfa740dbf25574436d7c1be953f8f0cf69238f8c36",
+      "source_exports_sha256": "2ee6686156e2df688a8f2b949b5656a6e5381fb87452605091421896df806d27"
+    }
+  },
+  "prior_cohort_exposure": true,
+  "interpretation": "Direct normalized-log feature readouts; no reference-state interpretation or biological localization qualification.",
+  "scope": "Existing locally downloaded H-optimus-1 and UNI2-h only, per user direction. OmiCLIP adapter and 25 dependent joint fits deferred."
+}

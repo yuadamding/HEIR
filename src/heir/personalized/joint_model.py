@@ -263,7 +263,7 @@ class JointModel(nn.Module):
             p = torch.where(available, p, self.missing_protein.expand(n, -1))
         z = self.fusion(torch.cat((h, p, h * p, coverage), dim=1))
         diagnostics = {
-            "diagnostic_schema": "heir.joint.diagnostics.v2",
+            "diagnostic_schema": "heir.joint.diagnostics.v3",
             "region_ids": inputs.cell_ids,
             "image_embedding": h,
             "protein_embedding": p,
@@ -329,8 +329,10 @@ class JointModel(nn.Module):
                     for local, column in enumerate(torch.where(group)[0].tolist()):
                         within_columns[column] = weights[local].expand(n)
             else:
-                pi = self._compatibility(z, rt, broad_type=True).softmax(1)
+                type_logits = self._compatibility(z, rt, broad_type=True)
+                pi = type_logits.softmax(1)
                 logits = self._compatibility(z, r, broad_type=False)
+                diagnostics.update(type_logits=type_logits, state_logits=logits)
                 columns = [None] * len(reference.state_ids)
                 for index, group in enumerate(groups):
                     omega = logits[:, group].softmax(1)
@@ -358,6 +360,7 @@ class JointModel(nn.Module):
             state_ids = ("unsupported", *reference.state_ids)
             diagnostics.update(
                 type_ids=type_ids,
+                type_embedding=rt,
                 type_mixture=pi,
                 state_ids=reference.state_ids,
                 state_types=reference.state_types,
