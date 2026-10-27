@@ -63,6 +63,10 @@ Version 0.14 adds a [frozen regional measurement protocol](docs/personalized_dev
 for biopsy 982-7629, with a fixed 210-gene denominator, replicate-specific count QC and
 193 primary candidates. It separates measurement qualification from unresolved independent
 registration and defines calibration versus spatial-assignment objectives before future fits.
+The completed extraction retains **44 common regions and 89 primary genes** across two MERFISH
+replicates and ExSeq, plus three secondary genes. Independent numerical reconstruction passes;
+the requested fully qualified spatial endpoint remains incomplete pending section correspondence
+and independent structural registration evidence.
 The [48 v0.13 aggregates and independent reconstruction procedure](reproducibility/v013/README.md)
 are now published; historical source verification supports relocated checkouts without weakening
 hash checks.

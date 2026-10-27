@@ -1946,6 +1946,50 @@ spatial qualification are separate fields; this workflow cannot certify independ
 Evidence is retained outside the repository at
 `/storage/HE_GPT/HEIR-cohort-runs/v0140-regional-endpoint/`.
 
+### Completed regional measurement result
+
+Source `aea37b1` completed the single frozen extraction without any fallback or threshold change.
+Of 343 H&E regions, 321 contain CODEX observations, 53 have common occupancy across CODEX and
+all three RNA replicates, and **44** pass the joint regional count QC. The common primary panel
+contains **89 of 193** candidates. Three of the nine secondary outcomes pass every replicate:
+**EPCAM, KRT8 and VIM**. All 210 denominator genes remain in normalization. The
+[compact result and exact gene lists](../reproducibility/v014_endpoint.json) bind the original
+summary, count arrays, QC tables, protocol, source commit and independent audit.
+
+| Retained replicate | Observations in 44 eligible regions | Pool counts in those regions | Primary genes passing this replicate | Secondary genes passing this replicate |
+|---|---:|---:|---:|---:|
+| MERFISH 1 | 1,078 | 64,755 | 134 | 7 |
+| MERFISH 2 | 880 | 52,316 | 123 | 7 |
+| ExSeq 1 | 1,646 | 64,132 | 144 | 5 |
+
+The common gene panel is the intersection of these replicate-specific QC decisions. Insufficient
+gene counts are the most frequent exclusion; complete reasons for every candidate/replicate are
+retained in `endpoint/gene_qc.tsv`. The 44 regions concentrate on the smaller ExSeq footprint and
+do not represent the whole biopsy or independently annotated cell types.
+
+Independent reconstruction imports no HEIR code. It rebuilds the image mask and grid using
+integer RGB inequalities, maps every observation, sums raw counts directly, checks included plus
+excluded count conservation, and recomputes normalization, linear quantiles, eligibility and all
+tables. **28,428 assertions** pass; 34,523 floating values agree within **4.44e-16**. Integer
+counts, membership and eligibility match exactly. Stored float32 tissue fractions also match
+exactly after the specified conversion; their expected rounding from exact fractions is at most
+2.98e-8 and is reported separately. Four payloads, both metadata files, the spatial sidecar,
+committed code/config and output hashes remain unchanged. The independently runnable procedure
+and receipt are in run-root `independent-audit/`; no production extraction or old residual audit
+was repeated.
+
+Engineering acceptance is **558 passing tests**, clean lint/format/lock checks, and a successful
+source/wheel build. [Source CI passes](https://github.com/yuadamding/HEIR/actions/runs/40445410393).
+The source archive, 35 historical repository inputs and 50 v0.13 artifacts retain their original
+hashes. Large evidence and data stay outside the repository; only compact summaries and the
+requested v0.13 reconstruction procedure are published.
+
+**Measurement qualification passed; the requested fully qualified spatial endpoint remains
+incomplete.** Exact section correspondence and independent structural registration uncertainty
+are unresolved. No new fit or prediction comparison has been performed, and no scientific benefit
+over ridge is claimed. This case supplies frozen measured outcomes for a conditional regional
+diagnostic, not independent patient confirmation or demonstrated within-type localization.
+
 ### Next comparison objective, before new fits
 
 The next scientific objective is accurate **regional expression variation**. Calibration and
