@@ -1,0 +1,157 @@
+{
+  "schema": "heir.residual_study.v1",
+  "prepared_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/uni2h-prepared",
+  "source_study_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0100-joint-controls/uni2h-study",
+  "baseline_directory": "/storage/HE_GPT/HEIR-cohort-runs/v0110-pretrained/probes/uni2h",
+  "source_identity_sha256": "bfd5ab6f7f7f2ded4520e2bfa740dbf25574436d7c1be953f8f0cf69238f8c36",
+  "source_exports_sha256": "2ee6686156e2df688a8f2b949b5656a6e5381fb87452605091421896df806d27",
+  "prepared_sha256": "edccc203842d712526aa66bd4abdbbafa6c9a1cf38e067691ec13c91ed6b0c6e",
+  "folds_sha256": "b08ac3bccb3af7ab77054d27554c1addd6042a584ada774ac13ab3ec9898d881",
+  "baseline_folds": {
+    "0": {
+      "bundle_inventory_sha256": "16749d69621c43213ce49deaf76cf4995694f6dc815eb7dcedf7932e4cb6a46d",
+      "target_identity_sha256": "8ca95193f9d63d26ca4b0e98861d176b89ce30b323d914c3cf3f009c629fba61"
+    },
+    "1": {
+      "bundle_inventory_sha256": "7b9c65bd6d385b835c38ddc067f67e2c87e33e3029aff8fb7d279058723ce590",
+      "target_identity_sha256": "d64ebc97066f015626245db65d7e0fde63ee637fd45de74f156cce1f1a5cfaa3"
+    },
+    "2": {
+      "bundle_inventory_sha256": "08c087da7943b3e848d49fc6abaddde4774e2de750b790541bebeeadb40d72fe",
+      "target_identity_sha256": "b46786dc4be42202cee96c5b570b8500621407ec12ea95dfd85fb9a08b9b5a79"
+    },
+    "3": {
+      "bundle_inventory_sha256": "30a538cba679d5578b7a4c4bb4f0fb5e2e79631c1271ae1b0fe27bcd96c6da03",
+      "target_identity_sha256": "a2f6ea4faeda39c1fa6a7444cf774b4af985204d9c86aa7ae45b5a4ac0865fa0"
+    },
+    "4": {
+      "bundle_inventory_sha256": "7106e2f1af335b406d578f058c9a8e6730f46b480e269a3470c27d3d94e3199e",
+      "target_identity_sha256": "87591a91201b55caa5e6a809a7bd242522686ca0e9b264361221f96136cfcfce"
+    }
+  },
+  "outer_folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "seed": 0,
+  "alpha": 10.0,
+  "inner_splits": 3,
+  "arms": [
+    "H",
+    "HR",
+    "HP",
+    "HRP",
+    "HRP_coverage_only",
+    "HRP_generic"
+  ],
+  "expected_neural_fits": 30,
+  "expected_inner_readouts": 15,
+  "expected_reused_deployment_readouts": 5,
+  "model": {
+    "feature_dim": 1536,
+    "state_dim": 18,
+    "gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "supervised_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "normalization_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A2",
+      "DCN",
+      "CD8A",
+      "MKI67"
+    ],
+    "state_gene_ids": [
+      "EPCAM",
+      "KRT8",
+      "KRT18",
+      "KRT19",
+      "VIM",
+      "COL1A1",
+      "COL1A2",
+      "DCN",
+      "PECAM1",
+      "VWF",
+      "PTPRC",
+      "CD3D",
+      "CD4",
+      "CD8A",
+      "NKG7",
+      "LYZ",
+      "CD68",
+      "MKI67"
+    ],
+    "hidden_dim": 32,
+    "marker_ids": [
+      "CD4",
+      "CD8",
+      "CD45",
+      "CD31",
+      "Ki67"
+    ],
+    "modalities": [
+      "H",
+      "R",
+      "P"
+    ],
+    "residual_rank": 2,
+    "residual_bound": 0.5,
+    "assignment_mode": "learned",
+    "transfer_only": false,
+    "image_encoder_manifest_sha256": "4ce7aad048abe8be99e6b1542d7eff88dc46e00fdf75057ca01728b21bc2f369",
+    "assignment_network": "dot_product",
+    "correction_initialization": "zero",
+    "protein_signal": "measured"
+  },
+  "training": {
+    "epochs": 100,
+    "learning_rate": 0.001,
+    "centered_weight": 0.25,
+    "residual_weight": 0.001,
+    "residual_bound": 1.0,
+    "device": "cpu"
+  },
+  "crossfit_split_rule": "sorted outer-training patient IDs assigned round-robin to three inner folds; no shuffle",
+  "regularization_basis": "Fixed alpha10 chosen from exposed v0.11 UNI2-h development evidence; no inner penalty search and no held-out inner outcomes used to fit or choose their baseline.",
+  "zero_residual_candidate": true,
+  "prediction_scale": "fixed_panel_log1p_1e4",
+  "transfer_scale": "linear_relative_expression",
+  "prior_cohort_exposure": true,
+  "scientific_qualification": false,
+  "no_encoder_training": true,
+  "no_target_dependent_test_prediction": true,
+  "scope_excludes": [
+    "OmiCLIP",
+    "backbone tuning",
+    "larger image context",
+    "new protein or outcome panels",
+    "communication",
+    "new image caches",
+    "H-optimus-1 replication"
+  ]
+}

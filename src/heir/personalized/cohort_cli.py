@@ -676,7 +676,18 @@ def probe_command(args):
     print(json.dumps(result, indent=2, allow_nan=False))
 
 
+def residual_command(args):
+    """Fit the fixed UNI2-h cross-fitted baseline plus molecular residual study."""
+    from .residual_workflow import run_residual_study
+
+    print(json.dumps(run_residual_study(args.config, args.output), indent=2, allow_nan=False))
+
+
 def add_commands(commands):
+    residual = commands.add_parser("cohort-residual", help=residual_command.__doc__)
+    residual.add_argument("--config", required=True)
+    residual.add_argument("--output", required=True)
+    residual.set_defaults(run=residual_command)
     probe = commands.add_parser("cohort-probe", help=probe_command.__doc__)
     probe.add_argument("--config", required=True)
     probe.add_argument("--output", required=True)

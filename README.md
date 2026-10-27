@@ -45,6 +45,9 @@ uses the two locally available backbones; a new paired image–RNA encoder is de
 The completed 10 readouts improve mean spatial correlation to 0.1103 (H-optimus-1) and
 0.1237 (UNI2-h); UNI2-h also improves centered error, while H-optimus-1 worsens it.
 All 78 saved joint predictions reproduce exactly, and clean-checkout CI now passes.
+Version 0.12 preserves the UNI2-h ridge prediction and tests a zero-initialized joint molecular
+residual with patient-safe inner cross-fitting. Its [new protocol](docs/personalized_development.md#version-012-image-baseline-plus-joint-molecular-residual)
+keeps normalized-log final predictions separate from linear reference transfer.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 

@@ -405,25 +405,7 @@ def score_probe(predicted, sample, gene_ids, normalization_gene_ids, *, row_mask
     return report, gene_rows
 
 
-def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, alpha_grid=ALPHAS):
-    """Select one of explicitly counted weighted ridge candidates using validation only."""
-    training, validation = list(training), list(validation)
-    alpha_grid = tuple(float(alpha) for alpha in alpha_grid)
-    if (
-        not training
-        or not validation
-        or not alpha_grid
-        or any(not np.isfinite(a) or a <= 0 for a in alpha_grid)
-        or tuple(sorted(set(alpha_grid))) != alpha_grid
-    ):
-        raise ValueError(
-            "probe fitting needs train/validation specimens and ordered distinct positive alphas"
-        )
-    train_ids = tuple(sorted({s.inputs.patient_id for s in training}))
-    validation_ids = tuple(sorted({s.inputs.patient_id for s in validation}))
-    if set(train_ids) & set(validation_ids):
-        raise ValueError("probe training and validation patients must be disjoint")
-    all_samples = training + validation
+def _feature_identity(all_samples):
     identities = {
         (
             s.inputs.image_encoder_manifest_sha256,
@@ -441,6 +423,10 @@ def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, al
         )
     if len({(s.inputs.patient_id, s.inputs.specimen_id) for s in all_samples}) != len(all_samples):
         raise ValueError("duplicate probe training or validation specimens")
+    return next(iter(identities))
+
+
+def _ridge_design(training, gene_ids, normalization_gene_ids):
     mean, scale = _feature_transform(training)
     features, targets, masks, labels = [], [], [], []
     for sample in training:
@@ -454,6 +440,14 @@ def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, al
             for group in sample.observation_groups
         )
     x, y, observed = np.concatenate(features), np.concatenate(targets), np.concatenate(masks)
+    return mean, scale, x, y, observed, labels
+
+
+def _ridge_candidates(
+    training, gene_ids, normalization_gene_ids, alpha_grid, identity, validation_ids=()
+):
+    mean, scale, x, y, observed, labels = _ridge_design(training, gene_ids, normalization_gene_ids)
+    train_ids = tuple(sorted({sample.inputs.patient_id for sample in training}))
     coefficients = [np.zeros((x.shape[1], len(gene_ids))) for _ in alpha_grid]
     intercepts = [np.zeros(len(gene_ids)) for _ in alpha_grid]
     decompositions = {}
@@ -473,8 +467,8 @@ def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, al
             coefficient = vt.T @ (singular / (singular**2 + alpha) * response)
             coefficients[index][:, column] = coefficient
             intercepts[index][column] = y_mean - x_mean @ coefficient
-    encoder, unit, coordinate_units, _ = next(iter(identities))
-    candidates, reports = [], []
+    encoder, unit, coordinate_units, _ = identity
+    candidates = []
     for alpha, coefficient, intercept in zip(alpha_grid, coefficients, intercepts):
         model = FrozenFeatureProbe(
             mean,
@@ -491,6 +485,64 @@ def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, al
             validation_ids,
             {},
         )
+        candidates.append(model)
+    return candidates, len(decompositions)
+
+
+def fit_fixed_feature_probe(training, gene_ids, normalization_gene_ids, *, alpha=10.0):
+    """Fit one declared penalty using training patients only, without validation/search."""
+    training = list(training)
+    if not training or isinstance(alpha, bool) or not np.isfinite(alpha) or alpha <= 0:
+        raise ValueError("fixed ridge requires training specimens and a positive finite penalty")
+    identity = _feature_identity(training)
+    candidates, decompositions = _ridge_candidates(
+        training, gene_ids, normalization_gene_ids, (float(alpha),), identity
+    )
+    fitted = candidates[0]
+    fitted.selection = {
+        "policy": "prespecified_fixed_penalty_no_validation_selection",
+        "selected_alpha": float(alpha),
+        "candidate_solutions": 1,
+        "selected_readouts": 1,
+        "additional_refits": 0,
+        "weighted_design_decompositions": decompositions,
+        "validation": [],
+        "intercept_penalized": False,
+        "loss": (
+            "equal_patient_specimen_replicate_observed_row_squared_error_plus_alpha_weight_norm"
+        ),
+        "feature_scaling": (
+            "training_only_equal_patient_specimen_unique_prediction_region_population_mean_sd"
+        ),
+    }
+    return fitted
+
+
+def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, alpha_grid=ALPHAS):
+    """Select one of explicitly counted weighted ridge candidates using validation only."""
+    training, validation = list(training), list(validation)
+    alpha_grid = tuple(float(alpha) for alpha in alpha_grid)
+    if (
+        not training
+        or not validation
+        or not alpha_grid
+        or any(not np.isfinite(a) or a <= 0 for a in alpha_grid)
+        or tuple(sorted(set(alpha_grid))) != alpha_grid
+    ):
+        raise ValueError(
+            "probe fitting needs train/validation specimens and ordered distinct positive alphas"
+        )
+    train_ids = tuple(sorted({s.inputs.patient_id for s in training}))
+    validation_ids = tuple(sorted({s.inputs.patient_id for s in validation}))
+    if set(train_ids) & set(validation_ids):
+        raise ValueError("probe training and validation patients must be disjoint")
+    identity = _feature_identity(training + validation)
+    candidates, decomposition_count = _ridge_candidates(
+        training, gene_ids, normalization_gene_ids, alpha_grid, identity, validation_ids
+    )
+    reports = []
+    for model in candidates:
+        alpha = model.alpha
         per_specimen = [
             score_probe(model.predict(s.inputs), s, gene_ids, normalization_gene_ids)[0]
             for s in validation
@@ -514,7 +566,6 @@ def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, al
         report["eligible"] = all(
             report[key] is not None and np.isfinite(report[key]) for key in METRICS
         )
-        candidates.append(model)
         reports.append(report)
     eligible = [index for index, report in enumerate(reports) if report["eligible"]]
     if not eligible:
@@ -535,7 +586,7 @@ def fit_feature_probe(training, validation, gene_ids, normalization_gene_ids, al
         "candidate_solutions": len(alpha_grid),
         "selected_readouts": 1,
         "additional_refits": 0,
-        "weighted_design_decompositions": len(decompositions),
+        "weighted_design_decompositions": decomposition_count,
         "validation": reports,
         "loss": (
             "equal_patient_specimen_replicate_observed_row_squared_error_plus_alpha_weight_norm"
@@ -567,6 +618,130 @@ def _sample_from_source(inputs, path):
         values["weights"],
     )
     return TrainingSample(inputs, target, operator, tuple(values["groups"]))
+
+
+def normalized_log_output_contract(values, gene_ids, normalization_gene_ids):
+    """Describe composition constraints without clipping, projection or normalization."""
+    values = np.asarray(values, dtype=np.float64)
+    genes, panel = tuple(gene_ids), tuple(normalization_gene_ids)
+    identifiers(genes, "output contract genes")
+    identifiers(panel, "output contract normalization panel")
+    if (
+        values.ndim != 2
+        or values.shape[1] != len(genes)
+        or not len(values)
+        or not np.isfinite(values).all()
+        or not set(panel) <= set(genes)
+    ):
+        raise ValueError("output contract requires finite predictions and the complete named panel")
+    selected = values[:, [genes.index(gene) for gene in panel]]
+    with np.errstate(over="ignore", invalid="ignore"):
+        deviation = np.expm1(selected).sum(axis=1) - 1e4
+    finite = np.isfinite(deviation)
+
+    def mean(array):
+        return float(np.sum(array / len(array))) if len(array) else None
+
+    signed, absolute = mean(deviation[finite]), mean(np.abs(deviation[finite]))
+    return {
+        "prediction_scale": SCALE,
+        "scope": "normalization_panel_all_exported_regions",
+        "normalization_gene_ids": list(panel),
+        "n_regions": len(values),
+        "n_panel_entries": selected.size,
+        "upper_threshold": float(np.log(10001)),
+        "negative_fraction": float(np.mean(selected < 0)),
+        "above_log10001_fraction": float(np.mean(selected > np.log(10001))),
+        "mean_signed_implied_mass_deviation": signed if finite.all() else None,
+        "mean_absolute_implied_mass_deviation": absolute if finite.all() else None,
+        "implied_mass_overflow_regions": int((~finite).sum()),
+        "finite_region_mean_signed_mass_deviation_diagnostic": signed,
+        "finite_region_mean_absolute_mass_deviation_diagnostic": absolute,
+        "mass_deviation_definition": "sum_expm1_over_named_panel_minus_10000",
+        "predictions_modified": False,
+        "threshold_tolerance": 0,
+    }
+
+
+def report_saved_probe_outputs(probe_study, output):
+    """Read only completed prediction exports and write a separate descriptive report."""
+    from .joint_workflow import _tsv
+
+    study, output = Path(probe_study), Path(output)
+    exports = json.loads((study / "exports.json").read_text())
+    records = []
+    for export in exports:
+        path = Path(export["path"])
+        receipt = json.loads((path.parent / "test_predictions_complete.json").read_text())
+        if receipt["test_targets_loaded"] or receipt["prediction_sha256"].get(path.name) != _sha(
+            path
+        ):
+            raise ValueError("saved probe prediction differs from its pretarget export receipt")
+        with np.load(path, allow_pickle=False) as archive:
+            metadata = json.loads(archive["metadata"].item())
+            if (
+                metadata["schema"] != "heir.frozen_feature_probe_prediction.v1"
+                or metadata["prediction_scale"] != SCALE
+                or metadata["normalize_prediction_again"]
+                or len(archive["region_ids"]) != len(set(archive["region_ids"]))
+            ):
+                raise ValueError("saved probe prediction scale or region contract differs")
+            result = normalized_log_output_contract(
+                archive["normalized_log_expression"],
+                archive["gene_ids"],
+                metadata["normalization_gene_ids"],
+            )
+        records.append(
+            {
+                **{k: v for k, v in export.items() if k != "path"},
+                "patient_id": metadata["patient_id"],
+                "specimen_id": metadata["specimen_id"],
+                "prediction_sha256": _sha(path),
+                **result,
+            }
+        )
+    fields = (
+        "negative_fraction",
+        "above_log10001_fraction",
+        "mean_signed_implied_mass_deviation",
+        "mean_absolute_implied_mass_deviation",
+    )
+    summaries = {}
+    for backbone in sorted({r["backbone"] for r in records}):
+        rows = [r for r in records if r["backbone"] == backbone]
+        patients = [
+            {
+                "patient_id": patient,
+                **{
+                    key: _strict_mean([r[key] for r in rows if r["patient_id"] == patient])
+                    for key in fields
+                },
+            }
+            for patient in sorted({r["patient_id"] for r in rows})
+        ]
+        summaries[backbone] = {
+            "patients": patients,
+            "n_patients": len(patients),
+            "n_regions": sum(r["n_regions"] for r in rows),
+            "implied_mass_overflow_regions": sum(r["implied_mass_overflow_regions"] for r in rows),
+            **{key: _strict_mean([r[key] for r in patients]) for key in fields},
+        }
+    result = {
+        "schema": "heir.saved_probe_output_contract.v1",
+        "backbones": summaries,
+        "aggregation": "equal_specimen_within_patient_then_equal_patient",
+        "source_study": str(study.resolve()),
+        "source_exports_sha256": _sha(study / "exports.json"),
+        "source_identity_sha256": _sha(study / "identity.json"),
+        "predictions_modified": False,
+        "fitting_performed": False,
+        "targets_loaded": False,
+        "records": records,
+    }
+    output.mkdir(parents=True, exist_ok=False)
+    _write(output / "probe_output_contract.json", result)
+    _tsv(output / "probe_output_contract.tsv", records)
+    return result
 
 
 def _export_probe(model, inputs, path, metadata):

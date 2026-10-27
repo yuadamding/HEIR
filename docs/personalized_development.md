@@ -1490,3 +1490,56 @@ contrasts and per-gene errors, `representations/`, `preprocessing/report.json`, 
 `higher_resolution_image_feasibility.json`. Large data, weights, model artifacts and run tables
 remain outside the compact source repository. OmiCLIP acquisition and integration stopped when
 the user directed use of existing pretrained models; no paired-prior result is claimed.
+
+## Version 0.12: image baseline plus joint molecular residual
+
+The v0.11 direct readout becomes a frozen predictive path. A new, separately named prediction
+family estimates fixed-panel normalized-log expression as `Z = Z_H + Delta`, where `Z_H` is
+the full-width UNI2-h ridge readout. The incremental branch retains the shallow joint mapper;
+its head receives image/protein embeddings, assigned RNA features `q @ r`, normalized reference
+transfer `N_P(q @ B)` and the specimen RNA summary. Its final linear layer starts at zero and
+its residual is bounded by `tanh` to ±1 normalized-log unit. Hidden width remains 32.
+
+Final normalized-log outputs are scored directly and never stored as legacy linear
+`Prediction.expression`. Linear `T = q @ B` and its hierarchy remain separate exports. Neither
+a direct readout nor its residual is guaranteed to be a coherent nonnegative composition;
+finite negative values, values above `log(10001)`, and implied panel mass are reported without
+clipping or renormalizing published predictions. Better final expression without better
+transfer would support prediction, not improved molecular-state placement.
+
+The protocol is `configs/personalized/joint_residual_uni2h.json`. It retains the same five patient
+folds, nine outcomes, five protein features and historical 100-pixel region inputs. UNI2-h and
+ridge alpha 10 are fixed using exposed v0.11 development evidence, not an independent model
+selection result. The six incremental arms are H, HR, HP, HRP, HRP coverage-only and HRP with
+training-only generic RNA: **30 seed-0 neural fits**. H controls for additional trainable image
+capacity; coverage-only and generic RNA isolate intensity and personalization contributions.
+
+Each outer training partition has three inner patient splits: sorted patient IDs assigned
+round-robin, without shuffling. Each inner ridge scaler and coefficients exclude its held-out
+patients. The **15 inner ridge fits** supply the training baselines shared by all six arms;
+there is no inner penalty search. The existing five UNI2-h deployment readouts are reused only
+after verifying matching training partitions, source hashes, fixed alpha, transforms, axes and
+weighted normal equations. Global v0.11 out-of-fold predictions are never used as residual
+training features.
+
+Residual image transforms use the verified outer-training ridge transform. RNA/protein
+transforms and generic-reference pooling use only outer-training inputs. Generic predictions
+load H&E and protein plus the saved training pool, without query RNA. The deployment ridge
+supplies outer-validation and test baselines. Training uses 100 full-batch epochs, Adam at
+0.001, equal-patient/specimen/replicate expression MSE plus 0.25 centered error and 0.001 residual
+penalty. No transfer auxiliary loss is added. Validation selects correlation, then centered
+error, then total MSE, including the exact zero-residual epoch-0 candidate and retaining the
+earliest exact tie. An epoch-0 selection explicitly identifies its mapper as untrained.
+
+```bash
+heir cohort-residual --config configs/personalized/joint_residual_uni2h.json \
+  --output /storage/HE_GPT/HEIR-cohort-runs/v0120-joint-residual/study
+```
+
+All arms' test predictions in a fold precede its test-target reads. Evaluation retains identical
+rows/gene eligibility on all-target and common original protein-covered supports, decomposed
+MSE, spatial correlation and amplitude. Planned contrasts are HRP minus H, HR, HP, coverage-only
+and generic RNA, alongside final-versus-ridge and separately scored reference transfer. Zero
+residual may win; a null molecular contribution is a valid outcome. Existing v0.11 results and
+all older study scopes remain unchanged. No new encoder, image cache, resolution, outcome panel,
+protein panel, communication mechanism or backbone tuning is included.
