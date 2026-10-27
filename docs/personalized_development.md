@@ -1389,3 +1389,104 @@ Encoder location is now resolved separately from identity. A missing workstation
 can resolve under the checkout or an explicit asset root, but its original SHA-256 must match.
 Existing incorrect files are rejected. Configuration checks do not open large checkpoints; the
 regression test makes `/storage/HE_GPT` unavailable in a temporary checkout.
+
+### Completed probe results
+
+Source `e22ead987aaab17488e8d7c21127fbb8db8112f2` completed the frozen protocol under
+`/storage/HE_GPT/HEIR-cohort-runs/v0110-pretrained`: **50 candidate solutions, 10 selected
+readouts, zero refits and zero new neural fits**. All 26 test exports cover the same 13 patients
+and 6,580 regions per backbone. Training/validation selection stayed within the original folds;
+all test predictions preceded test-target reads in their fold. The old HRP full/transfer scores
+were recomputed against the current targets before every paired comparison.
+
+All-row values below are equal-patient means; MSE is decomposed into squared level bias and
+centered error on the fixed nine-gene normalized-log scale.
+
+| Backbone / predictor | Spatial correlation | MSE | Squared bias | Centered MSE |
+| --- | ---: | ---: | ---: | ---: |
+| H-optimus-1 saved HRP full | 0.081390 | 12.869627 | 5.721457 | 7.148170 |
+| H-optimus-1 saved HRP transfer | 0.082708 | 12.893869 | 5.740814 | 7.153055 |
+| H-optimus-1 direct ridge | **0.110297** | **11.184882** | **3.081426** | 8.103456 |
+| UNI2-h saved HRP full / transfer | 0.070373 | 13.434523 | 6.574521 | 6.860002 |
+| UNI2-h direct ridge | **0.123659** | **9.314126** | **2.661209** | **6.652917** |
+
+Against HRP full, the H-optimus-1 correlation gain is +0.028907 (paired median +0.023659;
+8/13 positive), and the UNI2-h gain is +0.053286 (median +0.038421; 11/13 positive).
+On common original protein-covered rows, the probe correlations are 0.104165 and 0.120571;
+paired gains are +0.015616 (7/13 positive) and +0.049588 (10/13 positive), respectively.
+H-optimus-1's total-error reduction comes from lower bias despite **worse mean centered error**.
+UNI2-h improves centered error by 0.207085, but most of its 4.120397 MSE reduction also comes
+from bias. Neither result supports forcing larger amplitudes or correction terms.
+
+Selected ridge penalties by fold 0–4 are `[0.01, 10, 10, 100, 100]` for H-optimus-1 and
+`[10, 10, 10, 10, 10]` for UNI2-h. The H-optimus-1 fold-0 selection has relatively large amplitude
+and contributes strongly to its worse mean centered error; it was retained exactly as selected
+by validation. No test-dependent penalty substitution or refit was made.
+
+The new amplitude diagnostic averages defined gene SD ratios within each replicate, then
+replicates/specimens/patients equally. On all rows it is 0.470477 for H-optimus-1 ridge versus
+0.193137 for saved HRP full, and 0.273722 for UNI2-h ridge versus 0.060688 for HRP. This **mean-gene**
+summary differs from the earlier **median-gene** v0.10 summary (0.162246 / 0.047683); both models
+in each new comparison use the same aggregation. SD ratio is not explained variance.
+
+The direct readout exposes predictive signal recoverable from the frozen features that the tested
+joint pathway does not fully recover, especially with UNI2-h. It does not isolate the causal
+role of the 32-dimensional width: reference assignment, loss and expression parameterization
+also differ. Correlations remain modest on a previously exposed cohort. No new protein-intensity,
+personalization or biological state-placement benefit has been established by these image-only
+readouts.
+
+### Representation and image-input checks
+
+All **78 saved full predictions** (three arms × 13 patients × two backbones) reproduce exactly,
+including assignment, transfer, correction and expression. These new diagnostics read no ST.
+For the HRP arm, equal-patient mean diagnostics are:
+
+| Diagnostic | H-optimus-1 | UNI2-h |
+| --- | ---: | ---: |
+| Image Tanh fraction with absolute output ≥ 0.95 | 0.428281 | 0.137322 |
+| Fusion Tanh fraction with absolute output ≥ 0.95 | 0.171263 | 0.016621 |
+| Mean type-logit SD across types per region | 0.931784 | 0.259152 |
+| Mean within-type state-logit SD | 0.235568 | 0.070933 |
+| Mean per-state spatial variance of q | 0.000477257 | 0.000035591 |
+| Mean maximum state weight per region | 0.164415 | 0.113515 |
+| Encoded state cosine, within / between broad types | 0.634349 / 0.068730 | 0.611894 / 0.094508 |
+
+UNI2-h's lower mixture variation coexists with low fusion saturation. Saturation alone therefore
+does not explain the difference. The report also records raw/standardized features, h, z, logits,
+q and qB variation and full distributions; their different units prohibit treating a drop in
+variance across stages as a quantified loss of predictive information.
+
+Three fixed `313-932` crops were compared without changing their field or either historical cache.
+H-optimus-1 historical tensor resize versus PIL bicubic followed by the official normalization
+has cosines 0.999092, 0.998329 and 0.999109; repeated inference on each path is bitwise exact.
+Feature norms are 23.005/23.258/34.084 versus 23.126/23.323/34.111. The official H-optimus example
+starts from already-224-pixel inputs and does not define a 100-to-224 resize operation; the PIL
+front end is an explicit diagnostic choice, not a claim of physical equivalence. The existing
+UNI2-h evidence was reused: cosines 0.999261–0.999667, exact historical repeat, norms
+11.866/13.141/13.215 versus 11.919/13.170/13.207. No full cache extraction was repeated.
+
+All 13 selected processed H&E images have corresponding native source JPEGs. Existing declared
+image transforms have nominal sampling factor 0.4 × 0.6905 = 0.2762, so a 100-processed-pixel
+field spans approximately 362 native pixels before rotation/cropping. This permits investigation
+of more detailed same-field input, but exact inverse raster/pixel-center mapping and padded edges
+still need qualification. JPEG resolution metadata does not establish microns per pixel. The
+completed assay-coordinate replay was not repeated, and no higher-resolution cache or target-scale
+change was introduced.
+
+### Verification and retained artifacts
+
+The source revision passes **485 local tests**, formatting/lint, the frozen lockfile check and
+source/wheel builds. Its [clean-checkout GitHub CI run](https://github.com/yuadamding/HEIR/actions/runs/40425105663)
+also passes, resolving the workstation-path failure. Independent post-run checks reconstructed
+the training design/weights without fitting: the largest saved ridge stationarity residual is
+1.094e-14, intercept residual 2.744e-15, and all 26 exported predictions replay bitwise exactly.
+Training-only means/scales, fold roles and every consumed target hash match. Historical checks
+preserved 32 repository configuration/manifest/archive files and 2,336 v0.10 study/input files.
+
+The run root retains `scope.json`, `probe_execution.json`, `engineering_acceptance.json`,
+`probe_numerical_audit.json`, `historical_preservation.json`, `probes/summary.json`, per-patient
+contrasts and per-gene errors, `representations/`, `preprocessing/report.json`, and
+`higher_resolution_image_feasibility.json`. Large data, weights, model artifacts and run tables
+remain outside the compact source repository. OmiCLIP acquisition and integration stopped when
+the user directed use of existing pretrained models; no paired-prior result is claimed.

@@ -42,6 +42,9 @@ Version 0.11 adds direct ridge readouts of the existing frozen 1,536-dimensional
 target-free diagnostics of saved joint representations, and portable hash-checked encoder
 manifest resolution. The [probe protocol](docs/personalized_development.md#version-011-frozen-feature-probes)
 uses the two locally available backbones; a new paired image–RNA encoder is deferred.
+The completed 10 readouts improve mean spatial correlation to 0.1103 (H-optimus-1) and
+0.1237 (UNI2-h); UNI2-h also improves centered error, while H-optimus-1 worsens it.
+All 78 saved joint predictions reproduce exactly, and clean-checkout CI now passes.
 Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
 as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
 
