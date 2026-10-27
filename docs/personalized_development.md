@@ -1861,6 +1861,11 @@ identities fail; relocation does not remap receipt-bound data paths.
 
 ### Traceable subset and spatial limits
 
+This subsection records the local evidence at the original v0.14 source freeze. The
+[public-source follow-up](#public-source-follow-up-section-mapping-and-microscopy) below resolves
+the named-file section/OCT-parent mappings prospectively; the original endpoint receipt remains
+unchanged. Local absence did not establish absence from the public cohort.
+
 Biopsy **982-7629** was chosen before count-quality results or prediction comparisons. Its author
 CODEX input has one region (`reg001`, section 8), both MERFISH replicates are retained, and the
 delivered common frame shows broad agreement of the two-fragment core outline. The alternative
@@ -1869,7 +1874,7 @@ problem; visible agreement does not establish an independently qualified transfo
 
 The source describes serial spatial sections and a separate core for dissociated RNA at the
 lesion/procedure level. The exact 982 H&E/RNA file-to-core/section crosswalk and section spacing
-remain unresolved. The H&E importer retains neither the original matched filename nor an exact
+were unresolved in that local review. The H&E importer retains neither the original matched filename nor an exact
 section identity; generic notebook slice-search patterns cannot establish which source was used.
 The retained registered counts contain 7,971 MERFISH-1, 5,851 MERFISH-2 and 1,810 ExSeq-1
 observations. These are assay observations, not verified physical cells matched across sections.
@@ -1985,8 +1990,9 @@ hashes. Large evidence and data stay outside the repository; only compact summar
 requested v0.13 reconstruction procedure are published.
 
 **Measurement qualification passed; the requested fully qualified spatial endpoint remains
-incomplete.** Exact section correspondence and independent structural registration uncertainty
-are unresolved. No new fit or prediction comparison has been performed, and no scientific benefit
+incomplete.** Section provenance and independent structural registration uncertainty were
+unresolved at this run's freeze; the public-source follow-up below resolves named-file section
+provenance. No new fit or prediction comparison has been performed, and no scientific benefit
 over ridge is claimed. This case supplies frozen measured outcomes for a conditional regional
 diagnostic, not independent patient confirmation or demonstrated within-type localization.
 
@@ -2027,3 +2033,92 @@ total MSE. **No HRP epoch** met the joint improvement rule. No originally select
 it. Exact comparisons and a 1e-12 sensitivity gave the same counts. All 60 history/inventory
 files remained unchanged. These correlated development epochs and eight distinct validation
 patients do not establish a new model's held-out performance.
+
+### Public-source follow-up: section mapping and microscopy
+
+The supplied public sources materially narrow the remaining gap. The official HTAN catalog at
+commit `6c7dc7bfa6840de317d2c691871ca72345faa08e` supplies literal biospecimen descriptions,
+OCT parents and named processed-file links. The prior missing-section finding applied to the
+inspected local bundle and author notebooks, **not to the public release**. The
+[compact reconciliation](../reproducibility/htan_public_sources.json) binds the catalog hashes,
+13 relevant processed spatial-file joins, outline relationships and acquired-image identities.
+The complete external crosswalk also retains binned, Slide-seq and matched-RNA rows.
+
+| Biopsy | Named processed H&E files | MERFISH sections | ExSeq section | Common OCT parent |
+|---|---|---|---|---|
+| 313-932 | HE_1 → 1; HE_2 → 6 | 4 | 10, native imaging records | `HTA1_313_9323` |
+| 514-6760 | HE_1 → 1; HE_2 → 6 | 9 | 10, native imaging records | `HTA1_514_67603` |
+| 982-7629 | HE_1 → 1; HE_2 → 6 | 4 and 9 | 5, named processed file | `HTA1_982_76293` |
+
+These section descriptions are literal strings in the catalog's misleadingly named
+`Portion Weight` biospecimen field. They are not inferred from ID suffixes. The `OtherAssay`
+records explicitly name the local processed-file basenames; local hashes are retained from
+the verified source manifest. This establishes logical named-file provenance, while remote
+Synapse/SCP byte equivalence and native-to-processed raster mapping remain separate checks.
+For 982 the combined MERFISH file names the section set {4, 9}; label 1→4 and label 2→9 is
+reconciled with the author importer, not an explicit per-observation section field in the H5AD.
+The native 313/514 ExSeq records do not alone certify every local processed derivative's lineage.
+[Official pinned catalog](https://raw.githubusercontent.com/ncihtan/htan-portal/6c7dc7bfa6840de317d2c691871ca72345faa08e/public/syn_data.json.gz)
+
+The adjacency fields explicitly connect 313 MERFISH 4↔H&E 6 and 982 ExSeq 5↔H&E 6.
+For 514, H&E 6↔Slide-seq 7↔CODEX 8↔MERFISH 9↔ExSeq 10 is the recorded chain;
+H&E 6 and MERFISH 9 are not directly adjacent. Section thickness is missing in these records,
+so this graph does not give a measured µm separation or physical-cell correspondence.
+The four whole-cell outline records resolve all of their image parents: 244 TIFFs for 313
+slice 4, 299 for 514 slice 9, 130 for 982 slice 4 and 116 for 982 slice 9. Their CSV schemas,
+segmentation channels and coordinate semantics still require payload inspection.
+
+**514-6760 is the first native-image acquisition because its file provenance is most complete.**
+Native `BPC-20-ZC-1879-1.svs` (`syn25882276`) belongs to section 6 and matches the biospecimen
+of processed **HE_2**; native `-2.svs` (`syn25882275`) belongs to section 1/processed HE_1.
+Filename suffixes are not physical section numbers. The native and local unregistered JPEG
+dimensions differ, so cropping/resampling/orientation cannot be assumed to be identity mappings.
+
+The official CRDC DRS object metadata and its `/access/s3` resolver work anonymously for these
+two selected images. Direct unsigned S3 requests return 403; the official resolver supplies
+working signed GET URLs. Those URLs are used in memory and are not stored or committed.
+Both files were downloaded, checked against the advertised size and MD5, assigned SHA-256 hashes,
+and verified by disk readback before and after publication:
+
+| Acquired asset | Public identity | Bytes | Local subpath |
+|---|---|---:|---|
+| H&E section 6 | `syn25882276` | 398,560,551 | `he_section6/BPC-20-ZC-1879-1.svs` |
+| MERFISH section 9, FOV 0 | `syn25518767` | 1,468,028,692 | `merfish_slice9/processed_images0.tif` |
+
+The data root is `/mnt/seagate/HnE/HTAPP_MBC/public_sources/htan_514_6760/`; total acquired size
+is **1,866,589,243 bytes**. The remaining 298 TIFFs have catalog/DRS identities but have not been
+downloaded. Acquiring the remaining fields is unnecessary before channel and position interpretation is
+established. This uses the public resolver, not the account-based CGC project workflow.
+[H&E DRS metadata](https://nci-crdc.datacommons.io/ga4gh/drs/v1/objects/dg.4DFC/62204034-7e68-11ee-bf54-8fe4e657a41f) ·
+[MERFISH DRS metadata](https://nci-crdc.datacommons.io/ga4gh/drs/v1/objects/dg.4DFC/BCAE4E12-C398-476E-8351-5CBAE01C21DB)
+
+Pixel inspection decoded **all 175 MERFISH planes** and the stored native H&E overview.
+The MERFISH ImageJ description parses as 25 frames × 7 slices × 2048 × 2048, uint16; this
+resolves the catalog's inconsistent `PlaneCount=175` versus `SizeZ=1, SizeT=25`. Its description
+contains duplicate channel declarations (`channels=175`, then `channels=1`) and no reliable
+biological channel names or stage positions. The frames must not be relabeled as acquisition
+times or DAPI channels without the channel organization. Display previews retain unassigned page
+indices; fluorescence appearance is not a DAPI identity test. The H&E SVS dimensions are
+23,854×22,186, with `MPP=0.2762` matching the catalog. That scale describes the native raster,
+not the existing registered JPEG or transformed RNA coordinates.
+
+**The public positions reference needs correction.** The image catalog's `MERFISH Positions File`
+field points to `syn25705623`, whose public entity name is `dataorganization_processed.csv`.
+The auxiliary folder's complete child listing instead identifies
+[`syn25705632`, `fovCoordinates_HTAPP-514_slice9.csv`](https://www.synapse.org/Synapse:syn25705632),
+with annotations linking it to `HTA1_514_6760309`. Channel organization is `syn25705616`
+(`dataorganization_raw.csv`) and `syn25705623` (processed); the matched whole-cell outlines are
+`syn25541251`. The raw/processed channel, outline and correctly identified positions downloads
+all return anonymous Synapse 403; the actual positions file was checked separately exactly once.
+None of these auxiliary identities appears in the pinned official DRS mapping. No credentials,
+invented object identities or access bypass were used; the user chose to continue with accessible
+public files and reported no local auxiliary copies.
+
+This follow-up resolves public source availability and much of the section provenance. It does
+not retroactively certify the v0.14 author transforms. The next registration analysis still needs
+verified structural-channel identity and stage/outline coordinate semantics, followed by a
+prespecified transform and held-out structural landmark error assessment. New blinded annotation
+and registration remain valid replacements for unavailable historical masks/logs once those inputs
+are qualified. No transform fitting, new model fit, prediction comparison or change to the frozen
+982 endpoint occurred. Full evidence, access receipts and pixel previews remain outside the repo
+at `/storage/HE_GPT/HEIR-cohort-runs/v0141-public-sources/`.

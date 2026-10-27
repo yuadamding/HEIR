@@ -55,8 +55,9 @@ correlation, total MSE and centered MSE. HRP correlation is 0.1126 versus ridge'
 the retained ridge remains the stronger development predictor.
 Version 0.13 adds [saved-output failure diagnostics and endpoint qualification](docs/personalized_development.md#version-013-saved-output-diagnosis-and-endpoint-qualification).
 It makes no new model fits. All six saved residual directions have negative centered-error
-alignment on both supports. MERFISH/ExSeq are available for 11 working-set patients, but section
-mapping, registration provenance and independent compartment labels remain unqualified.
+alignment on both supports. MERFISH/ExSeq are available for 11 working-set patients. The initial
+local review did not resolve section mapping; the public-source follow-up below addresses it.
+Independent registration and compartment labels remain unqualified.
 Independent spatial measurement and within-type localization precede further model expansion
 or communication experiments.
 Version 0.14 adds a [frozen regional measurement protocol](docs/personalized_development.md#version-014-frozen-regional-measurement-endpoint)
@@ -65,11 +66,17 @@ for biopsy 982-7629, with a fixed 210-gene denominator, replicate-specific count
 registration and defines calibration versus spatial-assignment objectives before future fits.
 The completed extraction retains **44 common regions and 89 primary genes** across two MERFISH
 replicates and ExSeq, plus three secondary genes. Independent numerical reconstruction passes;
-the requested fully qualified spatial endpoint remains incomplete pending section correspondence
-and independent structural registration evidence.
+the requested fully qualified spatial endpoint remains incomplete pending independent structural
+registration evidence.
 The [48 v0.13 aggregates and independent reconstruction procedure](reproducibility/v013/README.md)
 are now published; historical source verification supports relocated checkouts without weakening
 hash checks.
+The [public-source follow-up](docs/personalized_development.md#public-source-follow-up-section-mapping-and-microscopy)
+resolves named-file section/OCT-parent mappings for 313, 514 and 982. It acquires and inspects
+514's native H&E section-6 scan and one of 299 MERFISH section-9 image stacks (1.87 GB), with
+verified checksums. The actual positions file is `syn25705632`; the catalog's `syn25705623`
+reference names channel metadata. DAPI identity, auxiliary payload access and independent
+registration remain unresolved. The frozen 982 endpoint is preserved.
 Linear-expression exports use **schema v3**, with explicit spatial units; v2 predictions remain
 readable as nucleus/µm outputs. Canonical specimen manifests and existing joint-model bundles
 retain schema v2. The new residual prediction and bundle families have separate v1 schemas.

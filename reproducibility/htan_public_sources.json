@@ -1,0 +1,413 @@
+{
+  "schema": "heir.public_spatial_source_followup.v1",
+  "created_utc": "2026-10-27T04:39:31.517111+00:00",
+  "catalog_pin": "6c7dc7bfa6840de317d2c691871ca72345faa08e",
+  "catalog_sources": [
+    {
+      "url": "https://raw.githubusercontent.com/ncihtan/htan-portal/6c7dc7bfa6840de317d2c691871ca72345faa08e/public/syn_data.json.gz",
+      "bytes": 15995935,
+      "sha256": "97aeb2c10a4f7eb945afda65795ce42d550b430e00c3440c5b364072ebfe93cd"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/ncihtan/htan-portal/6c7dc7bfa6840de317d2c691871ca72345faa08e/public/processed_syn_data.json.gz",
+      "bytes": 11410106,
+      "sha256": "c273b57af04a97278315062ae21af3f4d674a6447a020f781deab69315f980ee"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/ncihtan/htan-portal/6c7dc7bfa6840de317d2c691871ca72345faa08e/data/publications_manifest_all.json",
+      "bytes": 4045690,
+      "sha256": "0b32a69c1d3a4c2c425872b44c7f61a3ae7d131c7160844179fa883986ebf7c7"
+    }
+  ],
+  "prior_endpoint_source_commit": "aea37b1b0f7fbf8a8d52486e02862bdbb57cb186",
+  "prior_endpoint_report_commit": "51b985b61becb4e5ecd25050e88b4e0b6ad0eaa6",
+  "historical_endpoint_modified": false,
+  "correction": "Previous missing-input findings applied to inspected local sources. Official HTAN metadata establishes the named processed-file section relationships and common OCT parents. Public imaging payloads exist and two have now been acquired.",
+  "section_join_basis": "Exact unique processed basename plus matching biopsy/assay; literal section descriptions are retained from biospecimen Portion Weight, not inferred from ID digits.",
+  "remote_processed_file_bytes_proven_equal_to_local": false,
+  "native_to_processed_raster_mapping_qualified": false,
+  "processed_spatial_files": [
+    {
+      "biopsy_id": "313-932",
+      "local_working_path": "working/registered/HTAPP-313-SMP-932/HTAPP-313-SMP-932_HE_1_processed.jpg",
+      "local_sha256_from_verified_manifest": "36e259328c7b304b9772215c839f3209d2cc71b5585419c088d86c5e1376c1a9",
+      "local_manifest_modality": "HE",
+      "local_manifest_replicate_id_literal": "1",
+      "catalog_filename": "data_integration_MBC/HTAPP-313-SMP-932_HE_1_processed.jpg",
+      "catalog_entityId": "syn26077448",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_313_932301",
+      "biospecimen_Portion_Weight_literal": "H&E Section# 1",
+      "biospecimen_common_parent_ids": "HTA1_313_9323",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "313-932",
+      "local_working_path": "working/registered/HTAPP-313-SMP-932/HTAPP-313-SMP-932_HE_2_processed.jpg",
+      "local_sha256_from_verified_manifest": "8e7816b5b106b087e663aa71fe2eb5010088a06a636fa77c824d45d182d880df",
+      "local_manifest_modality": "HE",
+      "local_manifest_replicate_id_literal": "2",
+      "catalog_filename": "data_integration_MBC/HTAPP-313-SMP-932_HE_2_processed.jpg",
+      "catalog_entityId": "syn26077446",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_313_932306",
+      "biospecimen_Portion_Weight_literal": "H&E Section# 6",
+      "biospecimen_common_parent_ids": "HTA1_313_9323",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "313-932",
+      "local_working_path": "working/registered/HTAPP-313-SMP-932/HTAPP-313-SMP-932_codex_processed.h5ad",
+      "local_sha256_from_verified_manifest": "fc6afc9a657deef031c5d02f11d812f1c87d5ce4b7762627631df40f9855f85d",
+      "local_manifest_modality": "codex",
+      "local_manifest_replicate_id_literal": "1",
+      "catalog_filename": "data_integration_MBC/HTAPP-313-SMP-932_codex_processed.h5ad",
+      "catalog_entityId": "syn26077460",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_313_932303",
+      "biospecimen_Portion_Weight_literal": "Codex Section# 3",
+      "biospecimen_common_parent_ids": "HTA1_313_9323",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "313-932",
+      "local_working_path": "working/registered/HTAPP-313-SMP-932/HTAPP-313-SMP-932_merfish_processed.h5ad",
+      "local_sha256_from_verified_manifest": "498f3820e30b9f8621c7f423ef76af9906d3888b6f71f5c9697ab2f1ae4b3be7",
+      "local_manifest_modality": "merfish",
+      "local_manifest_replicate_id_literal": "1",
+      "catalog_filename": "data_integration_MBC/HTAPP-313-SMP-932_merfish_processed.h5ad",
+      "catalog_entityId": "syn26077455",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_313_932304",
+      "biospecimen_Portion_Weight_literal": "Merfish Section# 4",
+      "biospecimen_common_parent_ids": "HTA1_313_9323",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "514-6760",
+      "local_working_path": "working/registered/HTAPP-514-SMP-6760/HTAPP-514-SMP-6760_HE_1_processed.jpg",
+      "local_sha256_from_verified_manifest": "eff0c29f2ee92ece13497684c9010db8e8323c30b9bddd4fad3dd36ec323dd79",
+      "local_manifest_modality": "HE",
+      "local_manifest_replicate_id_literal": "1",
+      "catalog_filename": "data_integration_MBC/HTAPP-514-SMP-6760_HE_1_processed.jpg",
+      "catalog_entityId": "syn26077465",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_514_6760301",
+      "biospecimen_Portion_Weight_literal": "H&E Section# 1",
+      "biospecimen_common_parent_ids": "HTA1_514_67603",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "514-6760",
+      "local_working_path": "working/registered/HTAPP-514-SMP-6760/HTAPP-514-SMP-6760_HE_2_processed.jpg",
+      "local_sha256_from_verified_manifest": "b2a6847ba56d8fddb42b98d75c1b36b53d740165eedd48485dc845eb9954b756",
+      "local_manifest_modality": "HE",
+      "local_manifest_replicate_id_literal": "2",
+      "catalog_filename": "data_integration_MBC/HTAPP-514-SMP-6760_HE_2_processed.jpg",
+      "catalog_entityId": "syn26077462",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_514_6760306",
+      "biospecimen_Portion_Weight_literal": "H&E Section# 6",
+      "biospecimen_common_parent_ids": "HTA1_514_67603",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "514-6760",
+      "local_working_path": "working/registered/HTAPP-514-SMP-6760/HTAPP-514-SMP-6760_codex_processed.h5ad",
+      "local_sha256_from_verified_manifest": "2cac0dbd515c350b1bb1b148bdca8b0ed4661a3b2497f9992f75bab8fb502542",
+      "local_manifest_modality": "codex",
+      "local_manifest_replicate_id_literal": "2",
+      "catalog_filename": "data_integration_MBC/HTAPP-514-SMP-6760_codex_processed.h5ad",
+      "catalog_entityId": "syn26077487",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_514_6760308",
+      "biospecimen_Portion_Weight_literal": "Codex Section# 8",
+      "biospecimen_common_parent_ids": "HTA1_514_67603",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "514-6760",
+      "local_working_path": "working/registered/HTAPP-514-SMP-6760/HTAPP-514-SMP-6760_merfish_processed.h5ad",
+      "local_sha256_from_verified_manifest": "957fd9e001290af2a56b03660289219790f723e924da0687904350826bc5a1e0",
+      "local_manifest_modality": "merfish",
+      "local_manifest_replicate_id_literal": "2",
+      "catalog_filename": "data_integration_MBC/HTAPP-514-SMP-6760_merfish_processed.h5ad",
+      "catalog_entityId": "syn26077481",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_514_6760309",
+      "biospecimen_Portion_Weight_literal": "Merfish Section# 9",
+      "biospecimen_common_parent_ids": "HTA1_514_67603",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "982-7629",
+      "local_working_path": "working/registered/HTAPP-982-SMP-7629/HTAPP-982-SMP-7629_HE_1_processed.jpg",
+      "local_sha256_from_verified_manifest": "05fe26d06830068fe057ef805a41f97772706fb9a83b8d1e011ee1e10cca3326",
+      "local_manifest_modality": "HE",
+      "local_manifest_replicate_id_literal": "1",
+      "catalog_filename": "data_integration_MBC/HTAPP-982-SMP-7629_HE_1_processed.jpg",
+      "catalog_entityId": "syn26077459",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_982_7629301",
+      "biospecimen_Portion_Weight_literal": "H&E Section# 1",
+      "biospecimen_common_parent_ids": "HTA1_982_76293",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "982-7629",
+      "local_working_path": "working/registered/HTAPP-982-SMP-7629/HTAPP-982-SMP-7629_HE_2_processed.jpg",
+      "local_sha256_from_verified_manifest": "6fc081656dae42ced631d0f0fdb81eb2b85be9e764ced2bcf3122ba792bb2e1e",
+      "local_manifest_modality": "HE",
+      "local_manifest_replicate_id_literal": "2",
+      "catalog_filename": "data_integration_MBC/HTAPP-982-SMP-7629_HE_2_processed.jpg",
+      "catalog_entityId": "syn26077488",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_982_7629306",
+      "biospecimen_Portion_Weight_literal": "H&E Section# 6",
+      "biospecimen_common_parent_ids": "HTA1_982_76293",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "982-7629",
+      "local_working_path": "working/registered/HTAPP-982-SMP-7629/HTAPP-982-SMP-7629_codex_processed.h5ad",
+      "local_sha256_from_verified_manifest": "827eb377870e55204c577a0f00d3c728a3a50318277fd8acfb06fb4c3817d468",
+      "local_manifest_modality": "codex",
+      "local_manifest_replicate_id_literal": "2",
+      "catalog_filename": "data_integration_MBC/HTAPP-982-SMP-7629_codex_processed.h5ad",
+      "catalog_entityId": "syn26077497",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_982_7629308",
+      "biospecimen_Portion_Weight_literal": "Codex Section# 8",
+      "biospecimen_common_parent_ids": "HTA1_982_76293",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "982-7629",
+      "local_working_path": "working/registered/HTAPP-982-SMP-7629/HTAPP-982-SMP-7629_exseq_processed.h5ad",
+      "local_sha256_from_verified_manifest": "ef17ac4ae2f449e35b70b8357f733c8c0bd559f4c3b68e5d5f22ef43b0672c1b",
+      "local_manifest_modality": "exseq",
+      "local_manifest_replicate_id_literal": "1",
+      "catalog_filename": "data_integration_MBC/HTAPP-982-SMP-7629_exseq_processed.h5ad",
+      "catalog_entityId": "syn26077494",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_982_7629305",
+      "biospecimen_Portion_Weight_literal": "ExSeq Section# 5",
+      "biospecimen_common_parent_ids": "HTA1_982_76293",
+      "replicate_to_section_mapping": "single catalog parent for this named processed file"
+    },
+    {
+      "biopsy_id": "982-7629",
+      "local_working_path": "working/registered/HTAPP-982-SMP-7629/HTAPP-982-SMP-7629_merfish_processed.h5ad",
+      "local_sha256_from_verified_manifest": "9d149f23ebddbdc69b700dbb874175454884e0b6c9b6313fb932fc6cd6a7d315",
+      "local_manifest_modality": "merfish",
+      "local_manifest_replicate_id_literal": "1;2",
+      "catalog_filename": "data_integration_MBC/HTAPP-982-SMP-7629_merfish_processed.h5ad",
+      "catalog_entityId": "syn26077477",
+      "catalog_HTAN_Parent_Biospecimen_ID_literal": "HTA1_982_7629304, HTA1_982_7629309",
+      "biospecimen_Portion_Weight_literal": "Merfish Section# 4; Merfish Section# 9",
+      "biospecimen_common_parent_ids": "HTA1_982_76293",
+      "replicate_to_section_mapping": "catalog records parent set; per-replicate assignment needs author importer rule"
+    }
+  ],
+  "outline_parent_resolution": [
+    {
+      "entityId": "syn25541248",
+      "Filename": "merfish_level_3/segmentation_combined/segmentation_HTAPP-313_slice4.csv",
+      "literal_parent_data_file_count": "244",
+      "resolved_imaging_level2_parents": "244",
+      "unresolved_parent_ids": "",
+      "resolved_parent_biospecimen_ids": "HTA1_313_932304",
+      "all_parents_resolve_to_single_biospecimen": "True",
+      "segmentation_type": "Outline",
+      "object_class": "whole cell",
+      "catalog_Number_of_Objects_literal": "12",
+      "object_count_interpretation": "unverified metadata; not the retained cell count"
+    },
+    {
+      "entityId": "syn25541251",
+      "Filename": "merfish_level_3/segmentation_combined/segmentation_HTAPP-514_slice9.csv",
+      "literal_parent_data_file_count": "299",
+      "resolved_imaging_level2_parents": "299",
+      "unresolved_parent_ids": "",
+      "resolved_parent_biospecimen_ids": "HTA1_514_6760309",
+      "all_parents_resolve_to_single_biospecimen": "True",
+      "segmentation_type": "Outline",
+      "object_class": "whole cell",
+      "catalog_Number_of_Objects_literal": "12",
+      "object_count_interpretation": "unverified metadata; not the retained cell count"
+    },
+    {
+      "entityId": "syn25541250",
+      "Filename": "merfish_level_3/segmentation_combined/segmentation_HTAPP-982_slice4.csv",
+      "literal_parent_data_file_count": "130",
+      "resolved_imaging_level2_parents": "130",
+      "unresolved_parent_ids": "",
+      "resolved_parent_biospecimen_ids": "HTA1_982_7629304",
+      "all_parents_resolve_to_single_biospecimen": "True",
+      "segmentation_type": "Outline",
+      "object_class": "whole cell",
+      "catalog_Number_of_Objects_literal": "12",
+      "object_count_interpretation": "unverified metadata; not the retained cell count"
+    },
+    {
+      "entityId": "syn25541245",
+      "Filename": "merfish_level_3/segmentation_combined/segmentation_HTAPP-982_slice9.csv",
+      "literal_parent_data_file_count": "116",
+      "resolved_imaging_level2_parents": "116",
+      "unresolved_parent_ids": "",
+      "resolved_parent_biospecimen_ids": "HTA1_982_7629309",
+      "all_parents_resolve_to_single_biospecimen": "True",
+      "segmentation_type": "Outline",
+      "object_class": "whole cell",
+      "catalog_Number_of_Objects_literal": "12",
+      "object_count_interpretation": "unverified metadata; not the retained cell count"
+    }
+  ],
+  "acquired_images": [
+    {
+      "synapse_id": "syn25882276",
+      "name": "BPC-20-ZC-1879-1.svs",
+      "destination": "/mnt/seagate/HnE/HTAPP_MBC/public_sources/htan_514_6760/he_section6/BPC-20-ZC-1879-1.svs",
+      "bytes": 398560551,
+      "md5": "388865d6346d14bb38081d988ed5d3a6",
+      "sha256": "b29276f590e81984b07d364d1ef249c3b87ed7dfd57df0aad8867bb100050e76",
+      "drs_metadata_url": "https://nci-crdc.datacommons.io/ga4gh/drs/v1/objects/dg.4DFC/62204034-7e68-11ee-bf54-8fe4e657a41f",
+      "access_mechanism": "Official DRS metadata and access/s3 endpoint, both anonymously HTTP200; signed GET URL held in memory.",
+      "readback": "passed",
+      "pages": 4,
+      "series": [
+        {
+          "shape": [
+            22186,
+            23854,
+            3
+          ],
+          "axes": "YXS",
+          "levels": [
+            [
+              22186,
+              23854,
+              3
+            ],
+            [
+              5546,
+              5963,
+              3
+            ]
+          ]
+        },
+        {
+          "shape": [
+            693,
+            745,
+            3
+          ],
+          "axes": "YXS",
+          "levels": [
+            [
+              693,
+              745,
+              3
+            ],
+            [
+              346,
+              372,
+              3
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "synapse_id": "syn25518767",
+      "name": "processed_images0.tif",
+      "destination": "/mnt/seagate/HnE/HTAPP_MBC/public_sources/htan_514_6760/merfish_slice9/processed_images0.tif",
+      "bytes": 1468028692,
+      "md5": "ed32bcde12464a80d8cf2b73c69d6ece",
+      "sha256": "f49cefbb586b2643d0ed873741c99a37388d3781af2bd78832557416e8368486",
+      "drs_metadata_url": "https://nci-crdc.datacommons.io/ga4gh/drs/v1/objects/dg.4DFC/BCAE4E12-C398-476E-8351-5CBAE01C21DB",
+      "access_mechanism": "Official DRS metadata and access/s3 endpoint, both anonymously HTTP200; signed GET URL held in memory.",
+      "readback": "passed",
+      "pages": 175,
+      "series": [
+        {
+          "shape": [
+            25,
+            7,
+            2048,
+            2048
+          ],
+          "axes": "TZYX",
+          "levels": [
+            [
+              25,
+              7,
+              2048,
+              2048
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "total_acquired_bytes": 1866589243,
+  "merfish_images_acquired": 1,
+  "merfish_images_cataloged_for_514": 299,
+  "remaining_merfish_images_acquired": 0,
+  "channel_positions": {
+    "positions_catalog_field": {
+      "image": "syn25518767",
+      "field": "MERFISH Positions File",
+      "value": "syn25705623",
+      "resolved_name": "dataorganization_processed.csv",
+      "qualification": "contradictory_role_not_accepted_as_positions"
+    },
+    "actual_positions": {
+      "synapse_id": "syn25705632",
+      "file_name": "fovCoordinates_HTAPP-514_slice9.csv",
+      "parent_biospecimen_id": "HTA1_514_6760309",
+      "parent_folder": "syn25705620",
+      "payload_inspected": false
+    },
+    "channel_metadata": {
+      "catalog_id": "syn25705616",
+      "resolved_name": "dataorganization_raw.csv",
+      "processed_metadata_id": "syn25705623",
+      "payloads_inspected": false,
+      "DAPI_index_qualified": false
+    }
+  },
+  "payload_inspection": {
+    "merfish_pages_decoded": 175,
+    "merfish_imagej_shape": [
+      25,
+      7,
+      2048,
+      2048
+    ],
+    "merfish_tifffile_axes": "TZYX",
+    "duplicate_description_channels": [
+      175,
+      1
+    ],
+    "catalog_SizeZ": 1,
+    "payload_ImageJ_slices": 7,
+    "dapi_identity_qualified": false,
+    "stage_positions_identified": false,
+    "native_HE_mpp": 0.2762,
+    "native_HE_mpp_transferred_to_registered_JPEG": false
+  },
+  "user_followup": "No local auxiliary copies; continue with accessible public files.",
+  "registration_qualification": false,
+  "registration_fits": 0,
+  "new_model_fits": 0,
+  "new_prediction_comparisons": 0,
+  "external_evidence_root": "/storage/HE_GPT/HEIR-cohort-runs/v0141-public-sources",
+  "evidence_sha256": {
+    "section-mapping/receipt.json": "d205e86ea13434488c5d5dd446586a2f44a09ec851b1b4fa87a7338bdd547b07",
+    "section-mapping/processed_file_crosswalk.tsv": "a80a46ed7e1f8a3b3091dc16226006abfc49f745a0c3112d2bdfd5f6c5b40cf1",
+    "section-mapping/biospecimen_literal_rows.tsv": "451791b3c39e066d040059cad8a43dc48f989c21b900e7a4ec7806c03b593445",
+    "section-mapping/adjacency_edges.tsv": "0a3e3284587ab3653a2db7d5f87dfe21f72100ae1958d65de2967bd584deed63",
+    "access/imaging/report.json": "a52f002271d9f46da43e775059f540548020b1551506efa575027da4ae962c63",
+    "access/imaging/TRANSFER_COMPLETE.json": "19f3d347b510a9479dd2dd1da0ad343249ae05937c80e31cb1e373e3de8ff296",
+    "access/imaging/exact_514_imaging_manifest.tsv": "b530043ebb049d498d82471c91f2e0f4e13472e830daf7c84bcc986982bd428b",
+    "access/synapse/summary.json": "eb6827ae9245fa8fc76b9f130e2f35d297fcd412b1ba7910f28c6aff3ec250c9",
+    "access/synapse/channel-position/reconciliation.json": "981b94bf35c7a38afc5d07f18c3cdf3426f46110fb46fde827cefd97171bf9e2",
+    "image-inspection/inspection.json": "37a7a04d43969c419f307f048969be38abbee771bcd0dbf02e1fe143ffaba2ee",
+    "access/synapse/actual-positions-access/receipt.json": "b1c2d1082adcbee481dba58b49a5413bfb536844356c2b0bd98202fb6cbb7093"
+  },
+  "auxiliary_access_status": {
+    "syn25541251": "HTTP403: Anonymous users have only READ access permission",
+    "syn25705616": "HTTP403: Anonymous users have only READ access permission",
+    "syn25705623": "HTTP403: Anonymous users have only READ access permission",
+    "syn25705632": "HTTP403 on one request for the actual positions file; no payload acquired"
+  }
+}
