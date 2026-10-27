@@ -261,7 +261,11 @@ explicit reasons for incomplete or unresolved specimens.
 ### HTAPP tissue-region workflow
 
 The user selected tissue regions as the initial cohort resolution. This profile uses the
-publication's biopsy grouping and preserves unknown section/core details as unknown. It does not
+publication's lesion/procedure-level biopsy grouping: dissociated RNA and spatial assays use
+different cores, and spatial assays/H&E use serial sections
+([HTAPP study design](https://www.nature.com/articles/s41591-024-03215-z)). It preserves file-level unknown
+section/core details as unknown. This matching does not establish identical regional composition
+or physical-cell correspondence. It does not
 require invented identifiers to satisfy the stricter nucleus-oriented canonical manifest.
 The registered canvas is the analysis frame: existing coordinates are used unchanged in
 `registered_pixel` units. Physical calibration uncertainty remains relevant to µm-scale or
@@ -519,10 +523,12 @@ reference-state deletion, functional-marker removal where measured, registration
 and readouts outside the protein panel. Choose a practical effect threshold from pilot variability
 and assay reliability before the principal comparison.
 
-The ST-informed comparator needs its own input interface. Use either one spatial assay to predict
-an independently measured assay on aligned coverage, or spatial anchor genes to predict explicitly
-withheld genes. All methods receive the same evaluation outcome. Measured ST scored against itself
-is not informative, and an empirical ST-informed result is not a universal lower bound.
+Version 0.7 added source-replicate transfer and source-fitted reference reconstruction as
+exploratory ST-informed comparisons. What remains unqualified is the correspondence and independent
+endpoint: use one spatial assay to predict an independently measured assay on aligned coverage,
+or spatial anchor genes to predict explicitly withheld genes. All methods receive the same
+evaluation outcome. Measured ST scored against itself is not informative, and an empirical
+ST-informed result is not a universal lower bound.
 
 External MaxFuse, CytoBulk, and SCHAF wrappers remain planned. They should consume the same prepared
 specimens, preserve modality differences, emit the same prediction schema, and keep incompatible
@@ -1645,3 +1651,121 @@ Run-root evidence includes `execution.json`, `engineering_acceptance.json`, `bun
 remain unchanged. Large arrays, fitted bundles and audit tables stay outside the source repo.
 These exposed cohort results are developmental, with no independent confirmation or scientific
 qualification. They do not justify expanding the experiment or promoting the residual over ridge.
+
+## Version 0.13: saved-output diagnosis and endpoint qualification
+
+The retained UNI2-h ridge remains the incumbent. This revision diagnoses the completed v0.12
+study and qualifies available evidence; it does not train a model, select a new checkpoint,
+re-extract image features, acquire datasets or modify published predictions. The earlier
+negative results remain intact. No communication fit is part of the completed regional joint
+studies, so their results establish neither communication benefit nor communication failure.
+
+For ridge error `e = Y - Z_H`, the exact weighted identity is
+`MSE(Z_H + Delta) - MSE(Z_H) = E[Delta²] - 2 E[e Delta]`. The diagnostic reports added residual
+energy and alignment with the actual ridge error, using the original observed-entry weights
+within assay replicate, equal replicates within specimen, equal specimens within patient, and
+equal patients. It repeats the identity after centering each replicate/gene separately to
+distinguish spatial allocation from mean-level changes. Gene and patient breakdowns retain the
+same eligibility and original protein-coverage supports as v0.12.
+
+When energy is positive, the target-informed scalar `alpha* = E[e Delta] / E[Delta²]` minimizes
+that diagnostic squared error along the saved residual direction. Its clipped `[0,1]` counterpart
+describes possible shrinkage. These values use evaluation targets and are **not selected models,
+new predictions, validation results or certified performance bounds**. Nonpositive alignment
+indicates a noncorrective direction; positive alignment with energy greater than twice alignment
+indicates a direction that is too large at multiplier one. Centered and total diagnostics can
+differ. An exactly zero residual is reported separately.
+
+The analysis replays selected saved bundles on training, validation and test inputs. Test replay
+must match v0.12 exports exactly, and selected validation metrics must match saved histories.
+Training baseline comparisons use identical rows with the original patient-excluding inner
+readout or the deployment readout fitted to the outer training set. The selected residual is
+unchanged between these two views. Training instances recur across folds, so reporting averages
+fold instances within specimen before patient aggregation and retains fold summaries. The
+different fitted sample sizes and in-sample deployment error are explicit; a distribution shift
+can be described without identifying it as the cause of failed generalization.
+
+```bash
+heir cohort-residual-diagnose \
+  --study /storage/HE_GPT/HEIR-cohort-runs/v0120-joint-residual/study \
+  --output /storage/HE_GPT/HEIR-cohort-runs/v0130-saved-diagnostics/diagnostics
+```
+
+Qualification precedes a new biological comparison. A source spatial assay predicting an
+independent spatial assay is already partly represented by v0.7 source-replicate transfer and
+source-fitted reference reconstruction. What remains missing is a qualified correspondence and
+independent endpoint on compatible support. Target-fitted reference mixtures remain
+representability diagnostics, never state-placement truth or an irreducible-error floor.
+
+Regional `q` describes reference-profile weights, not calibrated cell fractions. Cell abundance,
+RNA content and capture effects all affect regional molecular composition. Nine self-normalized
+outcomes provide at most eight independent compositional dimensions, so agreement with them
+cannot uniquely identify a 32-state mixture. The 18-gene state descriptor and five consumed
+protein channels also do not measure the breadth of within-type programs motivating HEIR.
+
+The next model comparison is conditional on a qualified endpoint: first test a specimen RNA
+summary for level calibration, then ask whether spatial assignment improves centered error or
+within-type localization. Matched-reference controls must account for reference size, type
+coverage and assay differences; protein controls must separate intensity from coverage and
+generic neighborhoods, with outcomes beyond the direct protein anchors. Explicit ligand–receptor
+constraints come only after those components work and must outperform the same inputs with a
+generic spatial graph. An independent patient-level confirmation remains necessary after these
+development choices are settled; regions and assay cells are not independent patients.
+
+### Orthogonal endpoint and resource qualification
+
+The local file audit joins the exact 13-biopsy working set to MERFISH in eight patients/nine
+replicates and ExSeq in eight patients/eight replicates: 11 patients in the union and five with
+both assays. Biopsies 213-6752 and 997-7789 have neither. Retained registered observations total
+74,890 MERFISH and 13,971 ExSeq observations; these are not verified matches to physical H&E cells.
+The audit verified 117 assay payloads and 13 matched-RNA files against manifest sizes/hashes
+(2,580,415,716 bytes), and inspected 79 native/registered/binned H5AD axes. Retained counts are in
+registered `obsm/counts` with `uns/counts_var`; processed/HVG `X` is not a replacement outcome.
+
+| Common target and matched-RNA gene availability | Genes | Outside five protein aliases | Outside 18 descriptors |
+|---|---:|---:|---:|
+| Eight MERFISH biopsy records | 251 | 246 | 234 |
+| Eight ExSeq biopsy records | 215 | 210 | 198 |
+| All 16 records, 11 patients | 210 | 205 | 193 |
+
+The excluded protein aliases are CD4, CD8A, PTPRC, PECAM1 and MKI67, without asserting protein–RNA
+abundance equality. All nine historical outcomes occur throughout; seven exclude those protein
+aliases, but none is outside the 18-gene descriptor. The 193-gene intersection supplies candidate
+non-descriptor outcomes. No new panel, exposure rule or biological endpoint was selected here.
+
+**Availability does not yet qualify an independent within-type endpoint.** An exact
+core/section/H&E crosswalk is absent; the upstream `sampletracking_HTAPP_MBC_spatial.csv`
+referenced by the author pipeline is also unavailable, and consumed section IDs remain blank.
+Registered `OT`/`OT_max`/`RCTD` outputs are reference-transfer annotations.
+H&E compartment flags are projections from absent `*_Fill.png` source masks, with unresolved
+annotation provenance and overlapping labels. The author notebook's separately annotated
+`combined_merfish/merfish.h5ad` is also absent. Independent compartments need source-image and
+observer identities, explicit overlap handling, and annotation markers disjoint from evaluated
+outcomes. Physical calibration, geometry-only common support and registration uncertainty remain
+unqualified; cellular claims additionally require segmentation and actual section correspondence.
+
+The upstream registration review identifies a concrete distinction. Author notebook parameters
+are numeric literals; replay applies those transforms. However, the author's
+`spatial_utils.py:251–266` uses normalized `obs.n_counts` as point opacity over H&E in alignment
+visualizations. This proves availability of RNA-derived abundance to that visualization, not
+that particular gene outcomes determined transform choices or that HEIR leaked test targets.
+The transform-choice images/channels and decision records are missing. Prediction-time target
+exclusion and exact coordinate replay cannot certify the independence of that upstream process.
+The [HTAPP methods](https://www.nature.com/articles/s41591-024-03215-z) also describe MERFISH QC
+using pseudobulk agreement with matched RNA; this is relevant selection provenance, not proof
+of spatial prediction leakage. These 11 patients remain an exposed subset of the development
+cohort; an additional assay does not create independent patient-level confirmation.
+
+Primary-source checks also qualify two candidate technical resources without acquiring payloads:
+
+| Resource | Verified evidence | Remaining qualification |
+|---|---|---|
+| [Spatial Touchstone](https://www.nature.com/articles/s41587-025-02811-9) | Six tissue types, 77 new spatial profiles, six snPATHO references, 44 H&E images; a same-section prostate Xenium/CosMx-protein example | Exact file/channel/section joins. The 254-profile portal includes other public studies. Live [GSE277080](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE277080) exposes 38 GSM records and an older 76-assay/203-profile summary, not a reconciled inventory of the final paper. |
+| [SPATCH / Ren et al.](https://www.nature.com/articles/s41467-025-64292-3) | Three patients, separate tissue portions, adjacent 16-plex CODEX; [S-BIAD1900](https://www.ebi.ac.uk/biostudies/BioImages/studies/S-BIAD1900) lists 36 image files across COAD/HCC/OV | Actual payload integrity, RNA/image/channel joins, section mapping and independent outcome definition. Three patients, not millions of independent cells, determine the biological replication. |
+
+Neither external resource is promoted to a HEIR-qualified joint benchmark. Only small catalog
+metadata were retrieved. Run-root `endpoint-qualification/` retains exact file identities,
+cohort joins, gene lists, source-code evidence and the missing-input checklist;
+`literature-qualification/` retains primary links and hashed catalog responses. The next concrete
+requirements are the biological crosswalk, permitted-registration decision provenance, original
+independent annotation masks/labels, and a prespecified non-anchor outcome on qualified support.

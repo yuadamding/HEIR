@@ -683,7 +683,20 @@ def residual_command(args):
     print(json.dumps(run_residual_study(args.config, args.output), indent=2, allow_nan=False))
 
 
+def residual_diagnose_command(args):
+    """Diagnose saved residual energy and baseline-error alignment without fitting."""
+    from .residual_diagnostics import diagnose_residual_study
+
+    print(json.dumps(diagnose_residual_study(args.study, args.output), indent=2, allow_nan=False))
+
+
 def add_commands(commands):
+    diagnose = commands.add_parser(
+        "cohort-residual-diagnose", help=residual_diagnose_command.__doc__
+    )
+    diagnose.add_argument("--study", required=True)
+    diagnose.add_argument("--output", required=True)
+    diagnose.set_defaults(run=residual_diagnose_command)
     residual = commands.add_parser("cohort-residual", help=residual_command.__doc__)
     residual.add_argument("--config", required=True)
     residual.add_argument("--output", required=True)

@@ -4,7 +4,7 @@ HEIR predicts relative spatial expression from H&E features, specimen-matched sc
 measured proteins, and tissue geometry. Its shared pathway exports probabilistic RNA-state
 assignments, reference transfer, bounded expression correction, and uncertainty indicators.
 Spatial RNA supplies training supervision and subsequent evaluation; it is excluded from
-ordinary prediction inputs.
+ordinary prediction inputs. This input boundary does not by itself qualify upstream registration.
 
 This is a development prototype. Real HTAPP qualification, calibrated uncertainty, and biological
 benefits from personalization or communication remain unestablished. See the
@@ -12,7 +12,9 @@ benefits from personalization or communication remain unestablished. See the
 
 The 13-biopsy working set at `/mnt/seagate/HnE/HTAPP_MBC` now has a
 [tissue-region workflow](docs/personalized_development.md#htapp-tissue-region-workflow). It uses
-biopsy-level matching and the published registered pixel frame without inventing section IDs.
+lesion/procedure-level matching and the published registered pixel frame without inventing section
+IDs. The study design uses separate cores for dissociated RNA and spatial assays; exact regional
+composition and physical-cell correspondence are not established by that match.
 Nucleus-level inputs remain supported by the original canonical workflow.
 
 Version 0.3 fixes the numerical issues identified in the assessment of `d955c01`: fixed
@@ -51,6 +53,9 @@ keeps normalized-log final predictions separate from linear reference transfer.
 The completed 30-fit study is negative: all six residual arms underperform ridge on mean
 correlation, total MSE and centered MSE. HRP correlation is 0.1126 versus ridge's 0.1237;
 the retained ridge remains the stronger development predictor.
+Version 0.13 adds [saved-output failure diagnostics and endpoint qualification](docs/personalized_development.md#version-013-saved-output-diagnosis-and-endpoint-qualification).
+It makes no new model fits. Independent spatial measurement and within-type localization must
+be qualified before further model expansion or communication experiments.
 Linear-expression exports use **schema v3**, with explicit spatial units; v2 predictions remain
 readable as nucleus/µm outputs. Canonical specimen manifests and existing joint-model bundles
 retain schema v2. The new residual prediction and bundle families have separate v1 schemas.
