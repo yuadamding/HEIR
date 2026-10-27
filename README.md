@@ -48,8 +48,12 @@ All 78 saved joint predictions reproduce exactly, and clean-checkout CI now pass
 Version 0.12 preserves the UNI2-h ridge prediction and tests a zero-initialized joint molecular
 residual with patient-safe inner cross-fitting. Its [new protocol](docs/personalized_development.md#version-012-image-baseline-plus-joint-molecular-residual)
 keeps normalized-log final predictions separate from linear reference transfer.
-Prediction exports use **schema v3**, with explicit spatial units; v2 predictions remain readable
-as nucleus/µm outputs. Canonical specimen manifests and model bundles retain schema v2.
+The completed 30-fit study is negative: all six residual arms underperform ridge on mean
+correlation, total MSE and centered MSE. HRP correlation is 0.1126 versus ridge's 0.1237;
+the retained ridge remains the stronger development predictor.
+Linear-expression exports use **schema v3**, with explicit spatial units; v2 predictions remain
+readable as nucleus/µm outputs. Canonical specimen manifests and existing joint-model bundles
+retain schema v2. The new residual prediction and bundle families have separate v1 schemas.
 
 ## Install and run
 

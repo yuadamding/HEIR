@@ -1543,3 +1543,105 @@ and generic RNA, alongside final-versus-ridge and separately scored reference tr
 residual may win; a null molecular contribution is a valid outcome. Existing v0.11 results and
 all older study scopes remain unchanged. No new encoder, image cache, resolution, outcome panel,
 protein panel, communication mechanism or backbone tuning is included.
+
+### Completed v0.12 development result
+
+Source commit `849917f` completed the fixed study at
+`/storage/HE_GPT/HEIR-cohort-runs/v0120-joint-residual/study`: **30 neural fits, 15 inner
+ridge readouts, five audited deployment reuses, zero additional refits or searches**.
+All neural fits completed 100 epochs. The frozen patient roles yield 42 cross-fitted training
+specimen instances across five folds, not the 39 initially assumed in the audit plan. The
+read-only audit corrected that count from the unchanged fold inventory; its first failed
+count assertion is preserved separately. No model was rerun.
+
+**This is a completed negative incremental-prediction result.** Every residual arm has lower
+mean correlation, higher total MSE and higher centered MSE than ridge on both evaluation
+supports. The retained UNI2-h ridge remains the stronger development predictor. Adding the
+zero-residual validation candidate preserved an available fallback; it did not guarantee
+better test performance after validation selection.
+
+All-target results use the same 13 patients, 23 assay replicates and 4,625 target observations.
+Entries below are equal-patient means. Correlation averages replicate-level median-gene
+Spearman values; amplitude is the mean replicate/gene predicted-to-target SD ratio diagnostic.
+Errors remain on the fixed nine-gene normalized-log scale.
+
+| Final predictor | Correlation ↑ | MSE ↓ | Squared bias ↓ | Centered MSE ↓ | Amplitude |
+|---|---:|---:|---:|---:|---:|
+| Frozen UNI2-h ridge | **0.123659** | **9.314126** | 2.661209 | **6.652917** | 0.273722 |
+| H residual | 0.110253 | 9.551495 | 2.700898 | 6.850598 | 0.361139 |
+| HR residual | 0.108204 | 9.573572 | 2.708240 | 6.865332 | 0.348179 |
+| HP residual | 0.115064 | 9.547727 | 2.761463 | 6.786264 | 0.331739 |
+| HRP residual | 0.112630 | 9.452726 | 2.661957 | 6.790770 | 0.326778 |
+| HRP coverage-only | 0.110897 | 9.358616 | **2.590276** | 6.768339 | 0.318474 |
+| HRP generic RNA | 0.104276 | 9.663382 | 2.786198 | 6.877184 | 0.344800 |
+
+On the 4,426 common original protein-covered observations, the direction is unchanged:
+
+| Final predictor | Correlation ↑ | MSE ↓ | Squared bias ↓ | Centered MSE ↓ | Amplitude |
+|---|---:|---:|---:|---:|---:|
+| Frozen UNI2-h ridge | **0.120571** | **9.193085** | 2.690667 | **6.502418** | 0.277733 |
+| H residual | 0.105370 | 9.420941 | 2.719187 | 6.701754 | 0.367263 |
+| HR residual | 0.107721 | 9.439668 | 2.724356 | 6.715313 | 0.354704 |
+| HP residual | 0.114335 | 9.418797 | 2.780989 | 6.637808 | 0.337517 |
+| HRP residual | 0.108041 | 9.317344 | 2.678871 | 6.638473 | 0.332440 |
+| HRP coverage-only | 0.108605 | 9.231405 | **2.613940** | 6.617466 | 0.324060 |
+| HRP generic RNA | 0.102398 | 9.529277 | 2.803279 | 6.725998 | 0.351337 |
+
+Paired all-target correlation differences use the same patient, target rows and eligible genes:
+
+| HRP final minus comparator | Mean Δρ | Median Δρ | Patients with positive Δρ |
+|---|---:|---:|---:|
+| Frozen ridge | -0.011029 | -0.008030 | 3/13 |
+| H residual | +0.002377 | +0.001026 | 8/13 |
+| HR residual | +0.004426 | +0.001861 | 7/13 |
+| HP residual | -0.002434 | -0.000699 | 4/13 |
+| Coverage-only residual | +0.001734 | -0.001944 | 5/13 |
+| Generic-RNA residual | +0.008354 | +0.007450 | 8/13 |
+
+HRP's all-target MSE increase over ridge is 0.138600, including 0.137852 higher centered error;
+centered error worsens in 12/13 patients. Increased amplitude does not repair spatial accuracy.
+Matched RNA improves on this generic-RNA residual, but neither exceeds ridge. The small mean
+correlation advantage over coverage-only reverses on common support (-0.000565), and measured
+intensities worsen total and centered MSE on both supports. These controls do not establish an
+incremental three-modality or intensity-specific benefit beyond the image baseline.
+
+Reference transfer also worsens independently. New HRP `T=qB` has all-target correlation
+0.025203, MSE 14.217831 and centered MSE 7.096721, versus historical transfer's 0.070373,
+13.434523 and 6.860002. Its correlation improves in only 3/13 patients. Common-support
+correlation is 0.022611 versus 0.070983. This study provides no evidence of improved
+molecular-state placement. One coverage-only fold selects epoch zero and explicitly retains
+an untrained mapper; the other 29 selections use trained checkpoints. Selected HRP epochs
+are 32, 36, 48, 47 and 24. No post-test checkpoint change or extra fit was performed.
+
+The descriptive report of the **unchanged v0.11** exports covers all 6,580 regions per backbone:
+
+| Backbone | Negative entries | Above `log(10001)` | Mean signed implied-mass deviation | Mean absolute deviation |
+|---|---:|---:|---:|---:|
+| H-optimus-1 | 3.7473% | 1.2561% | +149,971.276 | 163,517.732 |
+| UNI2-h | 0.3307% | 0% | -7,687.012 | 7,691.370 |
+
+Percentages and mass deviations are averaged within specimen and then equally across patients.
+Mass deviation is `sum(expm1(Z_panel))-10000`; absolute deviation is taken per region before
+averaging. No exponentiation overflow
+occurred. This is a scale diagnostic, not an alternate expression prediction. None of these
+published vectors was clipped, projected or renormalized. The new study also saves per-export
+output-contract diagnostics without transforming its final predictions.
+
+Engineering acceptance is **517 passing tests**, formatting/lint, offline lock check and
+wheel/source builds. Source commit `849917f` passes
+[GitHub CI](https://github.com/yuadamding/HEIR/actions/runs/40429456746).
+Independent artifact checks reproduce all 78 final predictions, 52 linear transfers and 42
+cross-fitted training predictions exactly. All 15 inner and five retained ridge models satisfy
+independently reconstructed normal equations (maximum scaled residual 2.606e-15); training-only
+scalers and patient exclusions pass. All 30 selection histories and five export barriers pass,
+and 13 generic predictions replay with no query RNA. Independent reconstruction verifies all
+312 support/component score records; new scores match exactly, while historical transfer MSE
+differs by at most 6.320e-7 because its original reduction used float32. The largest residual
+magnitude is 0.979442, within its declared bound of one.
+
+Run-root evidence includes `execution.json`, `engineering_acceptance.json`, `bundle_audit.json`,
+`study/ridge_artifact_audit.json`, `evaluation-audit/`, `prior_output_contract/`, and
+`historical_preservation.json`. The 34 historical repository files and 1,346 earlier run files
+remain unchanged. Large arrays, fitted bundles and audit tables stay outside the source repo.
+These exposed cohort results are developmental, with no independent confirmation or scientific
+qualification. They do not justify expanding the experiment or promoting the residual over ridge.
