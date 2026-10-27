@@ -1769,3 +1769,72 @@ cohort joins, gene lists, source-code evidence and the missing-input checklist;
 `literature-qualification/` retains primary links and hashed catalog responses. The next concrete
 requirements are the biological crosswalk, permitted-registration decision provenance, original
 independent annotation masks/labels, and a prespecified non-anchor outcome on qualified support.
+
+### Completed saved-residual diagnosis
+
+Source `460ec23` completed the analysis at
+`/storage/HE_GPT/HEIR-cohort-runs/v0130-saved-diagnostics/diagnostics`, with **zero model fits,
+zero checkpoint changes and zero modified predictions**. All 78 final test prediction exports
+reproduce exactly; all 30 selected validation results and their zero-residual candidates match
+the saved histories.
+The analysis covers 42 training specimen/fold instances, 10 validation instances and 13 test
+instances. Validation has only **eight distinct patients**; repeated appearances are averaged
+within specimen before equal-patient aggregation. Fold summaries are retained separately.
+
+**The spatial failure is not merely excessive residual magnitude.** Every arm has negative
+cohort-average centered error alignment on both evaluation supports. For each of these saved
+directions, any positive uniform residual multiplier increases cohort centered MSE; the
+target-informed nonnegative centered optimum is zero. This statement describes the saved
+development vectors and does not select a new predictor. All-target centered moments are:
+
+| Arm | Residual energy `E_c` | Error alignment `A_c` | Centered MSE change `E_c - 2A_c` | Diagnostic `alpha*_c` |
+|---|---:|---:|---:|---:|
+| H | 0.140487 | -0.028597 | +0.197681 | -0.203554 |
+| HR | 0.136800 | -0.037808 | +0.212415 | -0.276373 |
+| HP | 0.082817 | -0.025265 | +0.133347 | -0.305069 |
+| HRP | 0.075376 | -0.031238 | +0.137852 | -0.414432 |
+| HRP coverage-only | 0.058479 | -0.028472 | +0.115422 | -0.486870 |
+| HRP generic RNA | 0.139083 | -0.042592 | +0.224267 | -0.306234 |
+
+HRP's total-error direction is different: energy 0.176999 and alignment +0.019199 yield
+`0.176999 - 2(0.019199) = +0.138600` MSE change, up to displayed rounding. Its diagnostic total
+multiplier is +0.108471, indicating weak overall alignment with excessive magnitude at one.
+That does not repair its negative spatial alignment. On common protein coverage, HRP's centered
+alignment remains -0.030117, centered error increases 0.136055, and its centered multiplier is
+-0.397201. Negative multipliers are diagnostic direction reversals, not validated corrections.
+
+HRP centered alignment is negative in 12/13 test patients and eight of nine gene summaries using
+the original evaluator weights; CD8A is the small exception. Thus the problem is broad across
+patients and genes,
+without implying that every individual region or gene/replicate is harmed. The raw
+replicate/gene/patient rows retain the exceptions and their weights.
+
+The selection tradeoff was already visible before test evaluation: **29/30 selections improve
+all-target validation correlation while worsening validation centered error**; the remaining
+selection is the exact zero residual. All five HRP validation folds show that tradeoff. The prespecified
+correlation-first rule used centered error only to break ties, so this is not a selection-code
+defect or evidence that validation error had been protected. Equal-patient HRP changes are:
+
+| Role | Distinct patients / fold instances | Correlation change | Total MSE change | Centered MSE change |
+|---|---:|---:|---:|---:|
+| Validation | 8 / 10 | +0.010548 | +0.060003 | +0.157175 |
+| Test | 13 / 13 | -0.011029 | +0.138600 | +0.137852 |
+
+Training views also differ on identical rows: the patient-excluding inner ridge has MSE
+9.481837 and centered MSE 6.663957, versus deployment ridge's in-sample training errors 6.347980
+and 6.006702. The inner readouts use five or six patients; deployment readouts use eight or nine.
+The selected HRP residual reduces centered training error by 0.166067 against inner baselines
+and 0.113238 against deployment baselines, yet worsens validation and test error. This documents
+training/evaluation differences, not a demonstrated causal explanation. In particular, inner
+baseline errors are numerically close to outer-test ridge errors 9.314126 and 6.652917; the
+same-row training shift alone cannot establish that cross-fitting caused the failure.
+
+Independent reconstruction checked all 1,284 specimen records, 48 summary groups, 84 baseline-shift
+rows and their gene/replicate/patient/fold components. The largest numerical discrepancy is
+1.421e-13. Tests total **530 passing**, with lint, formatting, lock and build checks passing;
+[source CI also passes](https://github.com/yuadamding/HEIR/actions/runs/40436155270).
+Run-root `residual_moment_audit.json`, `diagnosis-interpretation/`, `engineering_acceptance.json`
+and `execution.json` retain the evidence. The incumbent and all earlier predictions remain
+unchanged. Qualified spatial measurement, non-anchor outcomes and independent within-type
+localization remain the next requirements; neither post-test shrinkage nor another architecture
+is promoted as a demonstrated solution.

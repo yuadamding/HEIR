@@ -54,8 +54,11 @@ The completed 30-fit study is negative: all six residual arms underperform ridge
 correlation, total MSE and centered MSE. HRP correlation is 0.1126 versus ridge's 0.1237;
 the retained ridge remains the stronger development predictor.
 Version 0.13 adds [saved-output failure diagnostics and endpoint qualification](docs/personalized_development.md#version-013-saved-output-diagnosis-and-endpoint-qualification).
-It makes no new model fits. Independent spatial measurement and within-type localization must
-be qualified before further model expansion or communication experiments.
+It makes no new model fits. All six saved residual directions have negative centered-error
+alignment on both supports. MERFISH/ExSeq are available for 11 working-set patients, but section
+mapping, registration provenance and independent compartment labels remain unqualified.
+Independent spatial measurement and within-type localization precede further model expansion
+or communication experiments.
 Linear-expression exports use **schema v3**, with explicit spatial units; v2 predictions remain
 readable as nucleus/µm outputs. Canonical specimen manifests and existing joint-model bundles
 retain schema v2. The new residual prediction and bundle families have separate v1 schemas.
