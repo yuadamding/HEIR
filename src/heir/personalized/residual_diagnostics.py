@@ -246,6 +246,30 @@ class _Sources:
             self.bind(path, digest)
 
 
+def _historical_module_hash(path, hashes):
+    """Resolve a package module independently of its checkout/installation root.
+
+    Historical receipts use absolute filenames. Match the complete package-relative
+    identity, never a bare basename, and reject duplicate identities even when their
+    hashes agree. The caller still verifies the current file's exact bytes.
+    """
+    module = ("heir", "personalized", Path(path).name)
+    matches = [digest for name, digest in hashes.items() if Path(name).parts[-3:] == module]
+    if len(matches) != 1:
+        raise ValueError(
+            f"historical module identity requires exactly one source: {'/'.join(module)} "
+            f"({len(matches)} matches)"
+        )
+    digest = matches[0]
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError(f"historical module identity requires a SHA-256: {'/'.join(module)}")
+    return digest
+
+
 def _compare_scores(actual, expected, keys=ENDPOINTS):
     for key in keys:
         a, b = actual[key], expected[key]
@@ -308,7 +332,7 @@ def diagnose_residual_study(study, output):
     old_hashes = identity["source_file_sha256"]
     for name in numerical_names:
         path = Path(__file__).with_name(name + ".py")
-        sources.bind(path, old_hashes[str(path)])
+        sources.bind(path, _historical_module_hash(path, old_hashes))
     for path in (
         __file__,
         Path(__file__).with_name("cohort_cli.py"),

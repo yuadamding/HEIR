@@ -1,0 +1,82 @@
+{
+  "schema": "heir.residual_aggregate_publication.v1",
+  "source_commit": "460ec23d1ab6f72563fd75cfeb5cfdef44a5b412",
+  "report_commit": "a3f4f40a2f629e652b82d971ffc7391cb0109be5",
+  "aggregate_file": "aggregates.tsv",
+  "aggregate_sha256": "13b8ba330e6a50826ff83925dd88b12388c35210bea1fcbca67b8abe306ca6aa",
+  "aggregate_export": "All 48 diagnostic summary groups; exact Python float serialization; no patient or specimen records.",
+  "diagnostic_summary_sha256": "48e0174cc74d14ab3216bb70292189b934cc043147bbf32773051d8508bfa30a",
+  "diagnostic_metadata": {
+    "schema": "heir.saved_residual_diagnostics.v1",
+    "prediction_scale": "fixed_panel_log1p_1e4",
+    "model_fits": 0,
+    "checkpoint_selection_changes": 0,
+    "predictions_modified": false,
+    "diagnostic_multipliers_use_evaluation_targets": true,
+    "diagnostic_multipliers_are_validated_predictors": false,
+    "scientific_qualification": false,
+    "independent_confirmation": false,
+    "source_summary_sha256": "47d6db9f456fea6226eff5836a86ab0948e2665eed92ec9520b5120f37a5e671",
+    "source_roles": {
+      "train": 42,
+      "validation": 10,
+      "test": 13
+    },
+    "selected_bundles": 30,
+    "exact_test_prediction_replays": 78,
+    "selected_validation_and_zero_candidate_replays": 30,
+    "weighting": "observed entries within replicate; equal replicates; repeated folds within specimen; equal specimens within patient; equal patients",
+    "centering": "within each observed replicate/gene before aggregation",
+    "baseline_shift": "inner and deployment errors compared on identical training observations; deployment training errors are in-sample; no causal attribution",
+    "baseline_shift_table_columns": "baseline_mse=inner_crossfit_error; final_mse=deployment_error; residual_energy=mean_squared_deployment_minus_inner_prediction",
+    "interpretation": "selected-model failure diagnosis on exposed development data; no retraining, altered predictor, or independent confirmation"
+  },
+  "historical_audit": {
+    "schema": "heir.independent_residual_moment_audit.v1",
+    "status": "passed",
+    "started_utc": "2026-10-27T02:04:20.849323+00:00",
+    "finished_utc": "2026-10-27T02:04:39.474052+00:00",
+    "script_sha256": "d9c717eaa748935730896fbe69579ac59e9722fed28b7988f974c1f46fe1945d",
+    "model_fits": 0,
+    "predictions_modified": false,
+    "runtime": {
+      "device": "cpu",
+      "torch_threads": 2,
+      "torch_interop_threads": 2,
+      "openblas_threads": 2
+    },
+    "tolerance": {
+      "atol": 1e-10,
+      "rtol": 1e-10
+    },
+    "saved_test_predictions": 78,
+    "selected_validation_models": 30,
+    "crossfit_training_instances": 42,
+    "specimen_moment_records": 1284,
+    "baseline_shift_records": 84,
+    "summary_groups": 48,
+    "checks": 1367190,
+    "receipt_sha256": "e71d849c5c33cba6258cb54b5d25e1ce52fc8486d62919ab47e1b21efe3aff7b",
+    "maximum_absolute_discrepancy": 1.4210854715202004e-13,
+    "bound_source_files": 589,
+    "verification_scope": "Historical completed reconstruction of saved arrays; publishing this receipt does not repeat that audit."
+  },
+  "reconstruction_procedure": {
+    "file": "audit_residual_moments.py",
+    "sha256": "8b51db4cf1854a9888f4d09ac8706a38678bee9725565497ca42df256e23ca09",
+    "adaptation": "Formatting, explicit input/output paths, runtime environment check, and aggregate-only verification; original arithmetic functions unchanged.",
+    "unchanged_function_ast": [
+      "sha",
+      "Audit",
+      "derived",
+      "vector_moments",
+      "mean",
+      "evaluate",
+      "aggregate",
+      "read_table",
+      "record_key",
+      "compare_record"
+    ],
+    "full_reconstruction_requires": "Original study bundles, prepared inputs, target arrays, and full diagnostic tables at receipt-bound locations. These are not included in this aggregate publication."
+  }
+}

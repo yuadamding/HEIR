@@ -1769,6 +1769,8 @@ cohort joins, gene lists, source-code evidence and the missing-input checklist;
 `literature-qualification/` retains primary links and hashed catalog responses. The next concrete
 requirements are the biological crosswalk, permitted-registration decision provenance, original
 independent annotation masks/labels, and a prespecified non-anchor outcome on qualified support.
+The v0.14 refinement below permits new independent registration and blinded annotations to
+replace unavailable historical artifacts, and separates regional from within-type requirements.
 
 ### Completed saved-residual diagnosis
 
@@ -1802,6 +1804,11 @@ multiplier is +0.108471, indicating weak overall alignment with excessive magnit
 That does not repair its negative spatial alignment. On common protein coverage, HRP's centered
 alignment remains -0.030117, centered error increases 0.136055, and its centered multiplier is
 -0.397201. Negative multipliers are diagnostic direction reversals, not validated corrections.
+
+Negative centered alignment concerns the **expression error remaining after ridge**:
+`A_c = <Y_c, Delta_c>_w - <Z_H,c, Delta_c>_w`. It does not necessarily imply negative correlation
+with true expression, biological reversal, incorrect states, or absence of useful matched-RNA
+information. A correction can amplify expression-related signal already captured by ridge.
 
 HRP centered alignment is negative in 12/13 test patients and eight of nine gene summaries using
 the original evaluator weights; CD8A is the small exception. Thus the problem is broad across
@@ -1838,3 +1845,141 @@ and `execution.json` retain the evidence. The incumbent and all earlier predicti
 unchanged. Qualified spatial measurement, non-anchor outcomes and independent within-type
 localization remain the next requirements; neither post-test shrinkage nor another architecture
 is promoted as a demonstrated solution.
+
+## Version 0.14: frozen regional measurement endpoint
+
+This revision preserves every historical prediction, selected checkpoint and negative result.
+It adds no model fit, feature extraction, prediction comparison or dataset acquisition. The
+general residual audit and basic availability search are complete and are not repeated.
+
+The [published v0.13 reproduction package](../reproducibility/v013/README.md) contains all 48
+aggregate groups, exact provenance and the independent reconstruction procedure. Its small
+aggregate-only check verifies algebra and publication hashes; it does not repeat or certify the
+historical array-level audit. Replay now resolves historical module identities by the unique
+`heir/personalized/<module>` suffix and still requires exact source bytes. Ambiguous or missing
+identities fail; relocation does not remap receipt-bound data paths.
+
+### Traceable subset and spatial limits
+
+Biopsy **982-7629** was chosen before count-quality results or prediction comparisons. Its author
+CODEX input has one region (`reg001`, section 8), both MERFISH replicates are retained, and the
+delivered common frame shows broad agreement of the two-fragment core outline. The alternative
+313-932 and 514-6760 inputs each combine three CODEX regions. This source review narrows the
+problem; visible agreement does not establish an independently qualified transform.
+
+The source describes serial spatial sections and a separate core for dissociated RNA at the
+lesion/procedure level. The exact 982 H&E/RNA file-to-core/section crosswalk and section spacing
+remain unresolved. The H&E importer retains neither the original matched filename nor an exact
+section identity; generic notebook slice-search patterns cannot establish which source was used.
+The retained registered counts contain 7,971 MERFISH-1, 5,851 MERFISH-2 and 1,810 ExSeq-1
+observations. These are assay observations, not verified physical cells matched across sections.
+
+A direct check against native transcript tables shows that all 982 RNA coordinates are mean
+transcript positions: 11,412 native MERFISH-1, 8,606 MERFISH-2 and 3,027 ExSeq-1 observations,
+with maximum coordinate discrepancies of 2.274e-12, 2.274e-12 and zero, respectively.
+They can define empirical assay occupancy, but cannot automatically serve as independent
+structural landmarks. Native DAPI/segmentation images are absent from the existing local source
+inventory. Registering these transcript centroids, or registering the two H&E images to each other,
+would not resolve independent H&E-to-RNA registration uncertainty.
+
+The endpoint therefore uses the unchanged author-registered pixel frame **conditionally**.
+Independent registration uncertainty is unknown, not zero; physical calibration, independent
+compartments, within-type identity and cell correspondence remain unqualified. New registration
+using prespecified structural images and held-out landmarks can replace missing historical logs,
+provided actual tissue correspondence is documented. Landmark error in registered pixels is
+sufficient for a pixel-regional claim; micrometre calibration is needed only for physical-scale
+claims. Arbitrary displacement stress tests are not measured uncertainty.
+
+New blinded annotation can likewise replace missing historical masks. A defensible tumor-region
+label supports performance within that annotated region, including its possible admixture; it
+does not establish within-cell-type recovery. The current unannotated regional diagnostic makes
+neither claim. Specific type and cell claims require correspondingly stronger independent labels
+and observations. Missing original logs or masks are not permanent prerequisites.
+
+### Frozen measurement contract
+
+The [configuration](../configs/personalized/regional_endpoint_982.json) binds this case's H&E-1,
+CODEX, MERFISH and ExSeq payloads, both cohort metadata tables and the spatial evidence receipt.
+Every consumed identity is verified before use and before completion. Outputs use a new directory
+outside the input tree. The protocol is written before count extraction; predictions are never
+loaded. No alternative biopsy, grid or relaxed QC is selected if this endpoint fails.
+
+| Component | Fixed rule |
+|---|---|
+| Geometry | H&E-1 100-pixel bins, tissue fraction at least 0.1; empirical occupied bins common to CODEX and all three retained RNA replicates |
+| Regional QC | In each RNA replicate, at least 5 observations and 100 counts in the fixed pool; all methods use the same resulting common rows |
+| Normalization | Sum retained `obsm/counts` using `uns/counts_var`; `log1p(10000 × gene count / 210-gene pool count)` separately in each region/replicate |
+| Primary candidates | 193 shared genes outside the 18 reference descriptors |
+| Secondary candidates | Nine historical outcomes, evaluated under the new 210-gene denominator |
+| Gene QC | At least 20 common eligible regions, 50 gene counts, detection in at least 5 regions and 10% of regions, and normalized log q90−q10 at least 0.25, in **every** retained replicate |
+| Aggregation for future scores | Score each replicate separately; equal replicates within assay/specimen, equal specimens within patient, equal patients; report assays separately |
+
+Percentiles use linear interpolation. Zero counts in occupied regions remain observed zeros;
+absent assay observations remain absent. The denominator never shrinks when an outcome fails QC.
+Raw counts are summed before normalization, with exact observation membership retained. Empirical
+occupied bins are a support proxy, not certified capture boundaries. Prespecified measurement QC
+after geometric support is permitted and identical across methods.
+
+The targeted axis audit checks **all 17 retained RNA replicates**, including the extra MERFISH
+replicate in 982: every population contains all 210 pool genes and all 193 primary candidates,
+with finite, nonnegative integer counts. This extends the earlier file-level availability audit;
+it is not evidence of detection or within-type variation in every gene. QC defines a measurable
+panel, not comprehensive biological program coverage. Gene membership in the reference descriptor
+is not automatic leakage: specimen-matched RNA remains an authorized prediction input.
+
+The fixed shared pool makes the transformations explicit but does not calibrate assay-specific
+capture efficiency or certify absolute cross-assay abundance equality. Assays remain separate
+evaluations. The nine secondary outcomes here are **not numerically comparable** to the old
+nine-gene self-normalized scores. Existing nine-output ridge weights cannot be relabeled as a
+predictor for this new endpoint.
+
+```bash
+heir cohort-endpoint --root /mnt/seagate/HnE/HTAPP_MBC \
+  --config configs/personalized/regional_endpoint_982.json \
+  --output /path/to/new-endpoint
+```
+
+The local spatial evidence sidecar must be present at its bound relative path. The command
+writes the protocol, all-region counts and membership, eligible normalized outcomes, region/gene
+QC tables, qualification flags and an artifact hash manifest. Measurement success and biological
+spatial qualification are separate fields; this workflow cannot certify independent registration.
+Evidence is retained outside the repository at
+`/storage/HE_GPT/HEIR-cohort-runs/v0140-regional-endpoint/`.
+
+### Next comparison objective, before new fits
+
+The next scientific objective is accurate **regional expression variation**. Calibration and
+spatial assignment are separate stages with the following prospective validation rules. This is
+a design, not an executed or newly authorized training study. One exposed development patient
+cannot supply patient-held-out selection or independent confirmation; the next run must first
+freeze its multi-patient training/validation/test assignments, qualified support, eligible panels,
+candidate/fit budget and independent confirmation plan.
+
+1. **Image baseline and specimen-level calibration.** Reuse the frozen full-width UNI2-h ridge
+   family, fitted only to new-endpoint training patients, with hyperparameters selected on
+   validation patients. Retain the old ridge for its original task. Add a matched-RNA summary
+   that predicts a specimen-constant, gene-specific offset in normalized-log units. Select the
+   calibration candidate with minimum validation total MSE, retaining the zero offset on ties
+   or if no strict improvement exists. Such offsets cannot change within-replicate/gene rank or
+   centered error; any improvement here is level calibration.
+2. **Spatial assignment.** Relative to the fixed calibrated baseline, accept a nonzero correction
+   only if validation centered MSE is strictly lower **and** correlation and total MSE are
+   nonworsening on the same frozen rows/genes. Among acceptable candidates choose the lowest
+   centered MSE, then lowest total MSE, then earliest prespecified candidate index. Otherwise
+   retain zero correction. Comparisons use full-precision metrics; undefined metrics reject a
+   candidate. This joint rule protects the validation objective, not unseen test performance.
+3. **Evaluation and controls.** Freeze selections before test outcomes. The primary reported
+   contrast is patient-aggregated centered MSE; also report correlation, total/mean error and
+   patient differences separately for MERFISH and ExSeq. Matched-reference controls retain
+   training-only generic reference construction with comparable reference size/type coverage.
+   Protein controls use identical support and separate measured intensity from availability/
+   coverage. Any later ligand–receptor comparison must include the same inputs with generic
+   spatial context. Regions or replicate sections do not substitute for independent patients.
+
+A small saved-history diagnostic checks the selection question without changing any checkpoint:
+among 3,000 post-zero epochs across 30 bundles, ten epochs in four bundles improved both stored
+validation correlation and centered MSE; only three epochs in one HP bundle also had nonworsening
+total MSE. **No HRP epoch** met the joint improvement rule. No originally selected checkpoint met
+it. Exact comparisons and a 1e-12 sensitivity gave the same counts. All 60 history/inventory
+files remained unchanged. These correlated development epochs and eight distinct validation
+patients do not establish a new model's held-out performance.

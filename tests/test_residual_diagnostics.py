@@ -1,6 +1,7 @@
 """Independent algebra and weighting checks for retrospective residual diagnosis."""
 
 from dataclasses import replace
+from hashlib import sha256
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from heir.personalized.residual_diagnostics import (
     MOMENTS,
     _compare_scores,
     _derived,
+    _historical_module_hash,
     _moments,
     _Sources,
     aggregate_residual_reports,
@@ -168,6 +170,46 @@ def test_source_ledger_rejects_changed_files_and_escaping_inventory(tmp_path):
         _Sources().inventory(bundle)
 
 
+@pytest.mark.parametrize(
+    "original",
+    (
+        "/old/checkout/src/heir/personalized/residual_model.py",
+        "/old/site-packages/heir/personalized/residual_model.py",
+        "src/heir/personalized/residual_model.py",
+        "heir/personalized/residual_model.py",
+    ),
+)
+def test_relocated_module_preserves_exact_source_hash(tmp_path, original):
+    path = tmp_path / "new/checkout/src/heir/personalized/residual_model.py"
+    path.parent.mkdir(parents=True)
+    content = b"# byte-identical numerical module\n"
+    path.write_bytes(content)
+    hashes = {original: sha256(content).hexdigest()}
+    expected = _historical_module_hash(path, hashes)
+    assert _Sources().bind(path, expected) == path.resolve()
+    path.write_bytes(content + b"# changed numerical source\n")
+    with pytest.raises(ValueError, match="source identity changed"):
+        _Sources().bind(path, _historical_module_hash(path, hashes))
+
+
+def test_historical_module_identity_rejects_missing_ambiguous_or_invalid_hashes():
+    current = "/current/src/heir/personalized/residual_model.py"
+    original = "/old/src/heir/personalized/residual_model.py"
+    digest = "a" * 64
+    for hashes in (
+        {},
+        {"/unrelated/residual_model.py": digest},
+        {"src/other/personalized/residual_model.py": digest},
+        {original: digest, current: digest},
+        {original: digest, "heir/personalized/residual_model.py": "b" * 64},
+    ):
+        with pytest.raises(ValueError, match="exactly one source"):
+            _historical_module_hash(current, hashes)
+    for invalid in (None, "", "a" * 63, "z" * 64):
+        with pytest.raises(ValueError, match="requires a SHA-256"):
+            _historical_module_hash(current, {original: invalid})
+
+
 def test_score_replay_requires_same_definedness_and_values():
     _compare_scores({"m": None}, {"m": None}, ("m",))
     with pytest.raises(ValueError, match="saved residual scores"):
@@ -232,6 +274,14 @@ def test_saved_study_replay_is_read_only_and_checks_selected_validation(tmp_path
     result = residual_workflow.run_residual_study(config, study)
     # The real study contract has thirteen test specimens; expand no data, use the fixture count.
     assert result["export_counts"] == {"baseline": 5, "final": 30, "transfer": 20}
+    # Relocate only the recorded checkout root; numerical bytes and data stay identical.
+    identity_path = study / "identity.json"
+    identity = json.loads(identity_path.read_text())
+    identity["source_file_sha256"] = {
+        str(tmp_path / "original-checkout/src/heir/personalized" / Path(path).name): digest
+        for path, digest in identity["source_file_sha256"].items()
+    }
+    identity_path.write_text(json.dumps(identity))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("diagnostic replay must not fit or solve")

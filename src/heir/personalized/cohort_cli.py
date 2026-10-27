@@ -690,7 +690,24 @@ def residual_diagnose_command(args):
     print(json.dumps(diagnose_residual_study(args.study, args.output), indent=2, allow_nan=False))
 
 
+def endpoint_command(args):
+    """Freeze orthogonal regional RNA measurements without model comparison."""
+    from .regional_endpoint import freeze_regional_endpoint
+
+    print(
+        json.dumps(
+            freeze_regional_endpoint(args.root, args.config, args.output),
+            indent=2,
+            allow_nan=False,
+        )
+    )
+
+
 def add_commands(commands):
+    endpoint = commands.add_parser("cohort-endpoint", help=endpoint_command.__doc__)
+    for name in ("root", "config", "output"):
+        endpoint.add_argument(f"--{name}", required=True)
+    endpoint.set_defaults(run=endpoint_command)
     diagnose = commands.add_parser(
         "cohort-residual-diagnose", help=residual_diagnose_command.__doc__
     )

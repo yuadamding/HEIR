@@ -59,6 +59,13 @@ alignment on both supports. MERFISH/ExSeq are available for 11 working-set patie
 mapping, registration provenance and independent compartment labels remain unqualified.
 Independent spatial measurement and within-type localization precede further model expansion
 or communication experiments.
+Version 0.14 adds a [frozen regional measurement protocol](docs/personalized_development.md#version-014-frozen-regional-measurement-endpoint)
+for biopsy 982-7629, with a fixed 210-gene denominator, replicate-specific count QC and
+193 primary candidates. It separates measurement qualification from unresolved independent
+registration and defines calibration versus spatial-assignment objectives before future fits.
+The [48 v0.13 aggregates and independent reconstruction procedure](reproducibility/v013/README.md)
+are now published; historical source verification supports relocated checkouts without weakening
+hash checks.
 Linear-expression exports use **schema v3**, with explicit spatial units; v2 predictions remain
 readable as nucleus/µm outputs. Canonical specimen manifests and existing joint-model bundles
 retain schema v2. The new residual prediction and bundle families have separate v1 schemas.
